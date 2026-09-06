@@ -84,9 +84,10 @@ pub struct Overrides {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// Log in to OpenRouter via the browser (PKCE) and store the key.
+    /// Show auth status and store an OpenRouter API key (prompted, hidden).
     Login {
-        /// Paste an API key directly instead of using the browser.
+        /// Key to store without prompting. Prefer the prompt or piping it on
+        /// stdin: this lands in your shell history.
         #[arg(long)]
         key: Option<String>,
     },

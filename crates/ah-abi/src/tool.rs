@@ -45,6 +45,9 @@ pub struct ToolResult {
     pub output: String,
     #[serde(default)]
     pub is_error: bool,
+    /// Unified diff of a file change, for display only; never sent to the model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<String>,
 }
 
 impl ToolResult {
@@ -52,12 +55,14 @@ impl ToolResult {
         Self {
             output: output.into(),
             is_error: false,
+            diff: None,
         }
     }
     pub fn err(output: impl Into<String>) -> Self {
         Self {
             output: output.into(),
             is_error: true,
+            diff: None,
         }
     }
 }

@@ -32,9 +32,9 @@ pub fn project_config_file() -> PathBuf {
     project_dir().join("config.toml")
 }
 
-/// Stars added from the TUI (`/star`). Config files can also define `model.starred`.
-pub fn starred_file() -> PathBuf {
-    config_dir().join("starred.toml")
+/// Favorites added from the TUI (`/favorite`). Config files can also define `model.favorites`.
+pub fn favorites_file() -> PathBuf {
+    config_dir().join("favorites.toml")
 }
 
 pub fn credentials_file() -> PathBuf {

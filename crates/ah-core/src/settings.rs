@@ -52,21 +52,21 @@ impl SettingsStack {
         s
     }
 
-    /// Defaults + user config + starred models + project config.
+    /// Defaults + user config + favorites models + project config.
     pub fn from_files() -> Result<Self> {
         let mut s = Self::new();
         let user = crate::paths::user_config_file();
         if user.is_file() {
             s.push_file(&user)?;
         }
-        let starred = crate::paths::starred_file();
-        if starred.is_file() {
-            let text = std::fs::read_to_string(&starred)?;
-            let stars = parse_toml_patch(&text)
-                .map_err(|e| Error::Config(format!("{}: {e}", starred.display())))?;
+        let path = crate::paths::favorites_file();
+        if path.is_file() {
+            let text = std::fs::read_to_string(&path)?;
+            let favorites = parse_toml_patch(&text)
+                .map_err(|e| Error::Config(format!("{}: {e}", path.display())))?;
             s.push(
-                Origin::File(starred),
-                serde_json::json!({"model": {"starred": stars}}),
+                Origin::File(path),
+                serde_json::json!({"model": {"favorites": favorites}}),
             )?;
         }
         let project = crate::paths::project_config_file();
@@ -127,14 +127,16 @@ impl SettingsStack {
     }
 }
 
-/// Overwrite the starred-models file with `stars` (`key = "model"` or
+/// Overwrite the favorites file with `favorites` (`key = "model"` or
 /// `key = { id = "model", effort = "high" }` lines).
-pub fn save_starred(stars: &std::collections::BTreeMap<String, ah_abi::Star>) -> Result<()> {
-    let path = crate::paths::starred_file();
+pub fn save_favorites(
+    favorites: &std::collections::BTreeMap<String, ah_abi::Favorite>,
+) -> Result<()> {
+    let path = crate::paths::favorites_file();
     if let Some(d) = path.parent() {
         std::fs::create_dir_all(d)?;
     }
-    let text = toml::to_string(stars).map_err(|e| Error::Config(e.to_string()))?;
+    let text = toml::to_string(favorites).map_err(|e| Error::Config(e.to_string()))?;
     std::fs::write(&path, text)?;
     Ok(())
 }

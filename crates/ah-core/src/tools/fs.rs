@@ -97,15 +97,27 @@ impl Tool for WriteFile {
         {
             return ToolResult::err(format!("mkdir {}: {e}", parent.display()));
         }
-        let existed = path.exists();
+        let before = std::fs::read_to_string(&path).ok();
         match std::fs::write(&path, content) {
-            Ok(()) => ToolResult::ok(format!(
-                "{} {} ({} bytes, {} lines)",
-                if existed { "overwrote" } else { "created" },
-                path.display(),
-                content.len(),
-                content.lines().count()
-            )),
+            Ok(()) => {
+                let mut r = ToolResult::ok(format!(
+                    "{} {} ({} bytes, {} lines)",
+                    if before.is_some() {
+                        "overwrote"
+                    } else {
+                        "created"
+                    },
+                    path.display(),
+                    content.len(),
+                    content.lines().count()
+                ));
+                r.diff = Some(super::diff::unified(
+                    before.as_deref().unwrap_or(""),
+                    content,
+                    2,
+                ));
+                r
+            }
             Err(e) => ToolResult::err(format!("{}: {e}", path.display())),
         }
     }
@@ -150,12 +162,16 @@ impl Tool for EditFile {
             Err(e) => return ToolResult::err(format!("{}: {e}", path.display())),
         };
         match apply_edit(&text, old, new, replace_all) {
-            Ok((updated, n)) => match std::fs::write(&path, updated) {
-                Ok(()) => ToolResult::ok(format!(
-                    "edited {} ({n} replacement{})",
-                    path.display(),
-                    if n == 1 { "" } else { "s" }
-                )),
+            Ok((updated, n)) => match std::fs::write(&path, &updated) {
+                Ok(()) => {
+                    let mut r = ToolResult::ok(format!(
+                        "edited {} ({n} replacement{})",
+                        path.display(),
+                        if n == 1 { "" } else { "s" }
+                    ));
+                    r.diff = Some(super::diff::unified(&text, &updated, 2));
+                    r
+                }
                 Err(e) => ToolResult::err(format!("{}: {e}", path.display())),
             },
             Err(e) => ToolResult::err(e),
@@ -236,6 +252,10 @@ mod tests {
             &ctx,
         );
         assert!(!e.is_error, "{}", e.output);
+        assert_eq!(
+            e.diff.as_deref(),
+            Some("@@ -1,3 +1,3 @@\n one\n-two\n+2\n three\n")
+        );
         assert_eq!(
             std::fs::read_to_string(dir.join("sub/f.txt")).unwrap(),
             "one\n2\nthree\n"

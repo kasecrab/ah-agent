@@ -410,7 +410,7 @@ pub fn render_status_template(fmt: &str, ctx: &StatusContext) -> String {
     };
     let out = fmt
         .replace("{model}", &ctx.model)
-        .replace("{star}", &ctx.star)
+        .replace("{favorite}", &ctx.favorite)
         .replace("{effort}", &ctx.effort)
         .replace("{tokens_in}", &ctx.usage.prompt_tokens.to_string())
         .replace("{tokens_out}", &ctx.usage.completion_tokens.to_string())

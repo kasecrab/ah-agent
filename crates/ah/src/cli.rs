@@ -1,6 +1,6 @@
 //! One-shot mode and subcommands.
 
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 
 use ah_core::abi::*;
@@ -56,6 +56,21 @@ impl AgentIo for PrintIo {
                     .collect::<String>();
                 let color = if result.is_error { "31" } else { "90" };
                 let _ = writeln!(err, "\x1b[{color}m  ↳ {first} ({duration_ms} ms)\x1b[0m");
+                if let Some(d) = &result.diff {
+                    for l in d.lines().take(40) {
+                        let c = match l.as_bytes().first() {
+                            Some(b'+') => "32",
+                            Some(b'-') => "31",
+                            Some(b'@') => "36",
+                            _ => "90",
+                        };
+                        let _ = writeln!(err, "\x1b[{c}m  {l}\x1b[0m");
+                    }
+                    let n = d.lines().count();
+                    if n > 40 {
+                        let _ = writeln!(err, "\x1b[90m  … {} more lines\x1b[0m", n - 40);
+                    }
+                }
             }
             AgentEvent::ToolDenied { call, reason } => {
                 let _ = writeln!(
@@ -278,34 +293,124 @@ pub fn subcommand(cmd: Command, o: &Overrides) -> Result<(), AnyError> {
 }
 
 fn login(o: &Overrides, key: Option<String>) -> Result<(), AnyError> {
-    if let Some(k) = key {
-        ah_core::auth::save_key(k.trim())?;
-        println!(
-            "saved key to {}",
-            ah_core::paths::credentials_file().display()
-        );
-        return Ok(());
-    }
+    use ah_core::auth::{self, Source};
     let stack = app::load_settings(o)?;
     let base = stack.settings().model.base_url.clone();
-    let key = ah_core::auth::login_pkce(
-        &base,
-        &|url| {
-            eprintln!("Open this URL to authorize ah:\n\n  {url}\n");
-            let _ = std::process::Command::new("xdg-open")
-                .arg(url)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn();
-        },
-        std::time::Duration::from_secs(300),
-    )?;
+    let settings_key = stack.settings().model.api_key.clone();
+    let creds = ah_core::paths::credentials_file();
+
+    let active = auth::resolve(settings_key.as_deref());
+    match &active {
+        Some((k, src)) => println!("logged in: {} ({})", auth::masked(k), src.describe()),
+        None => println!("not logged in"),
+    }
+
+    let interactive = std::io::stdin().is_terminal();
+    let piped = (key.is_none() && !interactive).then(|| {
+        let mut line = String::new();
+        let _ = std::io::stdin().read_line(&mut line);
+        line.trim().to_string()
+    });
+    let stored = auth::stored_key();
+    let key = match (key, piped) {
+        (Some(k), _) => k,
+        (None, Some(k)) if !k.is_empty() => k,
+        // an exported key becomes the stored one without any typing
+        _ if matches!(&active, Some((k, Source::Env)) if stored.as_deref() != Some(k.as_str())) => {
+            println!("storing the environment key so it works without the variable");
+            active.as_ref().map(|(k, _)| k.clone()).unwrap_or_default()
+        }
+        _ if !interactive => String::new(),
+        _ if active.is_some() => {
+            println!("paste a new key to replace it, or press Enter to keep it");
+            read_secret("OpenRouter API key: ")?
+        }
+        _ => {
+            println!("create a key at https://openrouter.ai/settings/keys");
+            read_secret("OpenRouter API key: ")?
+        }
+    };
+    let key = key.trim().to_string();
+    if key.is_empty() {
+        if active.is_none() {
+            return Err("no key given".into());
+        }
+        println!("kept the current key");
+        return Ok(());
+    }
+    if key.contains(char::is_whitespace) {
+        return Err("a key has no spaces; check what was pasted".into());
+    }
+
+    match auth::verify(&base, &key) {
+        Ok(info) => {
+            let label = if info.label.is_empty() {
+                String::new()
+            } else {
+                format!(" `{}`", info.label)
+            };
+            let limit = match info.limit {
+                Some(l) => format!(" of ${l:.2}"),
+                None => String::new(),
+            };
+            println!("key ok:{label} ${:.4} used{limit}", info.usage);
+        }
+        Err(ah_core::Error::Api { status: 401, .. }) => {
+            return Err("OpenRouter rejected this key (401); nothing saved".into());
+        }
+        Err(e) => println!("could not verify the key ({e}); saving anyway"),
+    }
+    auth::save_key(&key)?;
     println!(
-        "logged in; key {}… saved to {}",
-        &key[..key.len().min(12)],
-        ah_core::paths::credentials_file().display()
+        "saved {} to {} (mode 600)",
+        auth::masked(&key),
+        creds.display()
     );
     Ok(())
+}
+
+/// Read a line without echo. Falls back to a plain line when the terminal
+/// cannot enter raw mode.
+fn read_secret(prompt: &str) -> Result<String, AnyError> {
+    use crossterm::event::{Event, KeyCode, KeyModifiers, read};
+    use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+    let mut err = std::io::stderr().lock();
+    let _ = write!(err, "{prompt}");
+    let _ = err.flush();
+    if enable_raw_mode().is_err() {
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)?;
+        return Ok(line);
+    }
+    let mut buf = String::new();
+    let mut cancelled = false;
+    loop {
+        let Ok(Event::Key(k)) = read() else { continue };
+        if !k.kind.is_press() {
+            continue;
+        }
+        match (k.code, k.modifiers) {
+            (KeyCode::Enter, _) => break,
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) | (KeyCode::Esc, _) => {
+                cancelled = true;
+                break;
+            }
+            (KeyCode::Char('u'), KeyModifiers::CONTROL) => buf.clear(),
+            (KeyCode::Backspace, _) => {
+                buf.pop();
+            }
+            (KeyCode::Char(c), m) if !m.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+                buf.push(c)
+            }
+            _ => {}
+        }
+    }
+    let _ = disable_raw_mode();
+    let _ = writeln!(err);
+    if cancelled {
+        return Err("cancelled".into());
+    }
+    Ok(buf)
 }
 
 fn models(

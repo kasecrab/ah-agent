@@ -1,6 +1,7 @@
 //! Built-in tools and the registry that dispatches model tool calls.
 
 pub mod bash;
+pub mod diff;
 pub mod fs;
 
 use std::collections::HashMap;

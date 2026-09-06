@@ -1,4 +1,4 @@
-//! Fuzzy list overlay shared by `/model`, `/resume` and `/effort`.
+//! Fuzzy list overlay shared by `/model`, `/resume`, `/effort` and `/favorite`.
 
 use ah_core::models;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -12,11 +12,20 @@ use unicode_width::UnicodeWidthStr;
 use super::theme::Palette;
 
 pub enum Kind {
-    Model,
+    /// `favorite` is set when the pick defines or changes a favorite.
+    Model {
+        favorite: Option<String>,
+    },
     Session,
     /// Reasoning effort; `model` is set when chosen right after a model pick.
     Effort {
         model: Option<String>,
+        favorite: Option<String>,
+    },
+    Favorites,
+    /// Free-text name for a favorite; `rename` holds the old name.
+    Name {
+        rename: Option<String>,
     },
 }
 
@@ -33,7 +42,8 @@ pub enum Action {
     None,
     Close,
     Accept,
-    Refresh,
+    /// Ctrl-<letter> (or Delete for `d`); meaning depends on the kind.
+    Ctrl(char),
 }
 
 pub struct Picker {
@@ -87,7 +97,10 @@ impl Picker {
             (KeyCode::Esc, _) => return Action::Close,
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => return Action::Close,
             (KeyCode::Enter, _) => return Action::Accept,
-            (KeyCode::Char('r'), KeyModifiers::CONTROL) => return Action::Refresh,
+            (KeyCode::Char(c @ ('r' | 'n' | 'e' | 'd')), KeyModifiers::CONTROL) => {
+                return Action::Ctrl(c);
+            }
+            (KeyCode::Delete, _) => return Action::Ctrl('d'),
             (KeyCode::Up, _) | (KeyCode::BackTab, _) => {
                 self.selected = self.selected.saturating_sub(1)
             }
@@ -122,14 +135,14 @@ impl Picker {
     }
 
     pub fn draw(&self, f: &mut Frame, area: Rect, pal: &Palette) {
-        let compact = matches!(self.kind, Kind::Effort { .. });
+        let compact = matches!(self.kind, Kind::Effort { .. } | Kind::Name { .. });
         let width = if compact {
             48.min(area.width)
         } else {
             (area.width * 9 / 10).clamp(40, 110).min(area.width)
         };
         let height = if compact {
-            (self.rows.len() as u16 + 4).min(area.height)
+            (self.rows.len() as u16 + 4).clamp(5, area.height)
         } else {
             (area.height * 4 / 5).clamp(8, 40).min(area.height)
         };

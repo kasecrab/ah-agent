@@ -186,6 +186,59 @@ fn with_prefix(
         .collect()
 }
 
+/// Diff of an `edit_file` call's own arguments, for the moment before the
+/// result arrives (and for edits replayed from a session file).
+fn edit_preview(call: &ToolCall) -> Option<String> {
+    if call.function.name != "edit_file" {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(&call.function.arguments).ok()?;
+    let old = v.get("old_string")?.as_str()?;
+    let new = v.get("new_string")?.as_str()?;
+    let d = ah_core::tools::diff::unified(old, new, 1);
+    // hunk numbers are meaningless outside the file
+    Some(
+        d.lines()
+            .filter(|l| !l.starts_with("@@"))
+            .map(|l| format!("{l}\n"))
+            .collect(),
+    )
+}
+
+fn arg_path(call: &ToolCall) -> String {
+    serde_json::from_str::<serde_json::Value>(&call.function.arguments)
+        .ok()
+        .and_then(|v| v.get("path")?.as_str().map(str::to_string))
+        .unwrap_or_default()
+}
+
+/// Colour unified-diff lines, clipped to `width` and at most `max` lines.
+fn diff_lines(diff: &str, width: usize, max: usize, pal: &Palette) -> Vec<Line<'static>> {
+    let total = diff.lines().count();
+    let mut out = Vec::with_capacity(total.min(max) + 1);
+    for l in diff.lines().take(max) {
+        let (prefix, style) = match l.as_bytes().first() {
+            Some(b'+') => ("+", Style::default().fg(pal.diff_add)),
+            Some(b'-') => ("-", Style::default().fg(pal.diff_del)),
+            Some(b'@') => ("", pal.dim()),
+            _ => (" ", Style::default().fg(pal.tool_output)),
+        };
+        let body = if prefix.is_empty() { l } else { &l[1..] };
+        let mut text: String = body.chars().take(width.saturating_sub(4)).collect();
+        if text.chars().count() < body.chars().count() {
+            text.push('…');
+        }
+        out.push(Line::from(Span::styled(format!("  {prefix}{text}"), style)));
+    }
+    if total > max {
+        out.push(Line::from(Span::styled(
+            format!("  … {} more lines (Ctrl-T)", total - max),
+            pal.dim(),
+        )));
+    }
+    out
+}
+
 fn render(block: &Block, width: usize, view: &View, pal: &Palette) -> Vec<Line<'static>> {
     let width = width.max(4);
     let mut out: Vec<Line<'static>> = Vec::new();
@@ -244,7 +297,30 @@ fn render(block: &Block, width: usize, view: &View, pal: &Palette) -> Vec<Line<'
             duration_ms,
             expanded,
         } => {
-            let args = crate::cli::compact_args(&call.function.arguments);
+            let max = view.tool_output_lines.max(1) as usize;
+            let full = expanded.unwrap_or(view.show_tool_output);
+            // file changes show as a diff; while an edit is still running the
+            // diff comes from its arguments
+            let diff = match result {
+                Some(r) if !r.is_error => r.diff.clone(),
+                Some(_) => None,
+                None => edit_preview(call),
+            }
+            .filter(|d| !d.is_empty());
+            let args = match &diff {
+                // the diff already says what changed; keep the header to the path
+                Some(d) => {
+                    let (add, del) =
+                        d.lines()
+                            .fold((0, 0), |(a, r), l| match l.as_bytes().first() {
+                                Some(b'+') => (a + 1, r),
+                                Some(b'-') => (a, r + 1),
+                                _ => (a, r),
+                            });
+                    format!("{} +{add} -{del}", arg_path(call))
+                }
+                None => crate::cli::compact_args(&call.function.arguments),
+            };
             let status = match result {
                 None => " …".to_string(),
                 Some(r) if r.is_error => format!(" ✗ {duration_ms} ms"),
@@ -256,11 +332,17 @@ fn render(block: &Block, width: usize, view: &View, pal: &Palette) -> Vec<Line<'
                 _ => Style::default().fg(pal.tool),
             };
             out.extend(styled(wrap(&header, width), hstyle));
-            if let Some(r) = result {
+            if let Some(d) = diff {
+                out.extend(diff_lines(
+                    &d,
+                    width,
+                    if full { usize::MAX } else { max },
+                    pal,
+                ));
+            } else if let Some(r) = result {
                 let show = expanded.unwrap_or(view.show_tool_output || r.is_error);
                 let total = r.output.lines().count();
                 if show {
-                    let max = view.tool_output_lines.max(1) as usize;
                     let body: Vec<&str> = r.output.lines().take(max).collect();
                     for l in body {
                         out.extend(styled(

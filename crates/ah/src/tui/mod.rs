@@ -28,6 +28,9 @@ use crate::app::{self, AnyError, Engine, EngineCmd, UiEvent};
 use input::Editor;
 use keys::Chord;
 use picker::{Action, Kind, Picker, Row};
+
+/// Row id of the "+ new favorite" entry in the favorites picker.
+const NEW_FAVORITE: &str = "\0new";
 use theme::Palette;
 use transcript::{Block, Entry, View};
 
@@ -43,6 +46,11 @@ const COMMANDS: &[(&str, &str, bool)] = &[
     ("clear", "clear the conversation", false),
     ("config", "show config files and layers", false),
     ("effort", "set reasoning effort: /effort [level]", true),
+    (
+        "favorite",
+        "manage favorite models: /favorite [name] (Shift-Tab cycles)",
+        true,
+    ),
     ("help", "list commands and keys", false),
     ("keys", "show key bindings", false),
     (
@@ -57,9 +65,8 @@ const COMMANDS: &[(&str, &str, bool)] = &[
     ("resume", "switch to a previous session", true),
     ("session", "show session id and file", false),
     ("set", "override a setting: /set theme.accent magenta", true),
-    ("star", "star the current model: /star fast [model]", true),
     ("tools", "list tools", false),
-    ("unstar", "remove a starred model: /unstar fast", true),
+    ("unfavorite", "remove a favorite: /unfavorite fast", true),
     ("yolo", "auto-approve tool calls", false),
 ];
 
@@ -418,6 +425,7 @@ impl App {
                                 *result = Some(ToolResult {
                                     output: out,
                                     is_error: is_err,
+                                    diff: None,
                                 });
                                 break;
                             }
@@ -471,9 +479,9 @@ impl App {
             State::Tool => format!("tool:{}", self.tool_name),
         };
         let m = &self.settings().model;
-        let star = self
-            .star_index()
-            .and_then(|i| m.starred.keys().nth(i))
+        let favorite = self
+            .favorite_index()
+            .and_then(|i| m.favorites.keys().nth(i))
             .map(|k| format!("★{k}"))
             .unwrap_or_default();
         let mut ctx = StatusContext {
@@ -485,7 +493,7 @@ impl App {
             state,
             session_id: self.session_id.clone(),
             width: self.size.0,
-            star,
+            favorite,
             effort: m.effort().unwrap_or("").to_string(),
             rendered: String::new(),
         };
@@ -587,15 +595,15 @@ impl App {
                     Ok(list) => {
                         self.catalogue = Some(list);
                         if let Some(p) = &self.picker
-                            && matches!(p.kind, Kind::Model)
+                            && let Kind::Model { favorite } = &p.kind
                         {
-                            let q = p.query.clone();
-                            self.open_model_picker(&q, false);
+                            let (q, fav) = (p.query.clone(), favorite.clone());
+                            self.open_model_picker(&q, fav, false);
                         }
                     }
                     Err(e) => {
                         if let Some(p) = self.picker.as_mut()
-                            && matches!(p.kind, Kind::Model)
+                            && matches!(p.kind, Kind::Model { .. })
                         {
                             p.loading = false;
                             p.error = Some(format!("fetch failed: {e}"));
@@ -655,8 +663,8 @@ impl App {
         self.dirty = true;
     }
 
-    /// Fill the selected command into the editor; with `submit`, run it when
-    /// it needs no arguments.
+    /// Enter runs the highlighted command (arguments are always optional);
+    /// Tab fills it in so arguments can follow.
     fn accept_completion(&mut self, submit: bool) {
         let Some(c) = self.completion.take() else {
             return;
@@ -664,21 +672,20 @@ impl App {
         let Some((name, _, takes_args)) = c.items.get(c.selected).cloned() else {
             return;
         };
-        // Enter runs the command when it takes no arguments, or when the user
-        // typed the whole name already (the arguments are optional).
-        let typed_full = self.editor.text.trim() == format!("/{name}");
         self.editor.clear();
-        if submit && (!takes_args || typed_full) {
+        if submit {
             self.slash(&name);
-        } else {
+        } else if takes_args {
             self.editor.insert_str(&format!("/{name} "));
+        } else {
+            self.editor.insert_str(&format!("/{name}"));
         }
         self.dirty = true;
     }
 
     // ---- pickers ---------------------------------------------------------
 
-    fn open_model_picker(&mut self, query: &str, force_refresh: bool) {
+    fn open_model_picker(&mut self, query: &str, favorite: Option<String>, force_refresh: bool) {
         let mut stale = force_refresh;
         if self.catalogue.is_none() {
             match models::load_cached() {
@@ -690,7 +697,14 @@ impl App {
             }
         }
         let pal = &self.pal;
-        let current = self.settings().model.id.clone();
+        let m = &self.settings().model;
+        let current = m.id.clone();
+        // start on the model the favorite already points at, else the current one
+        let preselect = favorite
+            .as_ref()
+            .and_then(|k| m.favorites.get(k))
+            .map(|f| f.id().to_string())
+            .unwrap_or_else(|| current.clone());
         let rows: Vec<Row> = self
             .catalogue
             .as_deref()
@@ -728,12 +742,18 @@ impl App {
                 }
             })
             .collect();
-        let mut p = Picker::new(
-            Kind::Model,
-            "model · Enter select · Esc close · Ctrl-R refresh",
-            query,
-            rows,
-        );
+        let title = match &favorite {
+            Some(k) => format!("model for ★{k} · Enter select · Esc close · Ctrl-R refresh"),
+            None => "model · Enter select · Esc close · Ctrl-R refresh".to_string(),
+        };
+        let mut p = Picker::new(Kind::Model { favorite }, &title, query, rows);
+        if query.is_empty() {
+            p.selected = p
+                .results
+                .iter()
+                .position(|&i| p.rows[i].id == preselect)
+                .unwrap_or(0);
+        }
         p.hint = "$/M tokens in/out".into();
         if stale {
             p.loading = true;
@@ -755,8 +775,15 @@ impl App {
         self.dirty = true;
     }
 
-    fn open_effort_picker(&mut self, model: Option<String>) {
-        let current = self.settings().model.effort().unwrap_or("off").to_string();
+    fn open_effort_picker(&mut self, model: Option<String>, favorite: Option<String>) {
+        let m = &self.settings().model;
+        let current = favorite
+            .as_ref()
+            .and_then(|k| m.favorites.get(k))
+            .and_then(|f| f.effort())
+            .or(m.effort())
+            .unwrap_or("off")
+            .to_string();
         let pal = &self.pal;
         let rows: Vec<Row> = picker::EFFORTS
             .iter()
@@ -771,15 +798,72 @@ impl App {
                 cols: vec![(format!("{desc:<24}"), pal.dim())],
             })
             .collect();
-        let title = match &model {
-            Some(m) => format!("reasoning effort for {m}"),
-            None => "reasoning effort".to_string(),
+        let title = match (&model, &favorite) {
+            (Some(m), Some(k)) => format!("effort for ★{k} ({m})"),
+            (Some(m), None) => format!("reasoning effort for {m}"),
+            (None, _) => "reasoning effort".to_string(),
         };
-        let mut p = Picker::new(Kind::Effort { model }, &title, "", rows);
+        let mut p = Picker::new(Kind::Effort { model, favorite }, &title, "", rows);
         p.selected = picker::EFFORTS
             .iter()
             .position(|(n, _)| *n == current)
             .unwrap_or(0);
+        self.picker = Some(p);
+        self.dirty = true;
+    }
+
+    fn open_favorites_picker(&mut self) {
+        let pal = &self.pal;
+        let cur = self.favorite_index();
+        let mut rows: Vec<Row> = self
+            .settings()
+            .model
+            .favorites
+            .iter()
+            .enumerate()
+            .map(|(i, (k, f))| Row {
+                id: k.clone(),
+                search: format!("{k} {}", f.id()),
+                label: if Some(i) == cur {
+                    format!("★ {k} •")
+                } else {
+                    format!("★ {k}")
+                },
+                cols: vec![
+                    (format!("{:<44.44} ", f.id()), pal.dim()),
+                    (
+                        format!("{:<8}", f.effort().unwrap_or("")),
+                        Style::default().fg(pal.reasoning),
+                    ),
+                ],
+            })
+            .collect();
+        rows.push(Row {
+            id: NEW_FAVORITE.into(),
+            search: "new favorite".into(),
+            label: "+ new favorite…".into(),
+            cols: Vec::new(),
+        });
+        let mut p = Picker::new(
+            Kind::Favorites,
+            "favorites · Enter use · ^N new · ^E model · ^R rename · ^D remove",
+            "",
+            rows,
+        );
+        p.hint = "Shift-Tab cycles favorites in this order".into();
+        p.selected = cur.unwrap_or(0);
+        self.picker = Some(p);
+        self.dirty = true;
+    }
+
+    fn open_name_picker(&mut self, rename: Option<String>) {
+        let title = match &rename {
+            Some(k) => format!("rename ★{k}"),
+            None => "new favorite".to_string(),
+        };
+        let query = rename.clone().unwrap_or_default();
+        let mut p = Picker::new(Kind::Name { rename }, &title, &query, Vec::new());
+        p.hint = "name it (fast, pro, …); Enter picks the model".into();
         self.picker = Some(p);
         self.dirty = true;
     }
@@ -839,27 +923,19 @@ impl App {
         match p.key(k) {
             Action::None => {}
             Action::Close => self.picker = None,
-            Action::Refresh => {
-                if matches!(p.kind, Kind::Model) {
-                    let q = p.query.clone();
-                    self.open_model_picker(&q, true);
-                }
-            }
+            Action::Ctrl(c) => self.picker_ctrl(c),
             Action::Accept => {
                 let chosen = p.current().map(|r| r.id.clone());
                 let Some(p) = self.picker.take() else { return };
+                let query = p.query.trim().to_string();
                 match p.kind {
-                    Kind::Model => {
+                    Kind::Model { favorite } => {
                         // no match: accept a raw id
-                        let q = p.query.trim();
-                        let id = chosen
-                            .or_else(|| (!q.is_empty() && q.contains('/')).then(|| q.to_string()));
+                        let id = chosen.or_else(|| {
+                            (!query.is_empty() && query.contains('/')).then(|| query.clone())
+                        });
                         if let Some(id) = id {
-                            if self.model_reasons(&id) {
-                                self.open_effort_picker(Some(id));
-                            } else {
-                                self.set_model(&id, None);
-                            }
+                            self.pick_model(&id, favorite);
                         }
                     }
                     Kind::Session => {
@@ -867,15 +943,78 @@ impl App {
                             self.resume(&id);
                         }
                     }
-                    Kind::Effort { model } => {
+                    Kind::Effort { model, favorite } => {
                         if let Some(level) = chosen {
-                            match model {
-                                Some(id) => self.set_model(&id, Some(&level)),
-                                None => self.set_effort(&level),
+                            match (model, favorite) {
+                                (Some(id), Some(name)) => {
+                                    self.save_favorite(&name, &id, Some(&level))
+                                }
+                                (Some(id), None) => self.set_model(&id, Some(&level)),
+                                (None, _) => self.set_effort(&level),
                             }
                         }
                     }
+                    Kind::Favorites => match chosen.as_deref() {
+                        Some(NEW_FAVORITE) => self.open_name_picker(None),
+                        Some(name) => self.use_favorite(name),
+                        None => {}
+                    },
+                    Kind::Name { rename } => {
+                        if query.is_empty() || query.starts_with('/') {
+                            self.open_name_picker(rename);
+                            return;
+                        }
+                        match rename {
+                            Some(old) => self.rename_favorite(&old, &query),
+                            None => self.open_model_picker("", Some(query), false),
+                        }
+                    }
                 }
+            }
+        }
+    }
+
+    fn picker_ctrl(&mut self, c: char) {
+        let Some(p) = self.picker.as_ref() else {
+            return;
+        };
+        match (&p.kind, c) {
+            (Kind::Model { favorite }, 'r') => {
+                let (q, fav) = (p.query.clone(), favorite.clone());
+                self.open_model_picker(&q, fav, true);
+            }
+            (Kind::Favorites, 'n') => self.open_name_picker(None),
+            (Kind::Favorites, c) => {
+                let Some(name) = p
+                    .current()
+                    .map(|r| r.id.clone())
+                    .filter(|n| n != NEW_FAVORITE)
+                else {
+                    return;
+                };
+                match c {
+                    'e' => self.open_model_picker("", Some(name), false),
+                    'r' => self.open_name_picker(Some(name)),
+                    'd' => {
+                        self.unfavorite(&name);
+                        self.open_favorites_picker();
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A model was chosen: ask for the effort when it reasons, else apply.
+    fn pick_model(&mut self, id: &str, favorite: Option<String>) {
+        if self.model_reasons(id) {
+            self.open_effort_picker(Some(id.to_string()), favorite);
+        } else {
+            match favorite {
+                // pin "off" so cycling to it never inherits another model's effort
+                Some(name) => self.save_favorite(&name, id, Some("off")),
+                None => self.set_model(id, None),
             }
         }
     }
@@ -918,16 +1057,16 @@ impl App {
             patch["model"]["reasoning"] = Self::effort_patch(e);
         }
         self.apply_patch(Origin::Runtime("slash".into()), patch);
-        let star = self
-            .star_index()
-            .and_then(|i| self.settings().model.starred.keys().nth(i).cloned())
+        let favorite = self
+            .favorite_index()
+            .and_then(|i| self.settings().model.favorites.keys().nth(i).cloned())
             .map(|k| format!(" ★{k}"))
             .unwrap_or_default();
         let effort = match self.settings().model.effort() {
             Some(e) => format!(" ({e})"),
             None => String::new(),
         };
-        self.push(Block::Notice(format!("model → {id}{effort}{star}")));
+        self.push(Block::Notice(format!("model → {id}{effort}{favorite}")));
         self.request_status();
     }
 
@@ -952,121 +1091,109 @@ impl App {
         self.request_status();
     }
 
-    /// Index into `model.starred` (key order) of the star matching the current
-    /// model and effort.
-    fn star_index(&self) -> Option<usize> {
+    // ---- favorites -------------------------------------------------------
+
+    /// Index into `model.favorites` (key order) of the entry matching the
+    /// current model and effort.
+    fn favorite_index(&self) -> Option<usize> {
         let m = &self.settings().model;
         let effort = m.effort().unwrap_or("off");
         let exact = m
-            .starred
+            .favorites
             .values()
-            .position(|s| s.id() == m.id && s.effort().is_none_or(|e| e == effort));
-        exact.or_else(|| m.starred.values().position(|s| s.id() == m.id))
+            .position(|f| f.id() == m.id && f.effort().is_none_or(|e| e == effort));
+        exact.or_else(|| m.favorites.values().position(|f| f.id() == m.id))
     }
 
     fn cycle_model(&mut self) {
-        let stars = &self.settings().model.starred;
-        if stars.is_empty() {
-            self.push(Block::Notice(
-                "no starred models: /star fast [model], or model.starred in config.toml".into(),
-            ));
+        let favorites = &self.settings().model.favorites;
+        if favorites.is_empty() {
+            self.push(Block::Notice("no favorites yet: /favorite adds one".into()));
             return;
         }
         let next = self
-            .star_index()
-            .map(|i| (i + 1) % stars.len())
+            .favorite_index()
+            .map(|i| (i + 1) % favorites.len())
             .unwrap_or(0);
-        let (_, star) = stars.iter().nth(next).expect("index in range");
-        let (id, effort) = (star.id().to_string(), star.effort().map(str::to_string));
+        let (_, f) = favorites.iter().nth(next).expect("index in range");
+        let (id, effort) = (f.id().to_string(), f.effort().map(str::to_string));
         self.set_model(&id, effort.as_deref());
     }
 
-    fn star(&mut self, args: &str) {
-        let mut parts = args.split_whitespace();
-        let Some(key) = parts.next() else {
-            let stars = &self.settings().model.starred;
-            if stars.is_empty() {
-                self.push(Block::Notice(
-                    "no starred models. /star <key> [model] stars the current model".into(),
-                ));
-                return;
-            }
-            let cur = self.star_index();
-            let s = stars
-                .iter()
-                .enumerate()
-                .map(|(i, (k, st))| {
-                    format!(
-                        "{} {k}: {}{}",
-                        if Some(i) == cur { "★" } else { " " },
-                        st.id(),
-                        st.effort().map(|e| format!(" ({e})")).unwrap_or_default()
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            self.push(Block::Notice(format!("starred (Shift-Tab cycles):\n{s}")));
-            return;
-        };
-        let key = key.to_string();
-        let m = &self.settings().model;
-        let id = parts
-            .next()
-            .map(str::to_string)
-            .unwrap_or_else(|| m.id.clone());
-        let effort = if parts.next().is_some() {
-            None
-        } else if id == m.id {
-            Some(m.effort().unwrap_or("off").to_string())
-        } else {
-            None
-        };
-        let star = match effort {
-            Some(e) => Star::Full {
-                id: id.clone(),
-                effort: Some(e),
+    fn use_favorite(&mut self, name: &str) {
+        if let Some(f) = self.settings().model.favorites.get(name).cloned() {
+            self.set_model(f.id(), f.effort());
+        }
+    }
+
+    /// Store `name = model[/effort]` in favorites.toml and switch to it.
+    fn save_favorite(&mut self, name: &str, id: &str, effort: Option<&str>) {
+        let fav = match effort {
+            Some(e) => Favorite::Full {
+                id: id.to_string(),
+                effort: Some(e.to_string()),
             },
-            None => Star::Id(id.clone()),
+            None => Favorite::Id(id.to_string()),
         };
-        let mut file = self.load_starred_file();
-        file.insert(key.clone(), star.clone());
-        if let Err(e) = ah_core::settings::save_starred(&file) {
-            self.push(Block::Error(format!("could not save stars: {e}")));
+        let mut file = self.load_favorites_file();
+        file.insert(name.to_string(), fav.clone());
+        if let Err(e) = ah_core::settings::save_favorites(&file) {
+            self.push(Block::Error(format!("could not save favorites: {e}")));
         }
         self.apply_patch(
             Origin::Runtime("slash".into()),
-            serde_json::json!({"model": {"starred": {&key: star}}}),
+            serde_json::json!({"model": {"favorites": {name: fav}}}),
         );
-        self.push(Block::Notice(format!("★ {key} → {id}")));
+        self.set_model(id, effort);
+    }
+
+    fn rename_favorite(&mut self, old: &str, new: &str) {
+        if old == new {
+            return;
+        }
+        let Some(fav) = self.settings().model.favorites.get(old).cloned() else {
+            return;
+        };
+        let mut file = self.load_favorites_file();
+        file.remove(old);
+        file.insert(new.to_string(), fav.clone());
+        if let Err(e) = ah_core::settings::save_favorites(&file) {
+            self.push(Block::Error(format!("could not save favorites: {e}")));
+        }
+        self.apply_patch(
+            Origin::Runtime("slash".into()),
+            serde_json::json!({"model": {"favorites": {old: null, new: fav}}}),
+        );
+        self.push(Block::Notice(format!("★ {old} → ★ {new}")));
         self.request_status();
     }
 
-    fn unstar(&mut self, key: &str) {
-        let key = key.trim();
-        if key.is_empty() || !self.settings().model.starred.contains_key(key) {
-            self.push(Block::Notice(format!("no star named `{key}`")));
+    fn unfavorite(&mut self, name: &str) {
+        let name = name.trim();
+        if name.is_empty() || !self.settings().model.favorites.contains_key(name) {
+            self.push(Block::Notice(format!("no favorite named `{name}`")));
             return;
         }
-        let mut file = self.load_starred_file();
-        if file.remove(key).is_some() {
-            if let Err(e) = ah_core::settings::save_starred(&file) {
-                self.push(Block::Error(format!("could not save stars: {e}")));
+        let mut file = self.load_favorites_file();
+        if file.remove(name).is_some() {
+            if let Err(e) = ah_core::settings::save_favorites(&file) {
+                self.push(Block::Error(format!("could not save favorites: {e}")));
             }
         } else {
             self.push(Block::Notice(format!(
-                "{key} comes from a config file; removed for this session only"
+                "{name} comes from a config file; removed for this session only"
             )));
         }
         self.apply_patch(
             Origin::Runtime("slash".into()),
-            serde_json::json!({"model": {"starred": {key: null}}}),
+            serde_json::json!({"model": {"favorites": {name: null}}}),
         );
-        self.push(Block::Notice(format!("unstarred {key}")));
+        self.push(Block::Notice(format!("removed ★ {name}")));
         self.request_status();
     }
 
-    fn load_starred_file(&self) -> std::collections::BTreeMap<String, Star> {
-        std::fs::read_to_string(ah_core::paths::starred_file())
+    fn load_favorites_file(&self) -> std::collections::BTreeMap<String, Favorite> {
+        std::fs::read_to_string(ah_core::paths::favorites_file())
             .ok()
             .and_then(|t| ah_core::settings::parse_toml_patch(&t).ok())
             .and_then(|v| serde_json::from_value(v).ok())
@@ -1557,33 +1684,39 @@ impl App {
                 for (p, c) in &self.plugin_commands {
                     s.push_str(&format!("\n  /{:<10} {} ({p})", c.name, c.description));
                 }
-                s.push_str("\nkeys: Enter send · Shift/Alt-Enter newline · Esc cancel · Shift-Tab next starred model · Ctrl-T tool output · Ctrl-R reasoning · PgUp/PgDn scroll · Ctrl-C quit");
+                s.push_str("\nkeys: Enter send · Shift/Alt-Enter newline · Esc cancel · Shift-Tab next favorites model · Ctrl-T tool output · Ctrl-R reasoning · PgUp/PgDn scroll · Ctrl-C quit");
                 self.push(Block::Notice(s));
             }
             "model" | "models" => {
                 if args == "refresh" {
-                    self.open_model_picker("", true);
+                    self.open_model_picker("", None, true);
                 } else if args.is_empty() {
-                    self.open_model_picker("", false);
-                } else if let Some(star) = self.settings().model.starred.get(args).cloned() {
-                    self.set_model(star.id(), star.effort());
+                    self.open_model_picker("", None, false);
+                } else if self.settings().model.favorites.contains_key(args) {
+                    self.use_favorite(args);
                 } else if self.catalogue_has(args) {
-                    if self.model_reasons(args) {
-                        self.open_effort_picker(Some(args.to_string()));
-                    } else {
-                        self.set_model(args, None);
-                    }
+                    self.pick_model(args, None);
                 } else {
-                    self.open_model_picker(args, false);
+                    self.open_model_picker(args, None, false);
                 }
             }
             "effort" => {
                 if args.is_empty() {
-                    self.open_effort_picker(None);
+                    self.open_effort_picker(None, None);
                 } else {
                     self.set_effort(args);
                 }
             }
+            "favorite" | "fav" => {
+                if args.is_empty() {
+                    self.open_favorites_picker();
+                } else if self.settings().model.favorites.contains_key(args) {
+                    self.use_favorite(args);
+                } else {
+                    self.open_model_picker("", Some(args.to_string()), false);
+                }
+            }
+            "unfavorite" | "unfav" => self.unfavorite(args),
             "resume" => {
                 if args.is_empty() {
                     self.open_session_picker("");
@@ -1593,8 +1726,6 @@ impl App {
                     self.open_session_picker(args);
                 }
             }
-            "star" => self.star(args),
-            "unstar" => self.unstar(args),
             "clear" => {
                 self.entries.clear();
                 self.usage = Usage::default();
@@ -1629,7 +1760,7 @@ impl App {
             "keys" => {
                 let k = &self.settings().keys;
                 let s = format!(
-                    "submit {:?}\nnewline {:?}\ncancel {:?}\nquit {:?}\nscroll {:?}/{:?} page {:?}/{:?}\ntools {:?} reasoning {:?} starred model {:?}",
+                    "submit {:?}\nnewline {:?}\ncancel {:?}\nquit {:?}\nscroll {:?}/{:?} page {:?}/{:?}\ntools {:?} reasoning {:?} favorites model {:?}",
                     k.submit,
                     k.newline,
                     k.cancel,

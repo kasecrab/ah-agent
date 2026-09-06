@@ -65,24 +65,6 @@ impl OpenRouter {
         }
         Ok(serde_json::from_str(&body)?)
     }
-
-    /// POST JSON without auth requirement override (used by the PKCE exchange).
-    pub fn post_json_unauthenticated(base_url: &str, path: &str, body: &Value) -> Result<Value> {
-        let mut resp = ureq::post(format!("{}{}", base_url.trim_end_matches('/'), path))
-            .config()
-            .http_status_as_error(false)
-            .build()
-            .send_json(body)?;
-        let status = resp.status().as_u16();
-        let text = resp.body_mut().read_to_string()?;
-        if !(200..300).contains(&status) {
-            return Err(Error::Api {
-                status,
-                message: excerpt(&text),
-            });
-        }
-        Ok(serde_json::from_str(&text)?)
-    }
 }
 
 fn excerpt(s: &str) -> String {

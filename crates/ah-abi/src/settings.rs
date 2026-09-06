@@ -36,15 +36,15 @@ pub struct ModelSettings {
     pub base_url: String,
     /// Optional API key override. Prefer `OPENROUTER_API_KEY` or `ah login`.
     pub api_key: Option<String>,
-    /// Named favourites, cycled with `keys.cycle_model`:
+    /// Named favorites, cycled with `keys.cycle_model` and managed by `/favorite`:
     /// `fast = "deepseek/deepseek-v4-flash-0731"` or
     /// `smart = { id = "anthropic/claude-sonnet-4.5", effort = "high" }`.
-    pub starred: BTreeMap<String, Star>,
+    pub favorites: BTreeMap<String, Favorite>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
-pub enum Star {
+pub enum Favorite {
     Id(String),
     Full {
         id: String,
@@ -53,18 +53,18 @@ pub enum Star {
     },
 }
 
-impl Star {
+impl Favorite {
     pub fn id(&self) -> &str {
         match self {
-            Star::Id(id) | Star::Full { id, .. } => id,
+            Favorite::Id(id) | Favorite::Full { id, .. } => id,
         }
     }
 
-    /// Reasoning effort, if the star pins one. `"off"` disables reasoning.
+    /// Reasoning effort, if the favorite pins one. `"off"` disables reasoning.
     pub fn effort(&self) -> Option<&str> {
         match self {
-            Star::Id(_) => None,
-            Star::Full { effort, .. } => effort.as_deref(),
+            Favorite::Id(_) => None,
+            Favorite::Full { effort, .. } => effort.as_deref(),
         }
     }
 }
@@ -90,7 +90,7 @@ impl Default for ModelSettings {
             provider: None,
             base_url: String::from("https://openrouter.ai/api/v1"),
             api_key: None,
-            starred: BTreeMap::new(),
+            favorites: BTreeMap::new(),
         }
     }
 }
@@ -154,6 +154,9 @@ pub struct Theme {
     pub syn_number: String,
     pub syn_type: String,
     pub syn_function: String,
+    /// Added and removed lines in file diffs.
+    pub diff_add: String,
+    pub diff_del: String,
     pub border_style: BorderStyle,
     pub user_prefix: String,
     pub assistant_prefix: String,
@@ -195,6 +198,8 @@ impl Default for Theme {
             syn_number: "yellow".into(),
             syn_type: "cyan".into(),
             syn_function: "blue".into(),
+            diff_add: "green".into(),
+            diff_del: "red".into(),
             border_style: BorderStyle::Lines,
             user_prefix: "> ".into(),
             assistant_prefix: "".into(),
@@ -294,7 +299,7 @@ pub struct Keys {
     pub clear: Vec<String>,
     pub toggle_tools: Vec<String>,
     pub toggle_reasoning: Vec<String>,
-    /// Switch to the next starred model.
+    /// Switch to the next favorite model.
     pub cycle_model: Vec<String>,
     pub history_prev: Vec<String>,
     pub history_next: Vec<String>,
@@ -390,7 +395,7 @@ impl Default for PluginSettings {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StatusLine {
-    /// Template. Placeholders: `{model} {star} {effort} {tokens_in} {tokens_out}
+    /// Template. Placeholders: `{model} {favorite} {effort} {tokens_in} {tokens_out}
     /// {cost} {cwd} {git} {plugins} {state} {session}`.
     pub format: String,
 }
@@ -399,7 +404,7 @@ impl Default for StatusLine {
     fn default() -> Self {
         Self {
             format: String::from(
-                " {model} {effort} │ ↑{tokens_in} ↓{tokens_out} ${cost} │ {cwd} {git}",
+                " {favorite} {model} {effort} │ ↑{tokens_in} ↓{tokens_out} ${cost} │ {cwd} {git}",
             ),
         }
     }
@@ -484,18 +489,18 @@ mod tests {
     }
 
     #[test]
-    fn star_accepts_string_or_table() {
-        let v = json!({"model": {"starred": {
+    fn favorite_accepts_string_or_table() {
+        let v = json!({"model": {"favorites": {
             "fast": "deepseek/deepseek-v4-flash-0731",
             "smart": {"id": "anthropic/claude-sonnet-4.5", "effort": "high"}
         }}});
         let s: Settings = serde_json::from_value(v).unwrap();
         assert_eq!(
-            s.model.starred["fast"].id(),
+            s.model.favorites["fast"].id(),
             "deepseek/deepseek-v4-flash-0731"
         );
-        assert_eq!(s.model.starred["fast"].effort(), None);
-        assert_eq!(s.model.starred["smart"].effort(), Some("high"));
+        assert_eq!(s.model.favorites["fast"].effort(), None);
+        assert_eq!(s.model.favorites["smart"].effort(), Some("high"));
         let m = ModelSettings {
             reasoning: Some(json!({"effort": "low"})),
             ..Default::default()
