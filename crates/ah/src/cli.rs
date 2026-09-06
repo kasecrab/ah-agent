@@ -284,7 +284,11 @@ pub fn subcommand(cmd: Command, o: &Overrides) -> Result<(), AnyError> {
             for s in ah_core::session::summaries() {
                 println!(
                     "{}\t{:>4} msg\t{}\t{}\t{}",
-                    s.id, s.messages, s.model, s.cwd, s.title
+                    s.id,
+                    s.messages,
+                    s.model,
+                    s.cwd,
+                    s.name.as_deref().unwrap_or(&s.title)
                 );
             }
             Ok(())

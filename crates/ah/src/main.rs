@@ -31,8 +31,8 @@ pub struct Cli {
     #[arg(long)]
     pub json: bool,
 
-    /// Resume a session by id (default: latest).
-    #[arg(short, long, value_name = "ID", num_args = 0..=1, default_missing_value = "")]
+    /// Resume a session by id or name (default: latest).
+    #[arg(short, long, value_name = "ID|NAME", num_args = 0..=1, default_missing_value = "")]
     pub resume: Option<String>,
 
     /// Force the TUI even when a prompt is given (prompt is submitted first).

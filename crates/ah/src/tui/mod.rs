@@ -67,6 +67,11 @@ const COMMANDS: &[(&str, &str, bool)] = &[
     ("quit", "exit", false),
     ("reasoning", "toggle reasoning display", false),
     ("reload", "re-read config and reload plugins", false),
+    (
+        "rename",
+        "name this session; /resume finds it by name",
+        true,
+    ),
     ("resume", "switch to a previous session", true),
     ("session", "show session id and file", false),
     ("set", "override a setting: /set theme.accent magenta", true),
@@ -181,6 +186,7 @@ struct App {
     git_branch: String,
     cwd: String,
     session_id: String,
+    session_name: Option<String>,
     completion: Option<Completion>,
     picker: Option<Picker>,
     usage_pane: Option<usage::Pane>,
@@ -245,6 +251,7 @@ fn run_inner(
     let (perm_tx, perm_rx) = mpsc::channel::<bool>();
     let cancel = engine.cancel.clone();
     let session_id = engine.session.id.clone();
+    let session_name = engine.session.name.clone();
     let resumed: Vec<Message> = engine.session.messages.clone();
 
     // Engine thread.
@@ -301,6 +308,7 @@ fn run_inner(
         git_branch: ah_core::plugins::git_branch(&cwd),
         cwd: cwd.display().to_string(),
         session_id,
+        session_name,
         completion: None,
         picker: None,
         usage_pane: None,
@@ -498,9 +506,12 @@ impl App {
             }
         }
         if !msgs.is_empty() {
+            let what = match &self.session_name {
+                Some(n) => format!("\u{201c}{n}\u{201d}"),
+                None => format!("session {}", self.session_id),
+            };
             self.push(Block::Notice(format!(
-                "resumed session {} ({} messages)",
-                self.session_id,
+                "resumed {what} ({} messages)",
                 msgs.len()
             )));
         }
@@ -815,6 +826,7 @@ impl App {
                     m.context_length.to_string()
                 };
                 Row {
+                    style: None,
                     id: m.id.clone(),
                     search: format!("{} {}", m.id, m.name),
                     label: if m.id == current {
@@ -886,6 +898,7 @@ impl App {
         let rows: Vec<Row> = picker::EFFORTS
             .iter()
             .map(|(name, desc)| Row {
+                style: None,
                 id: name.to_string(),
                 search: name.to_string(),
                 label: if *name == current {
@@ -920,6 +933,7 @@ impl App {
             .iter()
             .enumerate()
             .map(|(i, (k, f))| Row {
+                style: None,
                 id: k.clone(),
                 search: format!("{k} {}", f.id()),
                 label: if Some(i) == cur {
@@ -937,6 +951,7 @@ impl App {
             })
             .collect();
         rows.push(Row {
+            style: None,
             id: NEW_FAVORITE.into(),
             search: "new favorite".into(),
             label: "+ new favorite…".into(),
@@ -967,6 +982,14 @@ impl App {
         self.dirty = true;
     }
 
+    fn open_session_name_picker(&mut self) {
+        let query = self.session_name.clone().unwrap_or_default();
+        let mut p = Picker::new(Kind::SessionName, "rename session", &query, Vec::new());
+        p.hint = "Enter saves; empty removes the name".into();
+        self.picker = Some(p);
+        self.dirty = true;
+    }
+
     fn open_session_picker(&mut self, query: &str) {
         let pal = &self.pal;
         let rows: Vec<Row> = ah_core::session::summaries()
@@ -978,15 +1001,20 @@ impl App {
                 } else {
                     s.title.clone()
                 };
+                let (label, style) = match &s.name {
+                    Some(n) => (n.clone(), Some(Style::default().fg(pal.accent))),
+                    None => (title.clone(), None),
+                };
                 let short_cwd = std::path::Path::new(&s.cwd)
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default();
                 let model = s.model.rsplit('/').next().unwrap_or(&s.model).to_string();
                 Row {
+                    style,
                     id: s.id.clone(),
-                    search: format!("{} {} {} {}", title, short_cwd, model, s.id),
-                    label: title,
+                    search: format!("{label} {title} {short_cwd} {model} {}", s.id),
+                    label,
                     cols: vec![
                         (format!("{:>8} ", picker::age(s.started_ms)), pal.dim()),
                         (format!("{:>4} msg ", s.messages), pal.dim()),
@@ -1058,6 +1086,7 @@ impl App {
                         Some(name) => self.use_favorite(name),
                         None => {}
                     },
+                    Kind::SessionName => self.rename_session(&query),
                     Kind::Name { rename } => {
                         if query.is_empty() || query.starts_with('/') {
                             self.open_name_picker(rename);
@@ -1340,6 +1369,14 @@ impl App {
             .unwrap_or_default()
     }
 
+    fn rename_session(&mut self, name: &str) {
+        let name = name.trim();
+        if name.is_empty() && self.session_name.is_none() {
+            return;
+        }
+        let _ = self.tx.send(EngineCmd::Rename(name.to_string()));
+    }
+
     fn resume(&mut self, id: &str) {
         if self.busy {
             self.push(Block::Notice("busy; wait or press Esc to cancel".into()));
@@ -1421,11 +1458,20 @@ impl App {
                     self.dirty = true;
                 }
             }
-            UiEvent::Resumed { id, messages } => {
+            UiEvent::Renamed(name) => {
+                self.session_name = name;
+                let s = match &self.session_name {
+                    Some(n) => format!("session named \u{201c}{n}\u{201d}"),
+                    None => "session name removed".into(),
+                };
+                self.push(Block::Notice(s));
+            }
+            UiEvent::Resumed { id, name, messages } => {
                 self.entries.clear();
                 self.usage = Usage::default();
                 self.stats = Stats::default();
                 self.session_id = id;
+                self.session_name = name;
                 self.follow = true;
                 self.load_history(&messages);
                 self.request_status();
@@ -1928,11 +1974,18 @@ impl App {
                 self.usage_pane = Some(usage::Pane::new());
                 self.fetch_usage();
             }
+            "rename" => {
+                if args.is_empty() {
+                    self.open_session_name_picker();
+                } else {
+                    self.rename_session(args);
+                }
+            }
             "resume" => {
                 if args.is_empty() {
                     self.open_session_picker("");
-                } else if ah_core::session::list().iter().any(|(id, _)| id == args) {
-                    self.resume(args);
+                } else if let Some(id) = ah_core::session::find(args) {
+                    self.resume(&id);
                 } else {
                     self.open_session_picker(args);
                 }
@@ -2034,8 +2087,12 @@ impl App {
             }
             "session" => {
                 let s = format!(
-                    "session {} · {}",
+                    "session {}{} · {}",
                     self.session_id,
+                    self.session_name
+                        .as_deref()
+                        .map(|n| format!(" \u{201c}{n}\u{201d}"))
+                        .unwrap_or_default(),
                     ah_core::paths::sessions_dir()
                         .join(format!("{}.jsonl", self.session_id))
                         .display()

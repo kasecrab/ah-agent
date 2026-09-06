@@ -110,6 +110,7 @@ pub enum EngineCmd {
     Clear,
     /// Switch to a stored session by id.
     Resume(String),
+    Rename(String),
     Quit,
 }
 
@@ -132,8 +133,10 @@ pub enum UiEvent {
     Busy(bool),
     Resumed {
         id: String,
+        name: Option<String>,
         messages: Vec<Message>,
     },
+    Renamed(Option<String>),
 }
 
 /// `(reports, settings patches in apply order, slash commands)` from a plugin load.
@@ -169,7 +172,10 @@ impl Engine {
                 Some(id) => Session::open(&id)?,
                 None => return Err("no sessions to resume".into()),
             },
-            Some(id) => Session::open(id)?,
+            Some(what) => match ah_core::session::find(what) {
+                Some(id) => Session::open(&id)?,
+                None => return Err(format!("no session named or with id {what:?}").into()),
+            },
             None if persist => Session::create(&cwd.display().to_string(), &settings.model.id)?,
             None => Session::ephemeral(),
         };
@@ -350,6 +356,7 @@ impl Engine {
                         self.total_usage = Usage::default();
                         let _ = tx.send(UiEvent::Resumed {
                             id: self.session.id.clone(),
+                            name: self.session.name.clone(),
                             messages: self.session.messages.clone(),
                         });
                     }
@@ -359,6 +366,10 @@ impl Engine {
                         ))));
                     }
                 },
+                EngineCmd::Rename(name) => {
+                    self.session.rename(&name);
+                    let _ = tx.send(UiEvent::Renamed(self.session.name.clone()));
+                }
                 EngineCmd::Quit => break,
             }
         }

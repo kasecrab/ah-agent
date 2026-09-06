@@ -1,4 +1,5 @@
-//! Fuzzy list overlay shared by `/model`, `/resume`, `/effort` and `/favorite`.
+//! Fuzzy list overlay shared by `/model`, `/resume`, `/effort`, `/favorite`
+//! and `/rename`.
 
 use ah_core::models;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -27,6 +28,8 @@ pub enum Kind {
     Name {
         rename: Option<String>,
     },
+    /// Free-text name for the current session.
+    SessionName,
 }
 
 pub struct Row {
@@ -34,6 +37,8 @@ pub struct Row {
     /// Text the query is matched against.
     pub search: String,
     pub label: String,
+    /// Label colour when the row is not selected.
+    pub style: Option<Style>,
     /// Fixed-width trailing columns.
     pub cols: Vec<(String, Style)>,
 }
@@ -149,7 +154,10 @@ impl Picker {
     }
 
     pub fn draw(&self, f: &mut Frame, area: Rect, pal: &Palette) {
-        let compact = matches!(self.kind, Kind::Effort { .. } | Kind::Name { .. });
+        let compact = matches!(
+            self.kind,
+            Kind::Effort { .. } | Kind::Name { .. } | Kind::SessionName
+        );
         let width = if compact {
             48.min(area.width)
         } else {
@@ -207,7 +215,7 @@ impl Picker {
                 let style = if i == self.selected {
                     pal.bold(pal.accent).add_modifier(Modifier::REVERSED)
                 } else {
-                    Style::default().fg(pal.fg)
+                    row.style.unwrap_or(Style::default().fg(pal.fg))
                 };
                 let mut spans = vec![Span::styled(format!(" {label} "), style)];
                 for (text, st) in &row.cols {

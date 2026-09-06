@@ -17,8 +17,23 @@ struct Header {
     model: String,
 }
 
+/// Marker lines sit between messages in the log and carry session
+/// metadata that changes after the header was written.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Marker {
+    _name: Option<String>,
+}
+
+fn marker(line: &str) -> Option<Marker> {
+    line.contains("\"_name\"")
+        .then(|| serde_json::from_str::<Marker>(line).ok())
+        .flatten()
+}
+
 pub struct Session {
     pub id: String,
+    pub name: Option<String>,
     path: PathBuf,
     file: Option<File>,
     pub messages: Vec<Message>,
@@ -43,6 +58,7 @@ impl Session {
     pub fn ephemeral() -> Self {
         Self {
             id: new_id(),
+            name: None,
             path: PathBuf::new(),
             file: None,
             messages: Vec::new(),
@@ -64,6 +80,7 @@ impl Session {
         writeln!(file, "{}", serde_json::to_string(&header)?)?;
         Ok(Self {
             id,
+            name: None,
             path,
             file: Some(file),
             messages: Vec::new(),
@@ -74,9 +91,14 @@ impl Session {
         let path = crate::paths::sessions_dir().join(format!("{id}.jsonl"));
         let reader = BufReader::new(File::open(&path)?);
         let mut messages = Vec::new();
+        let mut name = None;
         for (i, line) in reader.lines().enumerate() {
             let line = line?;
             if i == 0 || line.trim().is_empty() {
+                continue;
+            }
+            if let Some(m) = marker(&line) {
+                name = m._name.filter(|n| !n.is_empty());
                 continue;
             }
             match serde_json::from_str::<Message>(&line) {
@@ -87,6 +109,7 @@ impl Session {
         let file = OpenOptions::new().append(true).open(&path)?;
         Ok(Self {
             id: id.into(),
+            name,
             path,
             file: Some(file),
             messages,
@@ -102,6 +125,21 @@ impl Session {
 
     pub fn path(&self) -> &PathBuf {
         &self.path
+    }
+
+    /// Give the session a name (empty clears it). The last marker wins on
+    /// reload, so renaming is an append like everything else.
+    pub fn rename(&mut self, name: &str) {
+        let name = name.trim();
+        if let Some(f) = self.file.as_mut() {
+            let m = Marker {
+                _name: Some(name.to_string()),
+            };
+            if let Ok(s) = serde_json::to_string(&m) {
+                let _ = writeln!(f, "{s}");
+            }
+        }
+        self.name = (!name.is_empty()).then(|| name.to_string());
     }
 
     pub fn push(&mut self, m: Message) {
@@ -129,6 +167,7 @@ impl Session {
 #[derive(Debug, Clone)]
 pub struct Summary {
     pub id: String,
+    pub name: Option<String>,
     pub started_ms: u128,
     pub cwd: String,
     pub model: String,
@@ -147,9 +186,14 @@ pub fn summaries() -> Vec<Summary> {
             let mut lines = BufReader::new(f).lines();
             let header: Header = serde_json::from_str(&lines.next()?.ok()?).ok()?;
             let mut title = String::new();
+            let mut name = None;
             let mut messages = 0usize;
             for line in lines.map_while(|l| l.ok()) {
                 if line.trim().is_empty() {
+                    continue;
+                }
+                if let Some(m) = marker(&line) {
+                    name = m._name.filter(|n| !n.is_empty());
                     continue;
                 }
                 messages += 1;
@@ -160,8 +204,9 @@ pub fn summaries() -> Vec<Summary> {
                     title = m.content.lines().next().unwrap_or("").trim().to_string();
                 }
             }
-            (messages > 0).then_some(Summary {
+            (messages > 0 || name.is_some()).then_some(Summary {
                 id: header.id,
+                name,
                 started_ms: header.started_ms,
                 cwd: header.cwd,
                 model: header.model,
@@ -172,6 +217,26 @@ pub fn summaries() -> Vec<Summary> {
         .collect();
     out.sort_by_key(|s| std::cmp::Reverse(s.started_ms));
     out
+}
+
+/// Resolve what the user typed to a session id: an exact id first, then the
+/// newest session with that name (case-insensitive).
+pub fn find(what: &str) -> Option<String> {
+    let what = what.trim();
+    if what.is_empty() {
+        return None;
+    }
+    if list().iter().any(|(id, _)| id == what) {
+        return Some(what.to_string());
+    }
+    summaries()
+        .into_iter()
+        .find(|s| {
+            s.name
+                .as_deref()
+                .is_some_and(|n| n.eq_ignore_ascii_case(what))
+        })
+        .map(|s| s.id)
 }
 
 /// `(id, size_bytes)` for every stored session.
@@ -190,4 +255,16 @@ pub fn list() -> Vec<(String, u64)> {
         .collect();
     out.sort();
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn marker_lines_are_recognised() {
+        assert!(marker(r#"{"_name":"work"}"#).is_some());
+        assert!(marker(r#"{"role":"user","content":"_name"}"#).is_none());
+        assert!(marker(r#"{"role":"user","content":"\"_name\""}"#).is_none());
+    }
 }
