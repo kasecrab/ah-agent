@@ -449,7 +449,45 @@ pub struct Permissions {
     /// `auto` runs every tool without asking. `ask` prompts for tools in `ask_for`.
     pub mode: PermissionMode,
     pub ask_for: Vec<String>,
+    /// Shell commands refused in every mode. A rule matches a command segment
+    /// that equals it or starts with it followed by a space; a trailing `*`
+    /// matches any continuation. Setting this replaces the built-in list.
+    pub deny: Vec<String>,
 }
+
+/// Commands no mode runs unless the user edits `permissions.deny`.
+pub const DEFAULT_DENY: &[&str] = &[
+    "rm -rf /",
+    "rm -rf ~",
+    "rm -rf ~/",
+    "rm -rf .",
+    "rm -rf ..",
+    "rm -fr /",
+    "rm -fr ~",
+    "rm -rf --no-preserve-root*",
+    "rm -rf $HOME",
+    "rm -rf $HOME/",
+    "git reset --hard",
+    "git push --force",
+    "git push -f",
+    "git clean -f*",
+    "git clean -x*",
+    "git clean -d*",
+    "git checkout -- .",
+    "git checkout .",
+    "git restore .",
+    "git branch -D",
+    "git stash drop",
+    "git stash clear",
+    "git filter-branch*",
+    "chmod -R 777 /",
+    "mkfs*",
+    "dd if=*",
+    "shutdown*",
+    "reboot",
+    "poweroff",
+    ":(){ :|:& };:",
+];
 
 impl Default for Permissions {
     fn default() -> Self {
@@ -459,6 +497,7 @@ impl Default for Permissions {
                 .iter()
                 .map(|s| String::from(*s))
                 .collect(),
+            deny: DEFAULT_DENY.iter().map(|s| String::from(*s)).collect(),
         }
     }
 }

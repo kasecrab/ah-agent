@@ -416,6 +416,23 @@ impl<'a> Agent<'a> {
                 ask_reason = reason;
             }
         }
+        if call.function.name == "bash"
+            && let Ok(args) = serde_json::from_str::<Value>(&call.function.arguments)
+            && let Some(cmd) = args.get("command").and_then(|c| c.as_str())
+            && let Some(rule) = crate::policy::denied(cmd, &self.settings.permissions.deny)
+        {
+            let reason = format!("matches deny rule `{rule}`");
+            io.emit(AgentEvent::ToolDenied {
+                call: call.clone(),
+                reason: reason.clone(),
+            });
+            return (
+                ToolResult::err(format!(
+                    "denied by policy: {reason}. Ask the user to run it themselves if it is really needed."
+                )),
+                0,
+            );
+        }
         if must_ask && !io.ask_permission(&call, &ask_reason) {
             io.emit(AgentEvent::ToolDenied {
                 call: call.clone(),
@@ -674,6 +691,30 @@ mod tests {
     }
 
     #[test]
+    fn deny_rules_apply_in_auto_mode() {
+        let provider = MockProvider::new(vec![
+            tool_call_script("bash", "{\"command\":\"git reset --hard HEAD~3\"}"),
+            vec![StreamEvent::Text("ok".into())],
+        ]);
+        let settings = Settings::default();
+        let registry = Registry::builtins(&settings.tools);
+        let mut hooks = NoHooks;
+        let cancel = AtomicBool::new(false);
+        let mut agent = Agent::new(
+            &provider,
+            &registry,
+            &mut hooks,
+            &settings,
+            std::env::current_dir().unwrap(),
+            &cancel,
+        );
+        let mut messages = vec![Message::user("x")];
+        let io = RecordingIo::default();
+        agent.run_turn(&mut messages, &io).unwrap();
+        assert!(messages[2].content.contains("deny rule `git reset --hard`"));
+    }
+
+    #[test]
     fn two_round_tool_turn() {
         let provider = MockProvider::new(vec![
             tool_call_script("bash", "{\"command\":\"echo hello\"}"),
@@ -714,7 +755,7 @@ mod tests {
     #[test]
     fn ask_mode_denies_when_user_declines() {
         let provider = MockProvider::new(vec![
-            tool_call_script("bash", "{\"command\":\"rm -rf /\"}"),
+            tool_call_script("bash", "{\"command\":\"rm -rf ./scratch\"}"),
             vec![StreamEvent::Text("ok".into())],
         ]);
         let mut settings = Settings::default();

@@ -8,6 +8,7 @@ pub mod log;
 pub mod models;
 pub mod paths;
 pub mod plugins;
+pub mod policy;
 pub mod provider;
 pub mod session;
 pub mod settings;
