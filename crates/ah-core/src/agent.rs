@@ -43,7 +43,34 @@ pub enum AgentEvent {
         error: String,
     },
     Error(String),
+    /// The conversation was replaced by a summary. `before` is the token
+    /// count that triggered it, `after` a rough size of the summary.
+    Compacted {
+        before: u64,
+        after: u64,
+        summary: String,
+    },
     TurnEnd(TurnSummary),
+}
+
+/// What the model is asked when the conversation is compacted.
+pub const SUMMARY_PROMPT: &str = "Summarise this conversation so it can continue in a fresh \
+context with none of the messages above. Include: the user's requests in order and the \
+exact wording of constraints they set; decisions made and why; files, functions and \
+commands touched, with paths; the current state of the work, what is done and what is \
+left; open questions. Be dense and specific; headings and lists are fine. No preamble.";
+
+/// Wrap a summary as the single user message a compacted conversation starts with.
+pub fn summary_message(summary: &str) -> Message {
+    Message::user(format!(
+        "[The conversation so far was compacted. Summary:]\n\n{}\n\n[End of summary. Continue from here.]",
+        summary.trim()
+    ))
+}
+
+/// Rough token count for text of `bytes` bytes.
+pub fn estimate_tokens(bytes: usize) -> u64 {
+    (bytes / 4) as u64
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -104,6 +131,12 @@ pub struct Agent<'a> {
     pub cancel: &'a AtomicBool,
     /// Hard stop on runaway tool loops.
     pub max_requests: u32,
+    /// Model context window in tokens; 0 disables auto compaction.
+    pub context_window: u64,
+    /// Conversation size as of the last response.
+    pub context_tokens: u64,
+    /// Compactions performed by this agent (the caller re-persists messages).
+    pub compactions: u32,
 }
 
 impl<'a> Agent<'a> {
@@ -123,7 +156,73 @@ impl<'a> Agent<'a> {
             cwd,
             cancel,
             max_requests: 200,
+            context_window: 0,
+            context_tokens: 0,
+            compactions: 0,
         }
+    }
+
+    /// True once the conversation fills `context.compact_at` percent of the window.
+    pub fn over_threshold(&self) -> bool {
+        let c = &self.settings.context;
+        c.auto_compact
+            && self.context_window > 0
+            && self.context_tokens.saturating_mul(100)
+                >= self.context_window * c.compact_at.min(100) as u64
+    }
+
+    /// Replace `messages` with a model-written summary. `focus` is extra
+    /// guidance for the summary; empty for none.
+    pub fn compact(
+        &mut self,
+        messages: &mut Vec<Message>,
+        focus: &str,
+        io: &dyn AgentIo,
+    ) -> Result<()> {
+        if messages.is_empty() {
+            return Ok(());
+        }
+        let system = self.system_prompt();
+        let mut all = Vec::with_capacity(messages.len() + 2);
+        all.push(Message::system(system));
+        all.extend(messages.iter().cloned());
+        let mut ask = SUMMARY_PROMPT.to_string();
+        if !focus.trim().is_empty() {
+            ask.push_str("\nPay particular attention to: ");
+            ask.push_str(focus.trim());
+        }
+        all.push(Message::user(ask));
+        let req = ChatRequest {
+            model: self.settings.model.id.clone(),
+            messages: all,
+            tools: Vec::new(),
+            max_tokens: Some(self.settings.context.summary_max_tokens),
+            temperature: None,
+            top_p: None,
+            reasoning: None,
+            provider: self.settings.model.provider.clone(),
+        };
+        let mut acc = Accumulator::default();
+        self.provider.stream(&req, self.cancel, &mut |ev| {
+            acc.apply(&ev);
+            !self.cancel.load(Ordering::Relaxed)
+        })?;
+        let acc = acc.finish();
+        if acc.content.trim().is_empty() {
+            return Err(Error::Http("empty summary".into()));
+        }
+        let before = self.context_tokens;
+        let msg = summary_message(&acc.content);
+        let after = estimate_tokens(msg.content.len());
+        *messages = vec![msg];
+        self.context_tokens = after;
+        self.compactions += 1;
+        io.emit(AgentEvent::Compacted {
+            before,
+            after,
+            summary: acc.content,
+        });
+        Ok(())
     }
 
     pub fn system_prompt(&mut self) -> String {
@@ -189,6 +288,18 @@ impl<'a> Agent<'a> {
             summary.requests += 1;
             let turn = summary.requests;
 
+            if self.over_threshold() {
+                io.emit(AgentEvent::Notice("compacting context…".into()));
+                match self.compact(messages, "", io) {
+                    Ok(()) => {}
+                    Err(Error::Cancelled) => {
+                        summary.cancelled = true;
+                        break;
+                    }
+                    Err(e) => io.emit(AgentEvent::Notice(format!("compaction failed: {e}"))),
+                }
+            }
+
             let mut all = Vec::with_capacity(messages.len() + 1);
             all.push(Message::system(system.clone()));
             all.extend(messages.iter().cloned());
@@ -217,6 +328,7 @@ impl<'a> Agent<'a> {
                 }
             };
             summary.usage.add(&acc.usage);
+            self.context_tokens = acc.usage.prompt_tokens + acc.usage.completion_tokens;
             io.emit(AgentEvent::Usage(acc.usage));
             let assistant = acc.clone().into_message();
             io.emit(AgentEvent::AssistantMessage(assistant.clone()));
@@ -491,6 +603,74 @@ mod tests {
                 cost: 0.001,
             }),
         ]
+    }
+
+    #[test]
+    fn compacts_mid_turn_when_over_threshold() {
+        let big = Usage {
+            prompt_tokens: 95,
+            completion_tokens: 2,
+            total_tokens: 97,
+            cost: 0.0,
+        };
+        let provider = MockProvider::new(vec![
+            vec![
+                StreamEvent::ToolCallDelta {
+                    index: 0,
+                    id: Some("c1".into()),
+                    name: Some("bash".into()),
+                    arguments: "{\"command\":\"echo hello\"}".into(),
+                },
+                StreamEvent::Finish("tool_calls".into()),
+                StreamEvent::Usage(big),
+            ],
+            vec![
+                StreamEvent::Text("SUMMARY".into()),
+                StreamEvent::Finish("stop".into()),
+            ],
+            vec![
+                StreamEvent::Text("done".into()),
+                StreamEvent::Finish("stop".into()),
+            ],
+        ]);
+        let settings = Settings::default();
+        let registry = Registry::builtins(&settings.tools);
+        let mut hooks = NoHooks;
+        let cancel = AtomicBool::new(false);
+        let mut agent = Agent::new(
+            &provider,
+            &registry,
+            &mut hooks,
+            &settings,
+            std::env::current_dir().unwrap(),
+            &cancel,
+        );
+        agent.context_window = 100;
+        let mut messages = vec![Message::user("say hi via bash")];
+        let io = RecordingIo::default();
+        agent.run_turn(&mut messages, &io).unwrap();
+        assert_eq!(agent.compactions, 1);
+        // summary user message, then the final assistant reply
+        assert_eq!(messages.len(), 2);
+        assert!(messages[0].content.contains("SUMMARY"));
+        assert_eq!(messages[1].content, "done");
+        let reqs = provider.requests.lock().unwrap();
+        assert!(reqs[1].tools.is_empty());
+        assert!(
+            reqs[1]
+                .messages
+                .last()
+                .unwrap()
+                .content
+                .starts_with("Summarise")
+        );
+        assert!(
+            io.events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Compacted { before: 97, .. }))
+        );
     }
 
     #[test]

@@ -111,6 +111,16 @@ pub fn load(base_url: &str, api_key: Option<&str>, max_age: Duration) -> Result<
     }
 }
 
+/// Context window of `id` from the cached catalogue, if known.
+pub fn context_window(id: &str) -> Option<u64> {
+    let (models, _) = load_cached()?;
+    models
+        .iter()
+        .find(|m| m.id == id)
+        .map(|m| m.context_length)
+        .filter(|&n| n > 0)
+}
+
 /// Subsequence fuzzy score: higher is better, `None` when `query` chars do not
 /// all appear in order. Rewards prefix, word-boundary and contiguous matches.
 pub fn fuzzy_score(query: &str, candidate: &str) -> Option<u32> {

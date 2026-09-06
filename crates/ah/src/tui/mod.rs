@@ -49,6 +49,11 @@ enum Msg {
 const COMMANDS: &[(&str, &str, bool)] = &[
     ("ask", "ask before tool calls", false),
     ("clear", "clear the conversation", false),
+    (
+        "compact",
+        "summarise the conversation: /compact [focus]",
+        true,
+    ),
     ("config", "show config files and layers", false),
     ("effort", "set reasoning effort: /effort [level]", true),
     (
@@ -185,6 +190,9 @@ struct App {
     busy: bool,
     tool_name: String,
     usage: Usage,
+    /// Conversation size as of the last response, and the model's window.
+    context_tokens: u64,
+    context_window: u64,
     spinner_i: usize,
     plugin_status: Option<String>,
     plugin_commands: Vec<(String, SlashCommandSpec)>,
@@ -311,6 +319,8 @@ fn run_inner(
         busy: false,
         tool_name: String::new(),
         usage: Usage::default(),
+        context_tokens: 0,
+        context_window: 0,
         spinner_i: 0,
         plugin_status: None,
         plugin_commands: commands,
@@ -339,6 +349,7 @@ fn run_inner(
         quit: false,
         size: (0, 0),
     };
+    app.refresh_window();
 
     for r in &reports {
         if !r.ok && r.message != "disabled" {
@@ -530,8 +541,30 @@ impl App {
         }
     }
 
+    /// Window of the current model: `context.window`, else the cached catalogue.
+    fn refresh_window(&mut self) {
+        let s = self.stack.settings();
+        if s.context.window > 0 {
+            self.context_window = s.context.window;
+            return;
+        }
+        let id = s.model.id.clone();
+        if self.catalogue.is_none()
+            && let Some((m, _)) = models::load_cached()
+        {
+            self.catalogue = Some(m);
+        }
+        self.context_window = self
+            .catalogue
+            .as_deref()
+            .and_then(|c| c.iter().find(|m| m.id == id))
+            .map(|m| m.context_length)
+            .unwrap_or(0);
+    }
+
     /// Re-derive palette, binds and view flags from the current settings.
     fn refresh_from_settings(&mut self, plugin_binds: &[(String, String)]) {
+        self.refresh_window();
         let s = self.stack.settings().clone();
         self.pal = Palette::from_theme(&s.theme);
         self.pal_gen += 1;
@@ -591,6 +624,8 @@ impl App {
             width: self.size.0,
             favorite,
             effort: m.effort().unwrap_or("").to_string(),
+            context_tokens: self.context_tokens,
+            context_window: self.context_window,
             rendered: String::new(),
         };
         ctx.rendered = app::render_status_template(&self.settings().statusline.format, &ctx);
@@ -710,6 +745,7 @@ impl App {
                 match res {
                     Ok(list) => {
                         self.catalogue = Some(list);
+                        self.refresh_window();
                         if let Some(p) = &self.picker
                             && let Kind::Model { favorite } = &p.kind
                         {
@@ -1525,6 +1561,7 @@ impl App {
                 self.entries.clear();
                 self.usage = Usage::default();
                 self.stats = Stats::default();
+                self.context_tokens = 0;
                 self.session_id = id;
                 self.session_name = name;
                 self.follow = true;
@@ -1604,6 +1641,7 @@ impl App {
             }
             AgentEvent::Usage(u) => {
                 self.usage.add(&u);
+                self.context_tokens = u.prompt_tokens + u.completion_tokens;
                 let model = self.settings().model.id.clone();
                 self.stats.add_usage(&model, &u);
                 self.dirty = true;
@@ -1662,6 +1700,21 @@ impl App {
             AgentEvent::Error(e) => {
                 self.stats.request_end();
                 self.push(Block::Error(e));
+            }
+            AgentEvent::Compacted {
+                before,
+                after,
+                summary,
+            } => {
+                self.context_tokens = after;
+                self.push(Block::User(
+                    ah_core::agent::summary_message(&summary).content,
+                ));
+                self.push(Block::Notice(format!(
+                    "context compacted: {} → ~{} tokens",
+                    usage::tokens(before),
+                    usage::tokens(after)
+                )));
             }
             AgentEvent::TurnEnd(s) => {
                 self.stats.request_end();
@@ -2046,10 +2099,21 @@ impl App {
                     self.open_session_picker(args);
                 }
             }
+            "compact" => {
+                if self.busy {
+                    self.push(Block::Notice("busy; wait or press Esc to cancel".into()));
+                } else {
+                    self.follow = true;
+                    self.busy = true;
+                    self.set_state(State::Thinking);
+                    let _ = self.tx.send(EngineCmd::Compact(args.to_string()));
+                }
+            }
             "clear" => {
                 self.entries.clear();
                 self.usage = Usage::default();
                 self.stats = Stats::default();
+                self.context_tokens = 0;
                 let _ = self.tx.send(EngineCmd::Clear);
                 self.push(Block::Notice("conversation cleared".into()));
             }

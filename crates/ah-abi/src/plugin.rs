@@ -211,6 +211,12 @@ pub struct StatusContext {
     pub favorite: String,
     /// Reasoning effort in use (`model.reasoning.effort`), or empty.
     pub effort: String,
+    /// Tokens in the conversation as of the last response, and the model's
+    /// window (0 when unknown).
+    #[serde(default)]
+    pub context_tokens: u64,
+    #[serde(default)]
+    pub context_window: u64,
     /// Result of the built-in template, so a plugin can decorate instead of replace.
     pub rendered: String,
 }

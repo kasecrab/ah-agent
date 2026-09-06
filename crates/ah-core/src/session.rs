@@ -18,17 +18,32 @@ struct Header {
 }
 
 /// Marker lines sit between messages in the log and carry session
-/// metadata that changes after the header was written.
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// metadata that changes after the header was written. `_clear` and
+/// `_compact` drop every message logged before them.
+#[derive(Debug, Default, Serialize, Deserialize)]
 struct Marker {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     _name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    _clear: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    _compact: Option<bool>,
+}
+
+impl Marker {
+    fn resets(&self) -> bool {
+        self._clear == Some(true) || self._compact == Some(true)
+    }
 }
 
 fn marker(line: &str) -> Option<Marker> {
-    line.contains("\"_name\"")
-        .then(|| serde_json::from_str::<Marker>(line).ok())
-        .flatten()
+    if !(line.contains("\"_name\"") || line.contains("\"_clear\"") || line.contains("\"_compact\""))
+    {
+        return None;
+    }
+    serde_json::from_str::<Marker>(line)
+        .ok()
+        .filter(|m| m._name.is_some() || m._clear.is_some() || m._compact.is_some())
 }
 
 pub struct Session {
@@ -98,7 +113,12 @@ impl Session {
                 continue;
             }
             if let Some(m) = marker(&line) {
-                name = m._name.filter(|n| !n.is_empty());
+                if m.resets() {
+                    messages.clear();
+                }
+                if let Some(n) = m._name {
+                    name = Some(n).filter(|n| !n.is_empty());
+                }
                 continue;
             }
             match serde_json::from_str::<Message>(&line) {
@@ -131,14 +151,10 @@ impl Session {
     /// reload, so renaming is an append like everything else.
     pub fn rename(&mut self, name: &str) {
         let name = name.trim();
-        if let Some(f) = self.file.as_mut() {
-            let m = Marker {
-                _name: Some(name.to_string()),
-            };
-            if let Ok(s) = serde_json::to_string(&m) {
-                let _ = writeln!(f, "{s}");
-            }
-        }
+        self.write_marker(&Marker {
+            _name: Some(name.to_string()),
+            ..Default::default()
+        });
         self.name = (!name.is_empty()).then(|| name.to_string());
     }
 
@@ -151,14 +167,32 @@ impl Session {
         self.messages.push(m);
     }
 
+    fn write_marker(&mut self, m: &Marker) {
+        if let Some(f) = self.file.as_mut()
+            && let Ok(s) = serde_json::to_string(m)
+        {
+            let _ = writeln!(f, "{s}");
+        }
+    }
+
     pub fn clear(&mut self) {
         self.messages.clear();
-        if let Some(f) = self.file.as_mut() {
-            let _ = writeln!(
-                f,
-                "{}",
-                serde_json::json!({"role": "system", "content": "", "_clear": true})
-            );
+        self.write_marker(&Marker {
+            _clear: Some(true),
+            ..Default::default()
+        });
+    }
+
+    /// Replace the conversation with `messages` (after compaction). Logged as
+    /// a marker followed by the new messages, so the file stays append-only.
+    pub fn reset(&mut self, messages: Vec<Message>) {
+        self.messages.clear();
+        self.write_marker(&Marker {
+            _compact: Some(true),
+            ..Default::default()
+        });
+        for m in messages {
+            self.push(m);
         }
     }
 }
@@ -193,7 +227,12 @@ pub fn summaries() -> Vec<Summary> {
                     continue;
                 }
                 if let Some(m) = marker(&line) {
-                    name = m._name.filter(|n| !n.is_empty());
+                    if m.resets() {
+                        messages = 0;
+                    }
+                    if let Some(n) = m._name {
+                        name = Some(n).filter(|n| !n.is_empty());
+                    }
                     continue;
                 }
                 messages += 1;
@@ -266,5 +305,9 @@ mod tests {
         assert!(marker(r#"{"_name":"work"}"#).is_some());
         assert!(marker(r#"{"role":"user","content":"_name"}"#).is_none());
         assert!(marker(r#"{"role":"user","content":"\"_name\""}"#).is_none());
+        assert!(
+            marker(r#"{"role":"system","content":"","_clear":true}"#).is_some_and(|m| m.resets())
+        );
+        assert!(marker(r#"{"_compact":true}"#).is_some_and(|m| m.resets()));
     }
 }

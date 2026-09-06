@@ -18,6 +18,7 @@ pub struct Settings {
     pub plugins: PluginSettings,
     pub statusline: StatusLine,
     pub permissions: Permissions,
+    pub context: ContextSettings,
     /// Plugin-private or forward-compatible keys. Preserved through merges.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -402,7 +403,7 @@ impl Default for PluginSettings {
 #[serde(default)]
 pub struct StatusLine {
     /// Template. Placeholders: `{model} {favorite} {effort} {tokens_in} {tokens_out}
-    /// {cost} {cwd} {git} {plugins} {state} {session}`.
+    /// {cost} {context} {cwd} {git} {plugins} {state} {session}`.
     pub format: String,
 }
 
@@ -410,8 +411,34 @@ impl Default for StatusLine {
     fn default() -> Self {
         Self {
             format: String::from(
-                " {favorite} {model} {effort} │ ↑{tokens_in} ↓{tokens_out} ${cost} │ {cwd} {git}",
+                " {favorite} {model} {effort} │ ↑{tokens_in} ↓{tokens_out} ${cost} │ {context} │ {cwd} {git}",
             ),
+        }
+    }
+}
+
+/// Context window accounting and compaction.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ContextSettings {
+    /// Summarise the conversation automatically once it fills `compact_at`
+    /// percent of the model's context window.
+    pub auto_compact: bool,
+    /// Percent of the window that triggers auto compaction.
+    pub compact_at: u8,
+    /// Window size in tokens; 0 means "from the model catalogue".
+    pub window: u64,
+    /// Max tokens the summary may use.
+    pub summary_max_tokens: u32,
+}
+
+impl Default for ContextSettings {
+    fn default() -> Self {
+        Self {
+            auto_compact: true,
+            compact_at: 90,
+            window: 0,
+            summary_max_tokens: 4096,
         }
     }
 }

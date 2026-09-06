@@ -111,6 +111,8 @@ pub enum EngineCmd {
     /// Switch to a stored session by id.
     Resume(String),
     Rename(String),
+    /// Summarise the conversation now; the string is optional focus text.
+    Compact(String),
     Quit,
 }
 
@@ -157,6 +159,10 @@ pub struct Engine {
     pub session: Session,
     pub cancel: Arc<AtomicBool>,
     pub total_usage: Usage,
+    /// Conversation size as of the last response.
+    pub context_tokens: u64,
+    /// `(model id, window)` looked up in the catalogue.
+    window: Option<(String, u64)>,
 }
 
 impl Engine {
@@ -189,6 +195,8 @@ impl Engine {
             session,
             cancel: Arc::new(AtomicBool::new(false)),
             total_usage: Usage::default(),
+            context_tokens: 0,
+            window: None,
         };
         e.rebuild_provider();
         Ok(e)
@@ -203,6 +211,47 @@ impl Engine {
 
     pub fn has_key(&self) -> bool {
         self.provider.is_some()
+    }
+
+    /// Context window of the current model: `context.window` if set, else the
+    /// cached catalogue, else 0.
+    pub fn context_window(&mut self) -> u64 {
+        if self.settings.context.window > 0 {
+            return self.settings.context.window;
+        }
+        let id = &self.settings.model.id;
+        if let Some((m, w)) = &self.window
+            && m == id
+        {
+            return *w;
+        }
+        let w = ah_core::models::context_window(id).unwrap_or(0);
+        self.window = Some((id.clone(), w));
+        w
+    }
+
+    /// Agent over this engine's provider, registry, hooks and settings.
+    /// `None` without an API key.
+    fn agent<'a>(&'a mut self, no_hooks: &'a mut NoHooks, window: u64) -> Option<Agent<'a>> {
+        let Self {
+            provider,
+            registry,
+            host,
+            settings,
+            cwd,
+            cancel,
+            context_tokens,
+            ..
+        } = self;
+        let provider = provider.as_deref()?;
+        let hooks: &mut dyn Hooks = match host.as_mut() {
+            Some(h) => h,
+            None => no_hooks,
+        };
+        let mut a = Agent::new(provider, registry, hooks, settings, cwd.clone(), cancel);
+        a.context_window = window;
+        a.context_tokens = *context_tokens;
+        Some(a)
     }
 
     /// (Re)load plugins. Returns reports and the patches the UI must layer in.
@@ -257,36 +306,66 @@ impl Engine {
         text: String,
         io: &dyn AgentIo,
     ) -> Result<TurnSummary, ah_core::Error> {
-        let Some(provider) = self.provider.as_deref() else {
-            let msg = "no API key: run `ah login`, or set OPENROUTER_API_KEY".to_string();
-            io.emit(AgentEvent::Error(msg.clone()));
-            return Err(ah_core::Error::Auth(msg));
-        };
+        let window = self.context_window();
         self.cancel.store(false, Ordering::Relaxed);
-        self.session.push(Message::user(text));
-        let mut no_hooks = NoHooks;
-        let hooks: &mut dyn Hooks = match self.host.as_mut() {
-            Some(h) => h,
-            None => &mut no_hooks,
-        };
-        let mut agent = Agent::new(
-            provider,
-            &self.registry,
-            hooks,
-            &self.settings,
-            self.cwd.clone(),
-            &self.cancel,
-        );
-        let before = self.session.messages.len();
         let mut messages = std::mem::take(&mut self.session.messages);
+        let mut no_hooks = NoHooks;
+        let Some(mut agent) = self.agent(&mut no_hooks, window) else {
+            self.session.messages = messages;
+            return Err(no_key(io));
+        };
+        // Compact before the new message so it survives verbatim.
+        if agent.over_threshold() {
+            io.emit(AgentEvent::Notice("compacting context…".into()));
+            if let Err(e) = agent.compact(&mut messages, "", io) {
+                io.emit(AgentEvent::Notice(format!("compaction failed: {e}")));
+            }
+        }
+        let before = messages.len();
+        messages.push(Message::user(text));
         let res = agent.run_turn(&mut messages, io);
-        let appended: Vec<Message> = messages.drain(before..).collect();
-        self.session.messages = messages;
-        for m in appended {
-            self.session.push(m);
+        let compacted = agent.compactions > 0;
+        let context_tokens = agent.context_tokens;
+        self.context_tokens = context_tokens;
+        if compacted {
+            self.session.reset(messages);
+        } else {
+            let appended: Vec<Message> = messages.drain(before..).collect();
+            self.session.messages = messages;
+            for m in appended {
+                self.session.push(m);
+            }
         }
         if let Ok(s) = &res {
             self.total_usage.add(&s.usage);
+        }
+        res
+    }
+
+    /// `/compact`: summarise now, regardless of size.
+    pub fn compact(&mut self, focus: &str, io: &dyn AgentIo) -> Result<(), ah_core::Error> {
+        let window = self.context_window();
+        if self.session.messages.is_empty() {
+            io.emit(AgentEvent::Notice("nothing to compact".into()));
+            return Ok(());
+        }
+        self.cancel.store(false, Ordering::Relaxed);
+        let mut messages = std::mem::take(&mut self.session.messages);
+        let mut no_hooks = NoHooks;
+        let Some(mut agent) = self.agent(&mut no_hooks, window) else {
+            self.session.messages = messages;
+            return Err(no_key(io));
+        };
+        let res = agent.compact(&mut messages, focus, io);
+        let context_tokens = agent.context_tokens;
+        self.context_tokens = context_tokens;
+        if res.is_ok() {
+            self.session.reset(messages);
+        } else {
+            self.session.messages = messages;
+        }
+        if let Err(e) = &res {
+            io.emit(AgentEvent::Error(format!("compaction failed: {e}")));
         }
         res
     }
@@ -349,11 +428,20 @@ impl Engine {
                         let _ = tx.send(UiEvent::PluginLogs(logs));
                     }
                 }
-                EngineCmd::Clear => self.session.clear(),
+                EngineCmd::Compact(focus) => {
+                    let _ = tx.send(UiEvent::Busy(true));
+                    let _ = self.compact(&focus, &io);
+                    let _ = tx.send(UiEvent::Busy(false));
+                }
+                EngineCmd::Clear => {
+                    self.session.clear();
+                    self.context_tokens = 0;
+                }
                 EngineCmd::Resume(id) => match Session::open(&id) {
                     Ok(s) => {
                         self.session = s;
                         self.total_usage = Usage::default();
+                        self.context_tokens = 0;
                         let _ = tx.send(UiEvent::Resumed {
                             id: self.session.id.clone(),
                             name: self.session.name.clone(),
@@ -407,6 +495,22 @@ impl AgentIo for ChannelIo {
     }
 }
 
+fn no_key(io: &dyn AgentIo) -> ah_core::Error {
+    let msg = "no API key: run `ah login`, or set OPENROUTER_API_KEY".to_string();
+    io.emit(AgentEvent::Error(msg.clone()));
+    ah_core::Error::Auth(msg)
+}
+
+/// `42%` of the window when it is known, else the token count.
+pub fn context_label(tokens: u64, window: u64) -> String {
+    match tokens.saturating_mul(100).checked_div(window) {
+        Some(0) if tokens > 0 => "<1%".to_string(),
+        Some(p) => format!("{p}%"),
+        None if tokens >= 1000 => format!("{}k ctx", tokens / 1000),
+        None => format!("{tokens} ctx"),
+    }
+}
+
 /// Built-in statusline template.
 pub fn render_status_template(fmt: &str, ctx: &StatusContext) -> String {
     let short_cwd = {
@@ -426,6 +530,10 @@ pub fn render_status_template(fmt: &str, ctx: &StatusContext) -> String {
         .replace("{tokens_in}", &ctx.usage.prompt_tokens.to_string())
         .replace("{tokens_out}", &ctx.usage.completion_tokens.to_string())
         .replace("{cost}", &format!("{:.4}", ctx.usage.cost))
+        .replace(
+            "{context}",
+            &context_label(ctx.context_tokens, ctx.context_window),
+        )
         .replace("{cwd}", &short_cwd)
         .replace(
             "{git}",
@@ -455,6 +563,15 @@ pub fn render_status_template(fmt: &str, ctx: &StatusContext) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_labels() {
+        assert_eq!(context_label(0, 8000), "0%");
+        assert_eq!(context_label(49, 8000), "<1%");
+        assert_eq!(context_label(4000, 8000), "50%");
+        assert_eq!(context_label(49, 0), "49 ctx");
+        assert_eq!(context_label(12_345, 0), "12k ctx");
+    }
 
     #[test]
     fn set_patch_nesting_and_json_values() {
