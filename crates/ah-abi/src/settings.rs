@@ -259,6 +259,8 @@ pub struct Layout {
     pub kitty_keyboard: bool,
     /// Pastes with more lines than this collapse to a `[Pasted N lines]` chip.
     pub paste_collapse_lines: usize,
+    /// Messages that can wait while a turn runs; 0 disables queueing.
+    pub queue_max: usize,
     /// Render assistant messages as markdown.
     pub markdown: bool,
     /// Highlight fenced code blocks.
@@ -282,6 +284,7 @@ impl Default for Layout {
             mouse: true,
             kitty_keyboard: true,
             paste_collapse_lines: 3,
+            queue_max: 5,
             markdown: true,
             code_highlight: true,
         }

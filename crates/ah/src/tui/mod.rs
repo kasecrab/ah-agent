@@ -183,6 +183,8 @@ struct App {
     view: View,
     entries: Vec<Entry>,
     editor: Editor,
+    /// Messages typed while a turn ran; sent one per turn once it ends.
+    queue: std::collections::VecDeque<String>,
     scroll: usize,
     follow: bool,
     viewport_lines: usize,
@@ -312,6 +314,7 @@ fn run_inner(
         stack,
         entries: Vec::new(),
         editor: Editor::default(),
+        queue: std::collections::VecDeque::new(),
         scroll: 0,
         follow: true,
         viewport_lines: 0,
@@ -662,7 +665,16 @@ impl App {
             return;
         }
         if self.busy {
-            self.push(Block::Notice("busy; wait or press Esc to cancel".into()));
+            let max = self.settings().layout.queue_max;
+            if max == 0 {
+                self.push(Block::Notice("busy; wait or press Esc to cancel".into()));
+            } else if self.queue.len() >= max {
+                self.push(Block::Notice(format!(
+                    "queue full ({max}); Up edits the last queued message"
+                )));
+            } else {
+                self.queue.push_back(text);
+            }
             return;
         }
         self.push(Block::User(text.clone()));
@@ -670,6 +682,28 @@ impl App {
         self.busy = true;
         self.set_state(State::Thinking);
         let _ = self.tx.send(EngineCmd::Submit(text));
+    }
+
+    /// Send the oldest queued message once the engine is free.
+    fn drain_queue(&mut self) {
+        if !self.busy
+            && let Some(next) = self.queue.pop_front()
+        {
+            self.submit(next);
+        }
+    }
+
+    /// Move the last queued message back into the editor.
+    fn unqueue_last(&mut self) -> bool {
+        let Some(text) = self.queue.pop_back() else {
+            return false;
+        };
+        let n = self.settings().layout.paste_collapse_lines;
+        if !self.editor.is_empty() {
+            self.editor.insert_char('\n');
+        }
+        self.editor.insert_paste(&text, n);
+        true
     }
 
     fn event_loop(
@@ -1558,6 +1592,7 @@ impl App {
                     self.pending_perm = None;
                     self.git_branch = ah_core::plugins::git_branch(std::path::Path::new(&self.cwd));
                     self.request_status();
+                    self.drain_queue();
                 }
                 self.dirty = true;
             }
@@ -1866,6 +1901,7 @@ impl App {
 
     fn cancel_turn(&mut self) {
         self.cancel.store(true, Ordering::Relaxed);
+        while self.unqueue_last() {}
         if self.pending_perm.take().is_some() {
             let _ = self.perm_tx.send(false);
         }
@@ -2009,6 +2045,11 @@ impl App {
             self.editor.home();
         } else if keys::any_match(&b.line_end, &k) {
             self.editor.end();
+        } else if keys::any_match(&b.history_prev, &k)
+            && self.editor.is_empty()
+            && !self.queue.is_empty()
+        {
+            self.unqueue_last();
         } else if keys::any_match(&b.history_prev, &k)
             && (self.editor.is_empty() || self.editor.line_col().0 == 0)
         {
@@ -2342,16 +2383,31 @@ impl App {
             0
         };
         let status_rows: u16 = if layout.show_status { 1 } else { 0 };
+        let queue_rows: u16 = if self.queue.is_empty() {
+            0
+        } else {
+            self.queue.len() as u16 + border
+        };
 
-        let [transcript_area, perm_area, input_area, status_area] = Layout::vertical([
+        let [
+            transcript_area,
+            perm_area,
+            queue_area,
+            input_area,
+            status_area,
+        ] = Layout::vertical([
             Constraint::Min(1),
             Constraint::Length(perm_rows),
+            Constraint::Length(queue_rows),
             Constraint::Length(input_rows + border),
             Constraint::Length(status_rows),
         ])
         .areas(area);
 
         self.draw_transcript(f, transcript_area, &pal, layout.transcript_max_width);
+        if !self.queue.is_empty() {
+            self.draw_queue(f, queue_area, &pal, layout.paste_collapse_lines);
+        }
         if let Some((call, reason)) = &self.pending_perm {
             let block = pal.block(true).title(" permission ");
             let inner = block.inner(perm_area);
@@ -2388,6 +2444,11 @@ impl App {
         } else {
             String::new()
         };
+        let placeholder = if self.busy && self.settings().layout.queue_max > 0 {
+            "Type the next message; Enter queues it"
+        } else {
+            "Type a message, /help for commands"
+        };
         let block = pal
             .input_block(!self.busy)
             .title(title)
@@ -2413,10 +2474,10 @@ impl App {
                 Line::from(vec![Span::styled(lead, prefix_style), Span::raw(r.clone())])
             })
             .collect();
-        if self.editor.is_empty() && !self.busy {
+        if self.editor.is_empty() {
             visible = vec![Line::from(vec![
                 Span::styled(pal.input_prefix.clone(), prefix_style),
-                Span::styled("Type a message, /help for commands", pal.dim()),
+                Span::styled(placeholder, pal.dim()),
             ])];
         }
         f.render_widget(Paragraph::new(visible), inner);
@@ -2525,6 +2586,38 @@ impl App {
                     Span::styled(format!(" /{shown:<14}"), name_style),
                     Span::styled(format!(" {desc}"), pal.dim()),
                 ])
+            })
+            .collect();
+        f.render_widget(Paragraph::new(lines), inner);
+    }
+
+    /// Queued messages, one per row; long ones collapse like paste chips.
+    fn draw_queue(&self, f: &mut Frame, area: Rect, pal: &Palette, collapse_lines: usize) {
+        let n = self.queue.len();
+        let block = pal
+            .input_block(false)
+            .title(format!(" queued {n} · Up edits the last one "));
+        let inner = block.inner(area);
+        f.render_widget(Clear, area);
+        f.render_widget(block, area);
+        let width = inner.width.saturating_sub(4) as usize;
+        let lines: Vec<Line> = self
+            .queue
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let lines = t.lines().count();
+                let first = t.lines().next().unwrap_or("").trim();
+                let mut spans = vec![Span::styled(format!(" {}. ", i + 1), pal.dim())];
+                if lines > collapse_lines.max(1) {
+                    spans.push(Span::styled(
+                        format!("[{lines} lines] "),
+                        pal.bold(pal.accent),
+                    ));
+                }
+                let shown: String = first.chars().take(width).collect();
+                spans.push(Span::styled(shown, Style::default().fg(pal.user)));
+                Line::from(spans)
             })
             .collect();
         f.render_widget(Paragraph::new(lines), inner);
