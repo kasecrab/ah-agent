@@ -11,34 +11,113 @@ pub struct Lang {
     line_comment: &'static [&'static str],
     block_comment: Option<(&'static str, &'static str)>,
     quotes: &'static [char],
-    /// Identifiers starting uppercase are types.
-    caps_are_types: bool,
+    /// Type names (`i32`, `int`, `String`).
+    types: &'static [&'static str],
+    /// Built-in functions and primitive types the runtime provides.
+    builtins: &'static [&'static str],
+    /// What an identifier starting with a capital letter is.
+    caps: Caps,
+    attrs: Attrs,
+    /// `f"..."` strings whose `{...}` parts are code.
+    fstrings: bool,
 }
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Caps {
+    Type,
+    Class,
+    Plain,
+}
+
+/// Where keys (`"name":`, `name =`) appear.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Attrs {
+    None,
+    /// A string followed by `:`.
+    Json,
+    /// An identifier at the start of the line followed by `=` or `:`.
+    Key,
+}
+
+const BASE: Lang = Lang {
+    keywords: &[],
+    line_comment: &[],
+    block_comment: None,
+    quotes: &[],
+    types: &[],
+    builtins: &[],
+    caps: Caps::Plain,
+    attrs: Attrs::None,
+    fstrings: false,
+};
 
 const RUST: Lang = Lang {
     keywords: &[
         "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum",
         "extern", "false", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move",
         "mut", "pub", "ref", "return", "self", "Self", "static", "struct", "super", "trait",
-        "true", "type", "unsafe", "use", "where", "while", "u8", "u16", "u32", "u64", "u128",
-        "usize", "i8", "i16", "i32", "i64", "i128", "isize", "f32", "f64", "bool", "char", "str",
+        "true", "type", "Some", "None", "Ok", "Err", "unsafe", "use", "where", "while",
     ],
     line_comment: &["//"],
     block_comment: Some(("/*", "*/")),
     quotes: &['"'],
-    caps_are_types: true,
+    types: &[
+        "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize",
+        "f32", "f64", "bool", "char", "str", "String", "Vec", "Option", "Result", "Box",
+    ],
+    caps: Caps::Type,
+    ..BASE
 };
 const PYTHON: Lang = Lang {
     keywords: &[
         "False", "None", "True", "and", "as", "assert", "async", "await", "break", "class",
         "continue", "def", "del", "elif", "else", "except", "finally", "for", "from", "global",
         "if", "import", "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return",
-        "try", "while", "with", "yield", "self", "print",
+        "try", "while", "with", "yield", "self",
     ],
     line_comment: &["#"],
     block_comment: None,
     quotes: &['"', '\''],
-    caps_are_types: true,
+    builtins: &[
+        "str",
+        "int",
+        "float",
+        "bool",
+        "list",
+        "dict",
+        "set",
+        "tuple",
+        "bytes",
+        "object",
+        "print",
+        "len",
+        "range",
+        "open",
+        "isinstance",
+        "type",
+        "super",
+        "enumerate",
+        "zip",
+        "map",
+        "filter",
+        "sorted",
+        "any",
+        "all",
+        "min",
+        "max",
+        "sum",
+        "abs",
+        "input",
+        "repr",
+        "iter",
+        "next",
+        "getattr",
+        "setattr",
+        "hasattr",
+    ],
+    caps: Caps::Class,
+    fstrings: true,
+    ..BASE
 };
 const JS: Lang = Lang {
     keywords: &[
@@ -105,7 +184,21 @@ const JS: Lang = Lang {
     line_comment: &["//"],
     block_comment: Some(("/*", "*/")),
     quotes: &['"', '\'', '`'],
-    caps_are_types: true,
+    builtins: &[
+        "string",
+        "number",
+        "boolean",
+        "any",
+        "void",
+        "never",
+        "unknown",
+        "object",
+        "symbol",
+        "bigint",
+        "undefined",
+    ],
+    caps: Caps::Class,
+    ..BASE
 };
 const GO: Lang = Lang {
     keywords: &[
@@ -150,7 +243,30 @@ const GO: Lang = Lang {
     line_comment: &["//"],
     block_comment: Some(("/*", "*/")),
     quotes: &['"', '`', '\''],
-    caps_are_types: true,
+    types: &[
+        "int",
+        "int8",
+        "int16",
+        "int32",
+        "int64",
+        "uint",
+        "uint8",
+        "uint16",
+        "uint32",
+        "uint64",
+        "uintptr",
+        "float32",
+        "float64",
+        "complex64",
+        "complex128",
+        "string",
+        "bool",
+        "byte",
+        "rune",
+        "error",
+        "any",
+    ],
+    ..BASE
 };
 const C: Lang = Lang {
     keywords: &[
@@ -215,7 +331,11 @@ const C: Lang = Lang {
     line_comment: &["//", "#"],
     block_comment: Some(("/*", "*/")),
     quotes: &['"', '\''],
-    caps_are_types: true,
+    types: &[
+        "int", "char", "void", "float", "double", "long", "short", "unsigned", "signed", "bool",
+        "size_t", "auto",
+    ],
+    ..BASE
 };
 const JAVA: Lang = Lang {
     keywords: &[
@@ -279,7 +399,13 @@ const JAVA: Lang = Lang {
     line_comment: &["//"],
     block_comment: Some(("/*", "*/")),
     quotes: &['"', '\''],
-    caps_are_types: true,
+    types: &[
+        "int", "long", "short", "byte", "char", "float", "double", "boolean", "void", "Int",
+        "Long", "Short", "Byte", "Char", "Float", "Double", "Boolean", "Unit", "Any", "Nothing",
+        "String",
+    ],
+    caps: Caps::Type,
+    ..BASE
 };
 const SHELL: Lang = Lang {
     keywords: &[
@@ -291,21 +417,27 @@ const SHELL: Lang = Lang {
     line_comment: &["#"],
     block_comment: None,
     quotes: &['"', '\''],
-    caps_are_types: false,
+    builtins: &[
+        "echo", "cd", "export", "printf", "read", "set", "unset", "source", "exit", "test",
+        "local", "shift", "eval", "exec", "trap",
+    ],
+    ..BASE
 };
 const CONFIG: Lang = Lang {
     keywords: &["true", "false", "null", "yes", "no", "on", "off"],
     line_comment: &["#"],
     block_comment: None,
     quotes: &['"', '\''],
-    caps_are_types: false,
+    attrs: Attrs::Key,
+    ..BASE
 };
 const JSON: Lang = Lang {
     keywords: &["true", "false", "null"],
     line_comment: &[],
     block_comment: None,
     quotes: &['"'],
-    caps_are_types: false,
+    attrs: Attrs::Json,
+    ..BASE
 };
 const SQL: Lang = Lang {
     keywords: &[
@@ -412,7 +544,26 @@ const SQL: Lang = Lang {
     line_comment: &["--"],
     block_comment: Some(("/*", "*/")),
     quotes: &['\'', '"'],
-    caps_are_types: false,
+    types: &[
+        "int",
+        "integer",
+        "bigint",
+        "smallint",
+        "serial",
+        "varchar",
+        "text",
+        "boolean",
+        "date",
+        "timestamp",
+        "float",
+        "real",
+        "numeric",
+        "decimal",
+        "uuid",
+        "json",
+        "jsonb",
+    ],
+    ..BASE
 };
 const RUBY: Lang = Lang {
     keywords: &[
@@ -459,7 +610,8 @@ const RUBY: Lang = Lang {
     line_comment: &["#"],
     block_comment: None,
     quotes: &['"', '\''],
-    caps_are_types: true,
+    caps: Caps::Class,
+    ..BASE
 };
 const LUA: Lang = Lang {
     keywords: &[
@@ -469,7 +621,21 @@ const LUA: Lang = Lang {
     line_comment: &["--"],
     block_comment: Some(("--[[", "]]")),
     quotes: &['"', '\''],
-    caps_are_types: false,
+    builtins: &[
+        "print",
+        "require",
+        "pairs",
+        "ipairs",
+        "type",
+        "tostring",
+        "tonumber",
+        "error",
+        "assert",
+        "pcall",
+        "setmetatable",
+        "getmetatable",
+    ],
+    ..BASE
 };
 const ZIG: Lang = Lang {
     keywords: &[
@@ -519,7 +685,28 @@ const ZIG: Lang = Lang {
     line_comment: &["//"],
     block_comment: None,
     quotes: &['"', '\''],
-    caps_are_types: true,
+    types: &[
+        "u8",
+        "u16",
+        "u32",
+        "u64",
+        "i8",
+        "i16",
+        "i32",
+        "i64",
+        "usize",
+        "isize",
+        "f32",
+        "f64",
+        "bool",
+        "void",
+        "anytype",
+        "type",
+        "comptime_int",
+        "comptime_float",
+    ],
+    caps: Caps::Type,
+    ..BASE
 };
 
 pub fn lang_for(info: &str) -> Option<Lang> {
@@ -574,14 +761,16 @@ pub fn highlight_line(
             out.push((s.to_string(), st));
         }
     };
-    let kw = base.fg(pal.syn_keyword);
-    let string = base.fg(pal.syn_string);
-    let comment = base.fg(pal.syn_comment);
-    let number = base.fg(pal.syn_number);
-    let ty = base.fg(pal.syn_type);
-    let func = base.fg(pal.syn_function);
-
+    let kw = base.patch(pal.syn_keyword);
+    let string = base.patch(pal.syn_string);
+    let comment = base.patch(pal.syn_comment);
+    let number = base.patch(pal.syn_number);
+    let ty = base.patch(pal.syn_type);
+    let func = base.patch(pal.syn_function);
+    let builtin = base.patch(pal.syn_builtin);
+    let attr = base.patch(pal.syn_attr);
     let b = line.as_bytes();
+    let next_nonblank = |j: usize| b[j..].iter().find(|c| **c != b' ').copied();
     let mut i = 0;
     while i < b.len() {
         if state.in_block_comment {
@@ -627,7 +816,17 @@ pub fn highlight_line(
                 j += 1;
             }
             let j = j.min(b.len());
-            push(&mut out, &line[i..j], string);
+            let st = if lang.attrs == Attrs::Json && next_nonblank(j) == Some(b':') {
+                attr
+            } else {
+                string
+            };
+            let fstring = lang.fstrings && i > 0 && matches!(b[i - 1], b'f' | b'F');
+            if fstring {
+                fstring_pieces(&line[i..j], st, base, &mut |s, st| push(&mut out, s, st));
+            } else {
+                push(&mut out, &line[i..j], st);
+            }
             i = j;
             continue;
         }
@@ -649,12 +848,31 @@ pub fn highlight_line(
             }
             let word = &line[i..j];
             let next = b.get(j).copied();
-            let style = if lang.keywords.contains(&word) {
+            let at_line_start = line[..i].trim().is_empty();
+            let style = if lang.types.contains(&word) {
+                ty
+            } else if lang.builtins.contains(&word) {
+                builtin
+            } else if lang.keywords.contains(&word) {
                 kw
+            } else if lang.attrs == Attrs::Key
+                && at_line_start
+                && matches!(next_nonblank(j), Some(b'=') | Some(b':'))
+            {
+                attr
+            } else if lang.fstrings
+                && matches!(word, "f" | "F")
+                && next.is_some_and(|q| lang.quotes.contains(&(q as char)))
+            {
+                string
             } else if next == Some(b'(') {
                 func
-            } else if lang.caps_are_types && c.is_ascii_uppercase() {
-                ty
+            } else if c.is_ascii_uppercase() {
+                match lang.caps {
+                    Caps::Type => ty,
+                    Caps::Class => kw,
+                    Caps::Plain => base,
+                }
             } else {
                 base
             };
@@ -668,6 +886,25 @@ pub fn highlight_line(
         i += ch_len;
     }
     out
+}
+
+/// Split an f-string into literal parts and `{expr}` parts, which are code.
+fn fstring_pieces(text: &str, string: Style, base: Style, push: &mut dyn FnMut(&str, Style)) {
+    let mut rest = text;
+    while let Some(open) = rest.find('{') {
+        if rest[open + 1..].starts_with('{') {
+            push(&rest[..open + 2], string);
+            rest = &rest[open + 2..];
+            continue;
+        }
+        let Some(close) = rest[open..].find('}') else {
+            break;
+        };
+        push(&rest[..open], string);
+        push(&rest[open..open + close + 1], base);
+        rest = &rest[open + close + 1..];
+    }
+    push(rest, string);
 }
 
 #[cfg(test)]
@@ -692,10 +929,49 @@ mod tests {
             texts,
             vec!["let", " x = ", "foo", "(", "42", "); ", "// hi \"s\""]
         );
-        assert_eq!(spans[0].1.fg, Some(pal.syn_keyword));
-        assert_eq!(spans[2].1.fg, Some(pal.syn_function));
-        assert_eq!(spans[4].1.fg, Some(pal.syn_number));
-        assert_eq!(spans[6].1.fg, Some(pal.syn_comment));
+        assert_eq!(spans[0].1.fg, pal.syn_keyword.fg);
+        assert_eq!(spans[2].1.fg, pal.syn_function.fg);
+        assert_eq!(spans[4].1.fg, pal.syn_number.fg);
+        assert_eq!(spans[6].1.fg, pal.syn_comment.fg);
+    }
+
+    fn styles(lang: &str, line: &str) -> Vec<(String, Style)> {
+        let pal = Palette::from_theme(&Theme::default());
+        let lang = lang_for(lang).unwrap();
+        highlight_line(&lang, line, &pal, Style::default(), &mut State::default())
+    }
+
+    #[test]
+    fn types_builtins_attrs_and_fstrings() {
+        let pal = Palette::from_theme(&Theme::default());
+        let find = |v: &[(String, Style)], t: &str| {
+            let texts: Vec<&str> = v.iter().map(|(s, _)| s.as_str()).collect();
+            v.iter()
+                .find(|(s, _)| s == t)
+                .unwrap_or_else(|| panic!("{t} not in {texts:?}"))
+                .1
+        };
+        let rs = styles("rust", "fn add(a: i32) -> String {");
+        assert_eq!(find(&rs, "fn"), pal.syn_keyword);
+        assert_eq!(find(&rs, "add"), pal.syn_function);
+        assert_eq!(find(&rs, "i32"), pal.syn_type);
+        assert_eq!(find(&rs, "String"), pal.syn_type);
+        let ts = styles("ts", "interface Tool { name: string }");
+        assert_eq!(find(&ts, "Tool"), pal.syn_keyword);
+        assert_eq!(find(&ts, "string"), pal.syn_builtin);
+        let py = styles("python", "return f\"hi {name}!\"");
+        let texts: Vec<&str> = py.iter().map(|(s, _)| s.as_str()).collect();
+        assert_eq!(texts, vec!["return", " ", "f\"hi ", "{name}", "!\""]);
+        assert_eq!(py[2].1, pal.syn_string);
+        assert_eq!(py[3].1, Style::default());
+        let json = styles("json", "{ \"name\": \"ah\" }");
+        assert_eq!(find(&json, "\"name\""), pal.syn_attr);
+        assert_eq!(find(&json, "\"ah\""), pal.syn_string);
+        let toml = styles("toml", "name = \"ah\"");
+        assert_eq!(find(&toml, "name"), pal.syn_attr);
+        let go = styles("go", "func Add(a int) int {");
+        assert_eq!(find(&go, "int"), pal.syn_type);
+        assert_eq!(find(&go, "Add"), pal.syn_function);
     }
 
     #[test]
@@ -708,7 +984,7 @@ mod tests {
         let spans = highlight_line(&lang, "still */ int b;", &pal, Style::default(), &mut st);
         assert!(!st.in_block_comment);
         assert_eq!(spans[0].0, "still */");
-        assert_eq!(spans[0].1.fg, Some(pal.syn_comment));
+        assert_eq!(spans[0].1.fg, pal.syn_comment.fg);
     }
 
     #[test]

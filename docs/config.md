@@ -80,7 +80,9 @@ Use the provided tools to inspect and change files and run commands. Prefer read
 
 Colours accept names (`red`, `bright_blue`, `dark_gray`, `gray`, `white`,
 `reset`), `#rrggbb`, or an ANSI index (`"235"`). `reset` means the terminal's
-own colour.
+own colour. The `syn_*` keys may add `dim`, `bold`, `italic` or `underline`
+after the colour (`"cyan dim"`). The highlighting defaults follow the ANSI
+theme Claude Code uses, so both look the same in the same terminal.
 
 | Key | Default | Used for |
 |---|---|---|
@@ -104,15 +106,17 @@ own colour.
 | `heading` | `"white"` | markdown headings |
 | `link` | `"blue"` | markdown links |
 | `quote` | `"dark_gray"` | block quotes |
-| `code` | `"white"` | inline and fenced code |
-| `code_bg` | `"235"` | code background |
+| `code` | `"reset"` | inline and fenced code |
+| `code_bg` | `"reset"` | code background; set one (`"235"`) to get a padded box |
 | `rule` | `"dark_gray"` | horizontal rules, table borders |
-| `syn_keyword` | `"magenta"` | code highlighting |
-| `syn_string` | `"green"` | |
-| `syn_comment` | `"dark_gray"` | |
-| `syn_number` | `"yellow"` | |
-| `syn_type` | `"cyan"` | |
-| `syn_function` | `"blue"` | |
+| `syn_keyword` | `"blue"` | keywords, literals, class names |
+| `syn_string` | `"red"` | strings |
+| `syn_comment` | `"green"` | comments |
+| `syn_number` | `"green"` | numbers |
+| `syn_type` | `"cyan dim"` | type names (`i32`, `int`, `String`) |
+| `syn_function` | `"yellow"` | function names before `(` |
+| `syn_builtin` | `"cyan"` | built-in functions and primitive types (`str`, `string`, `print`) |
+| `syn_attr` | `"cyan"` | keys in JSON, TOML and YAML |
 | `diff_add` | `"green"` | added lines in file diffs |
 | `diff_del` | `"red"` | removed lines |
 | `border_style` | `"lines"` | `none`, `lines` (rules above and below the input), `plain`, `rounded`, `double`, `thick` |

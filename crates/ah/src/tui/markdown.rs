@@ -2,13 +2,14 @@
 //! from the palette, with code block highlighting.
 
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::highlight;
 use super::theme::Palette;
 
+#[derive(Clone, Copy)]
 pub struct Opts {
     pub width: usize,
     pub highlight: bool,
@@ -375,39 +376,41 @@ impl R<'_> {
             .width
             .saturating_sub(self.prefix(false).width())
             .max(8);
-        let base = Style::default().fg(self.pal.code).bg(self.pal.code_bg);
+        let base = self.style().fg(self.pal.code).bg(self.pal.code_bg);
+        let padded = self.pal.code_bg != Color::Reset;
         let hl = if self.opts.highlight {
             highlight::lang_for(lang)
         } else {
             None
         };
         let mut state = highlight::State::default();
-        let label = lang.split([' ', ',']).next().unwrap_or("").trim();
-        if !label.is_empty() {
-            let mut l = vec![Span::styled(label.to_string(), self.pal.dim())];
-            let pad = width.saturating_sub(label.width());
-            l.push(Span::styled(" ".repeat(pad), self.pal.dim()));
-            self.out.push(Line::from(l));
-        }
         let cont = self.prefix(false);
+        let inner = if padded {
+            width.saturating_sub(1)
+        } else {
+            width
+        };
         for raw in code.trim_end_matches('\n').split('\n') {
             let line = raw.replace('\t', "    ");
             let pieces: Vec<Piece> = match &hl {
                 Some(l) => highlight::highlight_line(l, &line, self.pal, base, &mut state),
                 None => vec![(line.clone(), base)],
             };
-            for chunk in chunk_styled(&pieces, width.saturating_sub(1)) {
+            for chunk in chunk_styled(&pieces, inner) {
                 let mut spans: Vec<Span<'static>> = Vec::with_capacity(chunk.len() + 2);
                 if !cont.is_empty() {
                     spans.push(Span::styled(cont.clone(), self.pal.dim()));
                 }
-                spans.push(Span::styled(" ", base));
-                let mut w = 1;
+                let mut w = 0;
+                if padded {
+                    spans.push(Span::styled(" ", base));
+                    w = 1;
+                }
                 for (s, st) in chunk {
                     w += s.width();
                     spans.push(Span::styled(s, st));
                 }
-                if w < width {
+                if padded && w < width {
                     spans.push(Span::styled(" ".repeat(width - w), base));
                 }
                 self.out.push(Line::from(spans));
@@ -682,25 +685,25 @@ mod tests {
     }
 
     #[test]
-    fn code_block_is_highlighted_and_padded() {
+    fn code_block_is_highlighted_without_label_or_padding() {
         let pal = Palette::from_theme(&Theme::default());
-        let lines = render(
-            "```rust\nlet x = 1;\n```\n",
-            &pal,
-            Opts {
-                width: 30,
-                highlight: true,
-            },
-        );
-        assert_eq!(lines[0].spans[0].content, "rust");
-        let code = &lines[1];
-        assert!(
-            code.spans
-                .iter()
-                .any(|s| s.content == "let" && s.style.fg == Some(pal.syn_keyword))
-        );
+        let opts = Opts {
+            width: 30,
+            highlight: true,
+        };
+        let lines = render("```rust\nlet x = 1;\n```\n", &pal, opts);
+        let code = &lines[0];
+        assert_eq!(code.spans[0].content, "let");
+        assert_eq!(code.spans[0].style.fg, pal.syn_keyword.fg);
+        assert_eq!(code.width(), "let x = 1;".len());
+        let boxed = Palette::from_theme(&Theme {
+            code_bg: "235".into(),
+            ..Theme::default()
+        });
+        let lines = render("```rust\nlet x = 1;\n```\n", &boxed, opts);
+        let code = &lines[0];
         assert_eq!(code.width(), 30);
-        assert!(code.spans.iter().all(|s| s.style.bg == Some(pal.code_bg)));
+        assert!(code.spans.iter().all(|s| s.style.bg == Some(boxed.code_bg)));
     }
 
     #[test]

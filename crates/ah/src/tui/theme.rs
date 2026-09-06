@@ -28,12 +28,14 @@ pub struct Palette {
     pub code: Color,
     pub code_bg: Color,
     pub rule: Color,
-    pub syn_keyword: Color,
-    pub syn_string: Color,
-    pub syn_comment: Color,
-    pub syn_number: Color,
-    pub syn_type: Color,
-    pub syn_function: Color,
+    pub syn_keyword: Style,
+    pub syn_string: Style,
+    pub syn_comment: Style,
+    pub syn_number: Style,
+    pub syn_type: Style,
+    pub syn_function: Style,
+    pub syn_builtin: Style,
+    pub syn_attr: Style,
     pub diff_add: Color,
     pub diff_del: Color,
     pub border_style: BorderStyle,
@@ -53,6 +55,23 @@ pub fn parse_color(s: &str) -> Color {
         return Color::Indexed(n);
     }
     t.parse::<Color>().unwrap_or(Color::Reset)
+}
+
+/// A colour optionally followed by `dim`, `bold`, `italic` or `underline`:
+/// `"cyan dim"`.
+pub fn parse_style(s: &str) -> Style {
+    let mut words = s.split_whitespace();
+    let mut st = Style::default().fg(parse_color(words.next().unwrap_or("")));
+    for w in words {
+        st = match w {
+            "dim" => st.add_modifier(Modifier::DIM),
+            "bold" => st.add_modifier(Modifier::BOLD),
+            "italic" => st.add_modifier(Modifier::ITALIC),
+            "underline" => st.add_modifier(Modifier::UNDERLINED),
+            _ => st,
+        };
+    }
+    st
 }
 
 impl Palette {
@@ -80,12 +99,14 @@ impl Palette {
             code: parse_color(&t.code),
             code_bg: parse_color(&t.code_bg),
             rule: parse_color(&t.rule),
-            syn_keyword: parse_color(&t.syn_keyword),
-            syn_string: parse_color(&t.syn_string),
-            syn_comment: parse_color(&t.syn_comment),
-            syn_number: parse_color(&t.syn_number),
-            syn_type: parse_color(&t.syn_type),
-            syn_function: parse_color(&t.syn_function),
+            syn_keyword: parse_style(&t.syn_keyword),
+            syn_string: parse_style(&t.syn_string),
+            syn_comment: parse_style(&t.syn_comment),
+            syn_number: parse_style(&t.syn_number),
+            syn_type: parse_style(&t.syn_type),
+            syn_function: parse_style(&t.syn_function),
+            syn_builtin: parse_style(&t.syn_builtin),
+            syn_attr: parse_style(&t.syn_attr),
             diff_add: parse_color(&t.diff_add),
             diff_del: parse_color(&t.diff_del),
             border_style: t.border_style,
