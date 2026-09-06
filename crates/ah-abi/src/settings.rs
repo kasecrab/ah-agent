@@ -102,6 +102,10 @@ pub struct PromptSettings {
     pub system: String,
     /// Appended after `system`, meant for per-project additions.
     pub append: String,
+    /// Instruction files folded into the system prompt: the first that exists
+    /// in the user config dir, in each directory from the repository root to
+    /// the working directory, and in `.ah/`.
+    pub instructions: Vec<String>,
 }
 
 impl Default for PromptSettings {
@@ -115,6 +119,7 @@ impl Default for PromptSettings {
                  text in a terminal. When a task is done, summarise what changed.",
             ),
             append: String::new(),
+            instructions: vec![String::from("AGENTS.md"), String::from("CLAUDE.md")],
         }
     }
 }

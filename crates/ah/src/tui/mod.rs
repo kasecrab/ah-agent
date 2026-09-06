@@ -57,6 +57,7 @@ const COMMANDS: &[(&str, &str, bool)] = &[
         true,
     ),
     ("help", "list commands and keys", false),
+    ("init", "write an AGENTS.md for this project", false),
     ("keys", "show key bindings", false),
     (
         "model",
@@ -1387,6 +1388,27 @@ impl App {
 
     /// What to pass to `ah -r` to get this conversation back; `None` when
     /// nothing was said, since an empty session is not listed anyway.
+    /// `/init`: have the model write (or refresh) the project's AGENTS.md.
+    fn init_instructions(&mut self) {
+        let path = std::path::Path::new(&self.cwd).join("AGENTS.md");
+        let exists = path.is_file();
+        let names = self.settings().prompt.instructions.join(", ");
+        let mut p = format!(
+            "Study this repository and {} `{}`, the instruction file coding agents read \
+             before working here (this harness loads {names} from the repository root, \
+             every directory down to the working directory, and .ah/). Cover: what the \
+             project is, how to build, test and lint it with exact commands, where things \
+             live, conventions and style rules that are not obvious from the code, and \
+             anything an agent must not do. Plain markdown, under 60 lines, no filler.",
+            if exists { "update" } else { "write" },
+            path.display()
+        );
+        if exists {
+            p.push_str(" Keep what is still true and fix what is not; do not drop sections you cannot verify.");
+        }
+        self.submit(p);
+    }
+
     fn resume_hint(&self) -> Option<String> {
         let spoke = self
             .entries
@@ -2003,6 +2025,7 @@ impl App {
                     self.open_model_picker("", Some(args.to_string()), false);
                 }
             }
+            "init" => self.init_instructions(),
             "usage" => {
                 self.usage_pane = Some(usage::Pane::new());
                 self.fetch_usage();

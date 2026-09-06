@@ -3,6 +3,7 @@
 pub mod agent;
 pub mod auth;
 pub mod error;
+pub mod instructions;
 pub mod log;
 pub mod models;
 pub mod paths;

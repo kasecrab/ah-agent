@@ -136,11 +136,13 @@ impl<'a> Agent<'a> {
             prompt.push_str("\n\n");
             prompt.push_str(&self.settings.prompt.append);
         }
-        let prompt = prompt
+        let mut prompt = prompt
             .replace("{cwd}", &cwd)
             .replace("{os}", os)
             .replace("{shell}", &shell)
             .replace("{date}", &date);
+        let found = crate::instructions::load(&self.cwd, &self.settings.prompt.instructions);
+        prompt.push_str(&crate::instructions::render(&found));
         self.hooks.system_prompt(SystemPromptIn {
             prompt,
             cwd,
