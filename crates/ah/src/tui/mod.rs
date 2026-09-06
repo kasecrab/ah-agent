@@ -80,6 +80,13 @@ const COMMANDS: &[(&str, &str, bool)] = &[
     ("yolo", "auto-approve tool calls", false),
 ];
 
+/// Other spellings the command popup should find and show.
+const ALIASES: &[(&str, &str)] = &[("favorite", "fav"), ("quit", "exit")];
+
+fn alias_of(name: &str) -> Option<&'static str> {
+    ALIASES.iter().find(|(n, _)| *n == name).map(|(_, a)| *a)
+}
+
 /// Mouse selection in screen cells.
 #[derive(Clone, Copy)]
 struct Selection {
@@ -223,7 +230,11 @@ pub fn run(
     let r = run_inner(o, resume, initial_prompt, &mut terminal);
     disable_extras();
     ratatui::restore();
-    r
+    let hint = r?;
+    if let Some(what) = hint {
+        println!("Resume this session with:\n  ah -r {what}");
+    }
+    Ok(())
 }
 
 fn run_inner(
@@ -231,7 +242,7 @@ fn run_inner(
     resume: Option<&str>,
     initial_prompt: Option<String>,
     terminal: &mut ratatui::DefaultTerminal,
-) -> Result<(), AnyError> {
+) -> Result<Option<String>, AnyError> {
     let cwd = app::resolve_cwd(o)?;
     let mut stack = app::load_settings(o)?;
     let mut engine = Engine::new(&stack, cwd.clone(), resume, true)?;
@@ -380,7 +391,8 @@ fn run_inner(
 
     let result = app.event_loop(terminal, &ui_rx);
     let _ = app.tx.send(EngineCmd::Quit);
-    result
+    result?;
+    Ok(app.resume_hint())
 }
 
 /// OSC 52: hand the text to the terminal's clipboard. Works in WezTerm,
@@ -747,7 +759,11 @@ impl App {
             ));
         }
         all.sort_by(|a, b| a.0.cmp(&b.0));
-        let ranked: Vec<(String, String, bool)> = models::rank(rest, &all, |x| x.0.clone())
+        let ranked: Vec<(String, String, bool)> =
+            models::rank(rest, &all, |x| match alias_of(&x.0) {
+                Some(a) => format!("{} {a}", x.0),
+                None => x.0.clone(),
+            })
             .into_iter()
             .cloned()
             .collect();
@@ -1367,6 +1383,23 @@ impl App {
             .and_then(|t| ah_core::settings::parse_toml_patch(&t).ok())
             .and_then(|v| serde_json::from_value(v).ok())
             .unwrap_or_default()
+    }
+
+    /// What to pass to `ah -r` to get this conversation back; `None` when
+    /// nothing was said, since an empty session is not listed anyway.
+    fn resume_hint(&self) -> Option<String> {
+        let spoke = self
+            .entries
+            .iter()
+            .any(|e| matches!(e.block, Block::User(_)));
+        if !spoke {
+            return None;
+        }
+        Some(match &self.session_name {
+            Some(n) if !n.contains(char::is_whitespace) => n.clone(),
+            Some(n) => format!("{n:?}"),
+            None => self.session_id.clone(),
+        })
     }
 
     fn rename_session(&mut self, name: &str) {
@@ -2314,8 +2347,12 @@ impl App {
                 } else {
                     pal.bold(pal.accent)
                 };
+                let shown = match alias_of(name) {
+                    Some(a) => format!("{name} ({a})"),
+                    None => name.clone(),
+                };
                 Line::from(vec![
-                    Span::styled(format!(" /{name:<10}"), name_style),
+                    Span::styled(format!(" /{shown:<14}"), name_style),
                     Span::styled(format!(" {desc}"), pal.dim()),
                 ])
             })
