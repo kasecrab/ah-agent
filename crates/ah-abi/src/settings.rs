@@ -261,7 +261,7 @@ pub struct Layout {
     pub paste_collapse_lines: usize,
     /// Messages that can wait while a turn runs; 0 disables queueing.
     pub queue_max: usize,
-    /// Show the model's input modalities (`T ▣ ♪ ▶ ▤`) in pickers and the status bar.
+    /// Show the model's input modalities (`🅃 ▣ ♪ ▶ ▤`) in pickers and the status bar.
     pub show_modalities: bool,
     /// Shell command that prints the clipboard image as PNG; empty detects
     /// `wl-paste`, `xclip` or `pngpaste`.

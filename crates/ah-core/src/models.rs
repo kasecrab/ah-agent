@@ -36,14 +36,14 @@ impl ModelInfo {
 
 /// Modalities in display order with their icons.
 pub const MODALITIES: &[(&str, &str)] = &[
-    ("text", "T"),
+    ("text", "🅃"),
     ("image", "▣"),
     ("audio", "♪"),
     ("video", "▶"),
     ("file", "▤"),
 ];
 
-/// Icons of the supported modalities only, e.g. `T▣▤`.
+/// Icons of the supported modalities only, e.g. `🅃▣▤`.
 pub fn modality_icons(mods: &[String]) -> String {
     MODALITIES
         .iter()
