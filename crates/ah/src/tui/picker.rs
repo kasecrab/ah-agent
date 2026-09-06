@@ -1,5 +1,5 @@
-//! Fuzzy list overlay shared by `/model`, `/resume`, `/effort`, `/favorite`
-//! and `/rename`.
+//! Fuzzy list overlay shared by `/model`, `/resume`, `/effort`, `/favorite`,
+//! `/rename` and `/skills`.
 
 use ah_core::models;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -30,6 +30,12 @@ pub enum Kind {
     },
     /// Free-text name for the current session.
     SessionName,
+    /// Saved prompts from the skills directories.
+    Skills,
+    /// Free-text arguments for a skill that uses `$ARGUMENTS`.
+    SkillArgs {
+        name: String,
+    },
 }
 
 pub struct Row {
@@ -156,7 +162,7 @@ impl Picker {
     pub fn draw(&self, f: &mut Frame, area: Rect, pal: &Palette) {
         let compact = matches!(
             self.kind,
-            Kind::Effort { .. } | Kind::Name { .. } | Kind::SessionName
+            Kind::Effort { .. } | Kind::Name { .. } | Kind::SessionName | Kind::SkillArgs { .. }
         );
         let width = if compact {
             48.min(area.width)

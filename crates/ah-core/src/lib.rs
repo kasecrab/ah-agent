@@ -11,6 +11,7 @@ pub mod plugins;
 pub mod provider;
 pub mod session;
 pub mod settings;
+pub mod skills;
 pub mod tools;
 
 pub use ah_abi as abi;

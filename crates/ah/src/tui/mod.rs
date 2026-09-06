@@ -80,6 +80,7 @@ const COMMANDS: &[(&str, &str, bool)] = &[
     ),
     ("resume", "switch to a previous session", true),
     ("session", "show session id and file", false),
+    ("skills", "run a saved prompt: /skills [name] [args]", true),
     ("set", "override a setting: /set theme.accent magenta", true),
     ("tools", "list tools", false),
     ("usage", "session cost, account balance, top models", false),
@@ -1043,6 +1044,71 @@ impl App {
         self.dirty = true;
     }
 
+    fn open_skills_picker(&mut self, query: &str) {
+        let pal = &self.pal;
+        let skills = ah_core::skills::load(std::path::Path::new(&self.cwd));
+        let rows: Vec<Row> = skills
+            .iter()
+            .map(|s| Row {
+                style: None,
+                id: s.name.clone(),
+                search: format!("{} {}", s.name, s.description),
+                label: s.name.clone(),
+                cols: vec![
+                    (format!("{:<40.40} ", s.description), pal.dim()),
+                    (
+                        format!("{:<7}", s.scope),
+                        Style::default().fg(if s.scope == "project" {
+                            pal.user
+                        } else {
+                            pal.tool
+                        }),
+                    ),
+                ],
+            })
+            .collect();
+        let mut p = Picker::new(Kind::Skills, "skills · Enter run · Esc close", query, rows);
+        p.hint = if p.rows.is_empty() {
+            format!(
+                "no skills; add <name>.md under {} or .ah/skills",
+                ah_core::paths::config_dir().join("skills").display()
+            )
+        } else {
+            "$ARGUMENTS in a skill asks for arguments".into()
+        };
+        self.picker = Some(p);
+        self.dirty = true;
+    }
+
+    fn open_skill_args_picker(&mut self, name: &str) {
+        let mut p = Picker::new(
+            Kind::SkillArgs { name: name.into() },
+            &format!("arguments for {name}"),
+            "",
+            Vec::new(),
+        );
+        p.hint = "replaces $ARGUMENTS; Enter runs".into();
+        self.picker = Some(p);
+        self.dirty = true;
+    }
+
+    /// Send a skill. With `ask`, a skill that wants arguments and got none
+    /// prompts for them first.
+    fn run_skill(&mut self, name: &str, args: &str, ask: bool) {
+        let skills = ah_core::skills::load(std::path::Path::new(&self.cwd));
+        let Some(s) = ah_core::skills::find(&skills, name) else {
+            self.push(Block::Notice(format!(
+                "no skill named {name:?} (try /skills)"
+            )));
+            return;
+        };
+        if ask && s.takes_args() && args.trim().is_empty() {
+            self.open_skill_args_picker(name);
+            return;
+        }
+        self.submit(s.render(args));
+    }
+
     fn open_session_picker(&mut self, query: &str) {
         let pal = &self.pal;
         let rows: Vec<Row> = ah_core::session::summaries()
@@ -1140,6 +1206,12 @@ impl App {
                         None => {}
                     },
                     Kind::SessionName => self.rename_session(&query),
+                    Kind::Skills => {
+                        if let Some(name) = chosen {
+                            self.run_skill(&name, "", true);
+                        }
+                    }
+                    Kind::SkillArgs { name } => self.run_skill(&name, &query, false),
                     Kind::Name { rename } => {
                         if query.is_empty() || query.starts_with('/') {
                             self.open_name_picker(rename);
@@ -2082,6 +2154,17 @@ impl App {
             "usage" => {
                 self.usage_pane = Some(usage::Pane::new());
                 self.fetch_usage();
+            }
+            "skills" | "skill" => {
+                let (name, rest) = args
+                    .split_once(' ')
+                    .map(|(n, a)| (n, a.trim()))
+                    .unwrap_or((args, ""));
+                if name.is_empty() {
+                    self.open_skills_picker("");
+                } else {
+                    self.run_skill(name, rest, true);
+                }
             }
             "rename" => {
                 if args.is_empty() {
