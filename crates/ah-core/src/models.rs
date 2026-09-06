@@ -39,19 +39,20 @@ impl ModelInfo {
         self.output_modalities.iter().any(|m| m == modality)
     }
 
-    /// `🅃🄸🄵→🅃`: input icons, arrow, output icons.
+    /// `TIF→T`: input tags, arrow, output tags.
     pub fn modality_icons(&self) -> String {
         modality_icons(&self.input_modalities, &self.output_modalities)
     }
 }
 
-/// Modalities in display order with their icons (boxed initials, one cell each).
+/// Modalities in display order with their one-letter tags. Plain ASCII so
+/// every terminal font renders them at full size.
 pub const MODALITIES: &[(&str, &str)] = &[
-    ("text", "🅃"),
-    ("image", "🄸"),
-    ("audio", "🄰"),
-    ("video", "🅅"),
-    ("file", "🄵"),
+    ("text", "T"),
+    ("image", "I"),
+    ("audio", "A"),
+    ("video", "V"),
+    ("file", "F"),
 ];
 
 /// Separates input from output icons.
@@ -65,8 +66,8 @@ fn icons(mods: &[String]) -> String {
         .collect()
 }
 
-/// `🅃🄸🄵→🅃`; only the input half when outputs are unknown, empty when
-/// both are.
+/// `TIF→T`; only the input half when outputs are unknown, empty when both
+/// are.
 pub fn modality_icons(input: &[String], output: &[String]) -> String {
     let (i, o) = (icons(input), icons(output));
     match (i.is_empty(), o.is_empty()) {

@@ -189,7 +189,7 @@ struct App {
     queue: std::collections::VecDeque<(String, Vec<String>)>,
     /// Input modalities of the current model from the catalogue.
     modalities: Vec<String>,
-    /// `🅃🄸→🅃` for the current model, empty when unknown.
+    /// `TI→T` for the current model, empty when unknown.
     modality_icons: String,
     /// A catalogue fetch is in flight.
     fetching_models: bool,
