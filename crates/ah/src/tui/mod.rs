@@ -18,7 +18,9 @@ use ah_core::abi::*;
 use ah_core::agent::AgentEvent;
 use ah_core::models::{self, ModelInfo};
 use ah_core::settings::{Origin, SettingsStack};
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -72,6 +74,14 @@ const COMMANDS: &[(&str, &str, bool)] = &[
     ("usage", "session cost, account balance, top models", false),
     ("yolo", "auto-approve tool calls", false),
 ];
+
+/// Mouse selection in screen cells.
+#[derive(Clone, Copy)]
+struct Selection {
+    anchor: (u16, u16),
+    cur: (u16, u16),
+    dragging: bool,
+}
 
 struct Completion {
     /// `(name, description, takes_args)`
@@ -177,6 +187,8 @@ struct App {
     stats: Stats,
     /// When the current reply started streaming reasoning.
     think_start: Option<Instant>,
+    sel: Option<Selection>,
+    copy_pending: bool,
     mouse_on: bool,
     /// Model catalogue, loaded lazily for the picker and reasoning checks.
     catalogue: Option<Vec<ModelInfo>>,
@@ -294,6 +306,8 @@ fn run_inner(
         usage_pane: None,
         stats: Stats::default(),
         think_start: None,
+        sel: None,
+        copy_pending: false,
         mouse_on: settings.layout.mouse,
         catalogue: None,
         self_tx: ui_tx.clone(),
@@ -359,6 +373,39 @@ fn run_inner(
     let result = app.event_loop(terminal, &ui_rx);
     let _ = app.tx.send(EngineCmd::Quit);
     result
+}
+
+/// OSC 52: hand the text to the terminal's clipboard. Works in WezTerm,
+/// kitty, foot, alacritty, iTerm2 and over ssh; terminals that ignore it
+/// still offer Shift-drag for native selection.
+fn copy_to_clipboard(text: &str) {
+    use std::io::Write as _;
+    let mut out = std::io::stdout();
+    let _ = write!(out, "\x1b]52;c;{}\x07", base64(text.as_bytes()));
+    let _ = out.flush();
+}
+
+fn base64(data: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut s = String::with_capacity(data.len().div_ceil(3) * 4);
+    for c in data.chunks(3) {
+        let n = (c[0] as u32) << 16
+            | (*c.get(1).unwrap_or(&0) as u32) << 8
+            | *c.get(2).unwrap_or(&0) as u32;
+        s.push(T[(n >> 18) as usize & 63] as char);
+        s.push(T[(n >> 12) as usize & 63] as char);
+        s.push(if c.len() > 1 {
+            T[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        s.push(if c.len() > 2 {
+            T[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    s
 }
 
 fn enable_extras(settings: &Settings) {
@@ -1545,9 +1592,36 @@ impl App {
             }
             Event::Mouse(m) => {
                 let step = self.settings().layout.scroll_step.max(1) as usize;
+                let at = (m.column, m.row);
                 match m.kind {
                     MouseEventKind::ScrollUp => self.scroll_by(-(step as isize)),
                     MouseEventKind::ScrollDown => self.scroll_by(step as isize),
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        self.sel = Some(Selection {
+                            anchor: at,
+                            cur: at,
+                            dragging: true,
+                        });
+                        self.dirty = true;
+                    }
+                    MouseEventKind::Drag(MouseButton::Left) => {
+                        if let Some(sel) = self.sel.as_mut().filter(|s| s.dragging) {
+                            sel.cur = at;
+                            self.dirty = true;
+                        }
+                    }
+                    MouseEventKind::Up(MouseButton::Left) => {
+                        if let Some(sel) = self.sel.as_mut() {
+                            sel.cur = at;
+                            sel.dragging = false;
+                            if sel.anchor == sel.cur {
+                                self.sel = None;
+                            } else {
+                                self.copy_pending = true;
+                            }
+                            self.dirty = true;
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -1577,6 +1651,7 @@ impl App {
             return;
         }
         self.dirty = true;
+        self.sel = None;
         let b = self.binds.clone();
 
         if self.usage_pane.is_some() {
@@ -2104,6 +2179,53 @@ impl App {
         if let Some(u) = &self.usage_pane {
             u.draw(f, area, &pal, &self.usage, &self.stats);
         }
+        if let Some(sel) = self.sel {
+            let text = self.highlight_selection(f, area, sel.anchor, sel.cur);
+            if self.copy_pending {
+                self.copy_pending = false;
+                copy_to_clipboard(&text);
+                let n = text.chars().count();
+                self.push(Block::Notice(format!("copied {n} chars")));
+            }
+        }
+    }
+
+    /// Reverse the cells between `a` and `b` in reading order and return
+    /// their text, rows trimmed and joined with newlines.
+    fn highlight_selection(
+        &self,
+        f: &mut Frame,
+        area: Rect,
+        a: (u16, u16),
+        b: (u16, u16),
+    ) -> String {
+        let (start, end) = if (a.1, a.0) <= (b.1, b.0) {
+            (a, b)
+        } else {
+            (b, a)
+        };
+        let buf = f.buffer_mut();
+        let mut out = String::new();
+        for y in start.1..=end.1.min(area.height.saturating_sub(1)) {
+            let x0 = if y == start.1 { start.0 } else { 0 };
+            let x1 = if y == end.1 {
+                end.0.min(area.width.saturating_sub(1))
+            } else {
+                area.width.saturating_sub(1)
+            };
+            let mut row = String::new();
+            for x in x0..=x1 {
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    row.push_str(cell.symbol());
+                    cell.set_style(cell.style().add_modifier(Modifier::REVERSED));
+                }
+            }
+            if y > start.1 {
+                out.push('\n');
+            }
+            out.push_str(row.trim_end());
+        }
+        out
     }
 
     fn draw_completion(&self, f: &mut Frame, c: &Completion, input_area: Rect, pal: &Palette) {

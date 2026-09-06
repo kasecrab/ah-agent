@@ -246,7 +246,8 @@ pub struct Layout {
     pub spinner_ms: u64,
     /// Rows scrolled per wheel/arrow step.
     pub scroll_step: u16,
-    /// Capture the mouse for wheel scrolling (disables native text selection).
+    /// Capture the mouse: wheel scrolls, drag selects and copies (OSC 52).
+    /// Off, the terminal keeps the mouse and wheel ticks arrive as Up/Down.
     pub mouse: bool,
     /// Push kitty keyboard-protocol flags (needed for Shift-Enter).
     pub kitty_keyboard: bool,
@@ -272,7 +273,7 @@ impl Default for Layout {
             stream_redraw_ms: 33,
             spinner_ms: 100,
             scroll_step: 3,
-            mouse: false,
+            mouse: true,
             kitty_keyboard: true,
             paste_collapse_lines: 3,
             markdown: true,
