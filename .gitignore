@@ -1,0 +1,36 @@
+# Rust build output
+/target/
+/plugins/target/
+**/target/
+
+# rustfmt backups
+**/*.rs.bk
+
+# MSVC debug info
+*.pdb
+
+# Cargo
+# Cargo.lock is kept: this workspace builds binaries.
+
+# Profiling / coverage
+*.profraw
+*.profdata
+perf.data*
+flamegraph.svg
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Project-local state (config, plugins, sessions)
+.ah/
+
+# Not published yet
+/README.md
+/justfile
+/Cargo.lock
+/scripts/
+/plugins/

@@ -1,0 +1,11 @@
+[package]
+name = "ah-plugin-sdk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SDK for writing ah harness plugins targeting wasm32-unknown-unknown"
+
+[dependencies]
+ah-abi = { path = "../ah-abi", default-features = false }
+serde.workspace = true
+serde_json.workspace = true

@@ -1,0 +1,201 @@
+//! `ah`: CLI one-shot mode and TUI.
+
+mod app;
+mod cli;
+mod tui;
+
+use std::io::IsTerminal;
+use std::path::PathBuf;
+
+use clap::{Args, Parser, Subcommand};
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "ah",
+    version,
+    about = "Minimal, fast agent harness (OpenRouter + wasm plugins)"
+)]
+pub struct Cli {
+    /// Prompt for one-shot mode. Also read from stdin when piped.
+    #[arg(short, long)]
+    pub prompt: Option<String>,
+
+    /// Prompt words (same as --prompt).
+    #[arg(trailing_var_arg = true)]
+    pub words: Vec<String>,
+
+    #[command(flatten)]
+    pub overrides: Overrides,
+
+    /// Emit JSONL events instead of text (one-shot mode).
+    #[arg(long)]
+    pub json: bool,
+
+    /// Resume a session by id (default: latest).
+    #[arg(short, long, value_name = "ID", num_args = 0..=1, default_missing_value = "")]
+    pub resume: Option<String>,
+
+    /// Force the TUI even when a prompt is given (prompt is submitted first).
+    #[arg(long)]
+    pub tui: bool,
+
+    #[command(subcommand)]
+    pub command: Option<Command>,
+}
+
+/// Settings overrides shared by every mode. Applied as the last layer.
+#[derive(Args, Debug, Default, Clone)]
+pub struct Overrides {
+    /// Model id, e.g. anthropic/claude-sonnet-4.5
+    #[arg(short, long)]
+    pub model: Option<String>,
+
+    /// Auto-approve every tool call (default).
+    #[arg(long, conflicts_with = "ask")]
+    pub yolo: bool,
+
+    /// Ask before bash/write/edit tool calls.
+    #[arg(long)]
+    pub ask: bool,
+
+    /// Do not load any plugins.
+    #[arg(long)]
+    pub no_plugins: bool,
+
+    /// Extra plugin file or directory (repeatable).
+    #[arg(long = "plugin", value_name = "PATH")]
+    pub plugins: Vec<PathBuf>,
+
+    /// Working directory for tools.
+    #[arg(long, value_name = "DIR")]
+    pub cwd: Option<PathBuf>,
+
+    /// Extra text appended to the system prompt.
+    #[arg(short, long, value_name = "TEXT")]
+    pub system: Option<String>,
+
+    #[arg(long)]
+    pub max_tokens: Option<u32>,
+
+    /// Override any setting: --set theme.accent=magenta --set layout.input_height=5
+    #[arg(long = "set", value_name = "KEY=VALUE")]
+    pub sets: Vec<String>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum Command {
+    /// Log in to OpenRouter via the browser (PKCE) and store the key.
+    Login {
+        /// Paste an API key directly instead of using the browser.
+        #[arg(long)]
+        key: Option<String>,
+    },
+    /// Remove the stored API key.
+    Logout,
+    /// List models available on OpenRouter.
+    Models {
+        /// Only models that support tool calling.
+        #[arg(long)]
+        tools: bool,
+        /// Fuzzy filter on id and name.
+        filter: Option<String>,
+        /// Re-fetch even if the local cache is fresh.
+        #[arg(long)]
+        refresh: bool,
+    },
+    /// Manage wasm plugins.
+    Plugin {
+        #[command(subcommand)]
+        cmd: PluginCmd,
+    },
+    /// Show or initialise configuration.
+    Config {
+        #[command(subcommand)]
+        cmd: Option<ConfigCmd>,
+    },
+    /// List stored sessions.
+    Sessions,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PluginCmd {
+    /// List discovered plugins and their load status.
+    List,
+    /// Copy a .wasm file into the user plugin directory.
+    Add { path: PathBuf },
+    /// Remove a plugin from the user plugin directory by name.
+    Rm { name: String },
+    /// Build a plugin crate for wasm32 and install it.
+    Build {
+        /// Path to the plugin crate (default: current directory).
+        dir: Option<PathBuf>,
+        /// Only build; do not copy into the plugin directory.
+        #[arg(long)]
+        no_install: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ConfigCmd {
+    /// Print the fully merged settings as TOML (default).
+    Show {
+        /// Also list the layers that contributed.
+        #[arg(long)]
+        origins: bool,
+    },
+    /// Print config file locations.
+    Path,
+    /// Write a commented default config.toml to the user config dir.
+    Init {
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+fn main() {
+    // skip clap for --version
+    let mut args = std::env::args_os().skip(1);
+    if let (Some(a), None) = (args.next(), args.next())
+        && (a == "--version" || a == "-V")
+    {
+        println!("ah {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+    let cli = Cli::parse();
+    let code = match run(cli) {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("ah: {e}");
+            1
+        }
+    };
+    std::process::exit(code);
+}
+
+fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(cmd) = cli.command {
+        return cli::subcommand(cmd, &cli.overrides);
+    }
+    let mut prompt = cli.prompt.clone();
+    if prompt.is_none() && !cli.words.is_empty() {
+        prompt = Some(cli.words.join(" "));
+    }
+    let stdin_is_tty = std::io::stdin().is_terminal();
+    let stdout_is_tty = std::io::stdout().is_terminal();
+    if prompt.is_none() && !stdin_is_tty {
+        let mut s = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut s)?;
+        if !s.trim().is_empty() {
+            prompt = Some(s);
+        }
+    }
+    let want_tui = cli.tui || (prompt.is_none() && stdin_is_tty && stdout_is_tty);
+    if want_tui {
+        tui::run(&cli.overrides, cli.resume.as_deref(), prompt)
+    } else {
+        match prompt {
+            Some(p) => cli::one_shot(&cli.overrides, cli.resume.as_deref(), &p, cli.json),
+            None => Err("no prompt given and no terminal for the TUI; try `ah -p \"...\"`".into()),
+        }
+    }
+}

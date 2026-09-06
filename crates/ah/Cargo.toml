@@ -1,0 +1,21 @@
+[package]
+name = "ah"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+default-run = "ah"
+
+[[bin]]
+name = "ah"
+path = "src/main.rs"
+
+[dependencies]
+ah-abi = { path = "../ah-abi" }
+ah-core = { path = "../ah-core" }
+serde = { workspace = true, features = ["std"] }
+serde_json = { workspace = true, features = ["std"] }
+clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+crossterm = { version = "0.29", default-features = false, features = ["events"] }
+unicode-width = "0.2"
+dirs = "7"
