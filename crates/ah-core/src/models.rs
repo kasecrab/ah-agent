@@ -23,10 +23,42 @@ pub struct ModelInfo {
     pub tools: bool,
     #[serde(default)]
     pub reasoning: bool,
+    /// `text`, `image`, `audio`, `video`, `file` as OpenRouter reports them.
+    #[serde(default)]
+    pub input_modalities: Vec<String>,
 }
+
+impl ModelInfo {
+    pub fn accepts(&self, modality: &str) -> bool {
+        self.input_modalities.iter().any(|m| m == modality)
+    }
+}
+
+/// Modalities in display order with their icons.
+pub const MODALITIES: &[(&str, &str)] = &[
+    ("text", "T"),
+    ("image", "▣"),
+    ("audio", "♪"),
+    ("video", "▶"),
+    ("file", "▤"),
+];
+
+/// Icons of the supported modalities only, e.g. `T▣▤`.
+pub fn modality_icons(mods: &[String]) -> String {
+    MODALITIES
+        .iter()
+        .filter(|(m, _)| mods.iter().any(|x| x == m))
+        .map(|(_, i)| *i)
+        .collect()
+}
+
+/// Bumped when `ModelInfo` gains fields; older caches are refetched.
+const CACHE_VERSION: u32 = 2;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Cache {
+    #[serde(default)]
+    version: u32,
     fetched_ms: u64,
     models: Vec<ModelInfo>,
 }
@@ -46,6 +78,9 @@ fn now_ms() -> u64 {
 pub fn load_cached() -> Option<(Vec<ModelInfo>, Duration)> {
     let text = std::fs::read_to_string(cache_path()).ok()?;
     let c: Cache = serde_json::from_str(&text).ok()?;
+    if c.version != CACHE_VERSION {
+        return None;
+    }
     let age = Duration::from_millis(now_ms().saturating_sub(c.fetched_ms));
     Some((c.models, age))
 }
@@ -56,6 +91,7 @@ pub fn save_cache(models: &[ModelInfo]) -> Result<()> {
         std::fs::create_dir_all(d)?;
     }
     let c = Cache {
+        version: CACHE_VERSION,
         fetched_ms: now_ms(),
         models: models.to_vec(),
     };
@@ -91,6 +127,14 @@ pub fn fetch(base_url: &str, api_key: Option<&str>) -> Result<Vec<ModelInfo>> {
                 completion_per_m: price("completion"),
                 tools: has("tools"),
                 reasoning: has("reasoning") || has("include_reasoning"),
+                input_modalities: m["architecture"]["input_modalities"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
             })
         })
         .collect();

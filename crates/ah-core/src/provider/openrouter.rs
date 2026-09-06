@@ -247,6 +247,7 @@ impl Provider for OpenRouter {
 
     fn stream(&self, req: &ChatRequest, cancel: &AtomicBool, on_event: OnEvent<'_>) -> Result<()> {
         let mut body = serde_json::to_value(req)?;
+        attach_images(&mut body);
         body["stream"] = Value::Bool(true);
         body["usage"] = serde_json::json!({ "include": true });
         crate::debug!(
@@ -277,10 +278,54 @@ impl Provider for OpenRouter {
     }
 }
 
+/// Turn `{"content": "...", "images": [...]}` into the OpenAI content-parts
+/// shape; messages without images are left alone.
+fn attach_images(body: &mut Value) {
+    let Some(msgs) = body.get_mut("messages").and_then(|m| m.as_array_mut()) else {
+        return;
+    };
+    for m in msgs {
+        let Some(images) = m.get("images").and_then(|i| i.as_array()).cloned() else {
+            continue;
+        };
+        let text = m
+            .get("content")
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .to_string();
+        let mut parts = Vec::new();
+        if !text.is_empty() {
+            parts.push(serde_json::json!({"type": "text", "text": text}));
+        }
+        for url in images {
+            parts.push(serde_json::json!({"type": "image_url", "image_url": {"url": url}}));
+        }
+        if let Some(o) = m.as_object_mut() {
+            o.insert("content".into(), Value::Array(parts));
+            o.remove("images");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::provider::Accumulator;
+
+    #[test]
+    fn images_become_content_parts() {
+        let mut body = serde_json::json!({"messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "user", "content": "look", "images": ["data:image/png;base64,AA=="]},
+        ]});
+        attach_images(&mut body);
+        assert_eq!(body["messages"][0]["content"], "hi");
+        let parts = body["messages"][1]["content"].as_array().unwrap();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["text"], "look");
+        assert_eq!(parts[1]["image_url"]["url"], "data:image/png;base64,AA==");
+        assert!(body["messages"][1].get("images").is_none());
+    }
 
     const FIXTURE: &str = concat!(
         ": OPENROUTER PROCESSING\n\n",

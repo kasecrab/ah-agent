@@ -12,6 +12,8 @@ pub struct Editor {
     hist_pos: Option<usize>,
     draft: String,
     pastes: Vec<String>,
+    /// Attached images as `data:` URLs, shown as `[Image #1: 120 KB]` chips.
+    images: Vec<String>,
     /// Entry added by the last `take`, not yet written to disk.
     added: Option<String>,
 }
@@ -175,12 +177,14 @@ impl Editor {
         self.cursor = 0;
         self.hist_pos = None;
         self.pastes.clear();
+        self.images.clear();
     }
 
-    /// Take the text for submission and record it in history.
+    /// Take the text for submission and record it in history. Image chips
+    /// are stripped; the images come out of `take_images`.
     pub fn take(&mut self) -> String {
         let raw = std::mem::take(&mut self.text);
-        let t = self.expand_pastes(&raw);
+        let t = self.strip_image_chips(&self.expand_pastes(&raw));
         self.pastes.clear();
         self.cursor = 0;
         self.hist_pos = None;
@@ -188,6 +192,11 @@ impl Editor {
             self.remember(&t);
         }
         t
+    }
+
+    /// Images attached since the last take.
+    pub fn take_images(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.images)
     }
 
     /// True while Up/Down are walking history (the text is a recalled entry).
@@ -406,16 +415,66 @@ impl Editor {
         out
     }
 
+    /// Attach an image; the chip stays in the text until submit.
+    pub fn insert_image(&mut self, data_url: String, bytes: usize) {
+        self.images.push(data_url);
+        let size = if bytes >= 1024 * 1024 {
+            format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+        } else {
+            format!("{} KB", bytes.div_ceil(1024))
+        };
+        let chip = format!("[Image #{}: {size}]", self.images.len());
+        if !self.text.is_empty() && !self.text.ends_with([' ', '\n']) {
+            self.insert_char(' ');
+        }
+        self.insert_str(&chip);
+    }
+
+    fn strip_image_chips(&self, text: &str) -> String {
+        if !text.contains("[Image #") {
+            return text.to_string();
+        }
+        let mut out = text.to_string();
+        while let Some(start) = out.find("[Image #")
+            && let Some(len) = out[start..].find(']')
+        {
+            out.replace_range(start..start + len + 1, "");
+        }
+        out.trim().to_string()
+    }
+
     /// If the cursor sits right after a chip, remove the whole chip. Returns
-    /// true when something was removed.
+    /// true when something was removed. Removing an image chip drops the
+    /// image as well.
     pub fn backspace_chip(&mut self) -> bool {
         let before: String = self.text.chars().take(self.cursor).collect();
-        if !before.ends_with(" lines]") {
+        if !before.ends_with(']') {
             return false;
         }
-        let Some(start) = before.rfind("[Pasted #") else {
+        let paste = before.rfind("[Pasted #");
+        let image = before.rfind("[Image #");
+        let Some(start) = paste.max(image) else {
             return false;
         };
+        if before[start..].contains('\n') {
+            return false;
+        }
+        if image == Some(start)
+            && let Some(n) = before[start + 8..]
+                .split(':')
+                .next()
+                .and_then(|n| n.trim().parse::<usize>().ok())
+            && n >= 1
+            && n <= self.images.len()
+        {
+            self.images.remove(n - 1);
+            // renumber the chips that follow
+            for i in n..=self.images.len() {
+                self.text =
+                    self.text
+                        .replacen(&format!("[Image #{}:", i + 1), &format!("[Image #{i}:"), 1);
+            }
+        }
         let chip_chars = before[start..].chars().count();
         let start_b = self.byte_at(self.cursor - chip_chars);
         let end_b = self.byte_at(self.cursor);
@@ -428,6 +487,25 @@ impl Editor {
 #[cfg(test)]
 mod paste_tests {
     use super::*;
+
+    #[test]
+    fn image_chips_attach_and_detach() {
+        let mut e = Editor::default();
+        e.insert_str("see");
+        e.insert_image("data:image/png;base64,AA==".into(), 2048);
+        e.insert_image("data:image/png;base64,BB==".into(), 3 * 1024 * 1024);
+        assert_eq!(e.text, "see [Image #1: 2 KB] [Image #2: 3.0 MB]");
+        assert!(e.backspace_chip());
+        assert_eq!(e.text, "see [Image #1: 2 KB] ");
+        assert_eq!(e.images.len(), 1);
+        let t = e.take();
+        assert_eq!(t, "see");
+        assert_eq!(
+            e.take_images(),
+            vec!["data:image/png;base64,AA==".to_string()]
+        );
+        assert!(e.take_images().is_empty());
+    }
 
     #[test]
     fn long_paste_collapses_and_expands() {

@@ -90,7 +90,15 @@ impl Pane {
         }
     }
 
-    pub fn draw(&self, f: &mut Frame, area: Rect, pal: &Palette, usage: &Usage, s: &Stats) {
+    pub fn draw(
+        &self,
+        f: &mut Frame,
+        area: Rect,
+        pal: &Palette,
+        usage: &Usage,
+        s: &Stats,
+        icons: &dyn Fn(&str) -> String,
+    ) {
         let dim = pal.dim();
         let key = pal.bold(pal.accent);
         let val = Style::default().fg(pal.fg);
@@ -103,6 +111,10 @@ impl Pane {
         let sub = |name: &str, cols: String| -> Line<'static> {
             Line::from(vec![
                 Span::styled(format!("   {name:<32.32}"), val),
+                Span::styled(
+                    format!("{:<6}", icons(name)),
+                    Style::default().fg(pal.accent),
+                ),
                 Span::styled(cols, dim),
             ])
         };

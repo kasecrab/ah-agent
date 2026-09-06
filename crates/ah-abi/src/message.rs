@@ -24,6 +24,9 @@ pub struct Message {
     /// Reasoning text from reasoning models.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
+    /// Attached images as `data:` URLs. Providers send them as content parts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<String>,
 }
 
 impl Message {
@@ -34,6 +37,7 @@ impl Message {
             tool_calls: Vec::new(),
             tool_call_id: None,
             reasoning: None,
+            images: Vec::new(),
         }
     }
     pub fn system(c: impl Into<String>) -> Self {
@@ -44,6 +48,11 @@ impl Message {
     }
     pub fn assistant(c: impl Into<String>) -> Self {
         Self::new(Role::Assistant, c)
+    }
+    pub fn user_with_images(c: impl Into<String>, images: Vec<String>) -> Self {
+        let mut m = Self::new(Role::User, c);
+        m.images = images;
+        m
     }
     pub fn tool_result(call_id: impl Into<String>, c: impl Into<String>) -> Self {
         let mut m = Self::new(Role::Tool, c);

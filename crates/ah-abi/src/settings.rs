@@ -261,6 +261,11 @@ pub struct Layout {
     pub paste_collapse_lines: usize,
     /// Messages that can wait while a turn runs; 0 disables queueing.
     pub queue_max: usize,
+    /// Show the model's input modalities (`T ▣ ♪ ▶ ▤`) in pickers and the status bar.
+    pub show_modalities: bool,
+    /// Shell command that prints the clipboard image as PNG; empty detects
+    /// `wl-paste`, `xclip` or `pngpaste`.
+    pub image_paste_cmd: String,
     /// Render assistant messages as markdown.
     pub markdown: bool,
     /// Highlight fenced code blocks.
@@ -285,6 +290,8 @@ impl Default for Layout {
             kitty_keyboard: true,
             paste_collapse_lines: 3,
             queue_max: 5,
+            show_modalities: true,
+            image_paste_cmd: String::new(),
             markdown: true,
             code_highlight: true,
         }
@@ -317,6 +324,8 @@ pub struct Keys {
     pub delete_line: Vec<String>,
     pub line_start: Vec<String>,
     pub line_end: Vec<String>,
+    /// Attach the image on the clipboard to the next message.
+    pub paste_image: Vec<String>,
 }
 
 impl Default for Keys {
@@ -343,6 +352,7 @@ impl Default for Keys {
             delete_line: v(&["ctrl-u"]),
             line_start: v(&["ctrl-a", "home"]),
             line_end: v(&["ctrl-e", "end"]),
+            paste_image: v(&["ctrl-v"]),
         }
     }
 }
@@ -405,8 +415,8 @@ impl Default for PluginSettings {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StatusLine {
-    /// Template. Placeholders: `{model} {favorite} {effort} {tokens_in} {tokens_out}
-    /// {cost} {context} {cwd} {git} {plugins} {state} {session}`.
+    /// Template. Placeholders: `{model} {favorite} {effort} {modalities} {tokens_in}
+    /// {tokens_out} {cost} {context} {cwd} {git} {plugins} {state} {session}`.
     pub format: String,
 }
 
@@ -414,7 +424,7 @@ impl Default for StatusLine {
     fn default() -> Self {
         Self {
             format: String::from(
-                " {favorite} {model} {effort} │ ↑{tokens_in} ↓{tokens_out} ${cost} │ {context} │ {cwd} {git}",
+                " {favorite} {model} {effort} {modalities} │ ↑{tokens_in} ↓{tokens_out} ${cost} │ {context} │ {cwd} {git}",
             ),
         }
     }

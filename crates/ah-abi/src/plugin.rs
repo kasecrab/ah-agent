@@ -217,6 +217,9 @@ pub struct StatusContext {
     pub context_tokens: u64,
     #[serde(default)]
     pub context_window: u64,
+    /// Input modality icons for the model (`T▣`), empty when unknown or hidden.
+    #[serde(default)]
+    pub modalities: String,
     /// Result of the built-in template, so a plugin can decorate instead of replace.
     pub rendered: String,
 }

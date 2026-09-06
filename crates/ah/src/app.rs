@@ -97,12 +97,16 @@ pub fn resolve_cwd(o: &Overrides) -> Result<PathBuf, AnyError> {
 
 /// Commands the UI thread sends to the engine thread.
 pub enum EngineCmd {
-    Submit(String),
+    Submit {
+        text: String,
+        /// `data:` URLs attached to the message.
+        images: Vec<String>,
+    },
     Slash {
         name: String,
         args: String,
     },
-    Statusline(StatusContext),
+    Statusline(Box<StatusContext>),
     /// Fully merged settings after the UI applied new layers.
     Settings(Box<Settings>, Value),
     /// Drop and reload all plugins with the current settings.
@@ -304,6 +308,7 @@ impl Engine {
     pub fn run_turn(
         &mut self,
         text: String,
+        images: Vec<String>,
         io: &dyn AgentIo,
     ) -> Result<TurnSummary, ah_core::Error> {
         let window = self.context_window();
@@ -322,7 +327,7 @@ impl Engine {
             }
         }
         let before = messages.len();
-        messages.push(Message::user(text));
+        messages.push(Message::user_with_images(text, images));
         let res = agent.run_turn(&mut messages, io);
         let compacted = agent.compactions > 0;
         let context_tokens = agent.context_tokens;
@@ -390,9 +395,9 @@ impl Engine {
         };
         while let Ok(cmd) = rx.recv() {
             match cmd {
-                EngineCmd::Submit(text) => {
+                EngineCmd::Submit { text, images } => {
                     let _ = tx.send(UiEvent::Busy(true));
-                    let _ = self.run_turn(text, &io);
+                    let _ = self.run_turn(text, images, &io);
                     let logs = self.take_plugin_logs();
                     if !logs.is_empty() {
                         let _ = tx.send(UiEvent::PluginLogs(logs));
@@ -534,6 +539,7 @@ pub fn render_status_template(fmt: &str, ctx: &StatusContext) -> String {
             "{context}",
             &context_label(ctx.context_tokens, ctx.context_window),
         )
+        .replace("{modalities}", &ctx.modalities)
         .replace("{cwd}", &short_cwd)
         .replace(
             "{git}",

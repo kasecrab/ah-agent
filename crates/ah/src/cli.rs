@@ -236,7 +236,7 @@ pub fn one_shot(
         ask: stack.settings().permissions.mode == PermissionMode::Ask,
         show_tools: true,
     };
-    let res = engine.run_turn(prompt.to_string(), &io);
+    let res = engine.run_turn(prompt.to_string(), Vec::new(), &io);
     for (p, lvl, m) in engine.take_plugin_logs() {
         if lvl <= LogLevel::Warn {
             eprintln!("\x1b[90m[{p}] {m}\x1b[0m");

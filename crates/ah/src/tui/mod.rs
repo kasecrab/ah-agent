@@ -130,6 +130,7 @@ struct Binds {
     delete_line: Vec<Chord>,
     line_start: Vec<Chord>,
     line_end: Vec<Chord>,
+    paste_image: Vec<Chord>,
     /// Plugin-provided `(chord, action)`; action is a Keys field or `/command`.
     extra: Vec<(Chord, String)>,
 }
@@ -158,6 +159,7 @@ impl Binds {
             delete_line: p(&k.delete_line),
             line_start: p(&k.line_start),
             line_end: p(&k.line_end),
+            paste_image: p(&k.paste_image),
             extra: extra
                 .iter()
                 .filter_map(|(k, a)| keys::parse(k).map(|c| (c, a.clone())))
@@ -184,7 +186,11 @@ struct App {
     entries: Vec<Entry>,
     editor: Editor,
     /// Messages typed while a turn ran; sent one per turn once it ends.
-    queue: std::collections::VecDeque<String>,
+    queue: std::collections::VecDeque<(String, Vec<String>)>,
+    /// Input modalities of the current model from the catalogue.
+    modalities: Vec<String>,
+    /// A catalogue fetch is in flight.
+    fetching_models: bool,
     scroll: usize,
     follow: bool,
     viewport_lines: usize,
@@ -315,6 +321,8 @@ fn run_inner(
         entries: Vec::new(),
         editor: Editor::default(),
         queue: std::collections::VecDeque::new(),
+        modalities: Vec::new(),
+        fetching_models: false,
         scroll: 0,
         follow: true,
         viewport_lines: 0,
@@ -414,34 +422,33 @@ fn run_inner(
 /// OSC 52: hand the text to the terminal's clipboard. Works in WezTerm,
 /// kitty, foot, alacritty, iTerm2 and over ssh; terminals that ignore it
 /// still offer Shift-drag for native selection.
+/// Transcript text for a user message with `images` attachments.
+fn user_display(text: &str, images: usize) -> String {
+    match images {
+        0 => text.to_string(),
+        n => {
+            let tag = (1..=n)
+                .map(|i| format!("[Image #{i}]"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            if text.is_empty() {
+                tag
+            } else {
+                format!("{text}\n{tag}")
+            }
+        }
+    }
+}
+
 fn copy_to_clipboard(text: &str) {
     use std::io::Write as _;
     let mut out = std::io::stdout();
-    let _ = write!(out, "\x1b]52;c;{}\x07", base64(text.as_bytes()));
+    let _ = write!(
+        out,
+        "\x1b]52;c;{}\x07",
+        ah_core::clipboard::base64(text.as_bytes())
+    );
     let _ = out.flush();
-}
-
-fn base64(data: &[u8]) -> String {
-    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut s = String::with_capacity(data.len().div_ceil(3) * 4);
-    for c in data.chunks(3) {
-        let n = (c[0] as u32) << 16
-            | (*c.get(1).unwrap_or(&0) as u32) << 8
-            | *c.get(2).unwrap_or(&0) as u32;
-        s.push(T[(n >> 18) as usize & 63] as char);
-        s.push(T[(n >> 12) as usize & 63] as char);
-        s.push(if c.len() > 1 {
-            T[(n >> 6) as usize & 63] as char
-        } else {
-            '='
-        });
-        s.push(if c.len() > 2 {
-            T[n as usize & 63] as char
-        } else {
-            '='
-        });
-    }
-    s
 }
 
 fn enable_extras(settings: &Settings) {
@@ -489,7 +496,7 @@ impl App {
     fn load_history(&mut self, msgs: &[Message]) {
         for m in msgs {
             match m.role {
-                Role::User => self.push(Block::User(m.content.clone())),
+                Role::User => self.push(Block::User(user_display(&m.content, m.images.len()))),
                 Role::Assistant => {
                     if !m.content.is_empty() || m.tool_calls.is_empty() {
                         self.push(Block::Assistant {
@@ -545,25 +552,60 @@ impl App {
         }
     }
 
-    /// Window of the current model: `context.window`, else the cached catalogue.
+    /// Window and modalities of the current model from the cached catalogue
+    /// (`context.window` overrides the window). Without a usable cache the
+    /// catalogue is fetched once in the background.
     fn refresh_window(&mut self) {
         let s = self.stack.settings();
-        if s.context.window > 0 {
-            self.context_window = s.context.window;
-            return;
-        }
         let id = s.model.id.clone();
-        if self.catalogue.is_none()
-            && let Some((m, _)) = models::load_cached()
-        {
-            self.catalogue = Some(m);
+        let override_window = s.context.window;
+        if self.catalogue.is_none() {
+            match models::load_cached() {
+                Some((m, _)) => self.catalogue = Some(m),
+                None => self.fetch_models(),
+            }
         }
-        self.context_window = self
+        let info = self
             .catalogue
             .as_deref()
+            .and_then(|c| c.iter().find(|m| m.id == id));
+        self.context_window = if override_window > 0 {
+            override_window
+        } else {
+            info.map(|m| m.context_length).unwrap_or(0)
+        };
+        self.modalities = info.map(|m| m.input_modalities.clone()).unwrap_or_default();
+    }
+
+    /// Fetch the catalogue on a worker thread; the result arrives as `Msg::Models`.
+    fn fetch_models(&mut self) {
+        if self.fetching_models {
+            return;
+        }
+        let key = ah_core::auth::api_key(self.settings().model.api_key.as_deref());
+        let Some(key) = key else { return };
+        self.fetching_models = true;
+        let tx = self.self_tx.clone();
+        let base = self.settings().model.base_url.clone();
+        std::thread::Builder::new()
+            .name("ah-models".into())
+            .spawn(move || {
+                let r = models::fetch(&base, Some(&key)).map_err(|e| e.to_string());
+                let _ = tx.send(Msg::Models(r));
+            })
+            .ok();
+    }
+
+    /// Modality icons for `id` when the catalogue knows it and the setting is on.
+    fn icons_for(&self, id: &str) -> String {
+        if !self.settings().layout.show_modalities {
+            return String::new();
+        }
+        self.catalogue
+            .as_deref()
             .and_then(|c| c.iter().find(|m| m.id == id))
-            .map(|m| m.context_length)
-            .unwrap_or(0);
+            .map(|m| models::modality_icons(&m.input_modalities))
+            .unwrap_or_default()
     }
 
     /// Re-derive palette, binds and view flags from the current settings.
@@ -630,6 +672,11 @@ impl App {
             effort: m.effort().unwrap_or("").to_string(),
             context_tokens: self.context_tokens,
             context_window: self.context_window,
+            modalities: if self.settings().layout.show_modalities {
+                models::modality_icons(&self.modalities)
+            } else {
+                String::new()
+            },
             rendered: String::new(),
         };
         ctx.rendered = app::render_status_template(&self.settings().statusline.format, &ctx);
@@ -638,7 +685,9 @@ impl App {
 
     fn request_status(&mut self) {
         if self.plugin_count > 0 && !self.busy {
-            let _ = self.tx.send(EngineCmd::Statusline(self.status_ctx()));
+            let _ = self
+                .tx
+                .send(EngineCmd::Statusline(Box::new(self.status_ctx())));
         }
     }
 
@@ -656,11 +705,25 @@ impl App {
     }
 
     fn submit(&mut self, text: String) {
+        self.submit_with(text, Vec::new());
+    }
+
+    /// Take the editor's text and images and send them.
+    fn submit_editor(&mut self) {
+        let t = self.editor.take();
+        let images = self.editor.take_images();
+        self.record_history();
+        self.submit_with(t, images);
+    }
+
+    fn submit_with(&mut self, text: String, images: Vec<String>) {
         let text = text.trim_end().to_string();
-        if text.is_empty() {
+        if text.is_empty() && images.is_empty() {
             return;
         }
-        if let Some(cmd) = text.strip_prefix('/') {
+        if images.is_empty()
+            && let Some(cmd) = text.strip_prefix('/')
+        {
             self.slash(cmd);
             return;
         }
@@ -673,29 +736,48 @@ impl App {
                     "queue full ({max}); Up edits the last queued message"
                 )));
             } else {
-                self.queue.push_back(text);
+                self.queue.push_back((text, images));
             }
             return;
         }
-        self.push(Block::User(text.clone()));
+        self.push(Block::User(user_display(&text, images.len())));
         self.follow = true;
         self.busy = true;
         self.set_state(State::Thinking);
-        let _ = self.tx.send(EngineCmd::Submit(text));
+        let _ = self.tx.send(EngineCmd::Submit { text, images });
+    }
+
+    /// Ctrl-V: attach the clipboard image to the draft.
+    fn paste_image(&mut self) {
+        let model = self.settings().model.id.clone();
+        if !self.modalities.is_empty() && !self.modalities.iter().any(|m| m == "image") {
+            self.push(Block::Notice(format!(
+                "{model} doesn't accept images as input (see /model)"
+            )));
+            return;
+        }
+        let cmd = self.settings().layout.image_paste_cmd.clone();
+        match ah_core::clipboard::image(&cmd) {
+            Ok(bytes) => {
+                let url = ah_core::clipboard::data_url(&bytes);
+                self.editor.insert_image(url, bytes.len());
+            }
+            Err(e) => self.push(Block::Notice(e.to_string())),
+        }
     }
 
     /// Send the oldest queued message once the engine is free.
     fn drain_queue(&mut self) {
         if !self.busy
-            && let Some(next) = self.queue.pop_front()
+            && let Some((text, images)) = self.queue.pop_front()
         {
-            self.submit(next);
+            self.submit_with(text, images);
         }
     }
 
     /// Move the last queued message back into the editor.
     fn unqueue_last(&mut self) -> bool {
-        let Some(text) = self.queue.pop_back() else {
+        let Some((text, images)) = self.queue.pop_back() else {
             return false;
         };
         let n = self.settings().layout.paste_collapse_lines;
@@ -703,6 +785,10 @@ impl App {
             self.editor.insert_char('\n');
         }
         self.editor.insert_paste(&text, n);
+        for url in images {
+            let bytes = url.len() * 3 / 4;
+            self.editor.insert_image(url, bytes);
+        }
         true
     }
 
@@ -777,6 +863,7 @@ impl App {
             }
             Msg::Models(res) => {
                 self.dirty = true;
+                self.fetching_models = false;
                 match res {
                     Ok(list) => {
                         self.catalogue = Some(list);
@@ -894,6 +981,7 @@ impl App {
             }
         }
         let pal = &self.pal;
+        let show_modalities = self.settings().layout.show_modalities;
         let m = &self.settings().model;
         let current = m.id.clone();
         // start on the model the favorite already points at, else the current one
@@ -913,7 +1001,7 @@ impl App {
                 } else {
                     m.context_length.to_string()
                 };
-                Row {
+                let mut row = Row {
                     style: None,
                     id: m.id.clone(),
                     search: format!("{} {}", m.id, m.name),
@@ -937,7 +1025,22 @@ impl App {
                             Style::default().fg(pal.reasoning),
                         ),
                     ],
+                };
+                if show_modalities {
+                    row.cols.push((" ".into(), pal.dim()));
+                    for (name, icon) in models::MODALITIES {
+                        let on = m.accepts(name);
+                        row.cols.push((
+                            if on { (*icon).to_string() } else { "·".into() },
+                            if on {
+                                Style::default().fg(pal.accent)
+                            } else {
+                                pal.dim()
+                            },
+                        ));
+                    }
                 }
+                row
             })
             .collect();
         let title = match &favorite {
@@ -958,19 +1061,12 @@ impl App {
             if p.rows.is_empty() {
                 p.hint = "fetching model list from OpenRouter…".into();
             }
-            let tx = self.self_tx.clone();
-            let base = self.settings().model.base_url.clone();
-            let key = ah_core::auth::api_key(self.settings().model.api_key.as_deref());
-            std::thread::Builder::new()
-                .name("ah-models".into())
-                .spawn(move || {
-                    let r = models::fetch(&base, key.as_deref()).map_err(|e| e.to_string());
-                    let _ = tx.send(Msg::Models(r));
-                })
-                .ok();
         }
         self.picker = Some(p);
         self.dirty = true;
+        if stale {
+            self.fetch_models();
+        }
     }
 
     fn open_effort_picker(&mut self, model: Option<String>, favorite: Option<String>) {
@@ -1034,6 +1130,10 @@ impl App {
                     (
                         format!("{:<8}", f.effort().unwrap_or("")),
                         Style::default().fg(pal.reasoning),
+                    ),
+                    (
+                        format!("{:<6}", self.icons_for(f.id())),
+                        Style::default().fg(pal.accent),
                     ),
                 ],
             })
@@ -2009,9 +2109,9 @@ impl App {
         } else if keys::any_match(&b.newline, &k) {
             self.editor.insert_char('\n');
         } else if keys::any_match(&b.submit, &k) {
-            let t = self.editor.take();
-            self.record_history();
-            self.submit(t);
+            self.submit_editor();
+        } else if keys::any_match(&b.paste_image, &k) {
+            self.paste_image();
         } else if keys::any_match(&b.scroll_up, &k) {
             self.scroll_by(-(self.settings().layout.scroll_step.max(1) as isize));
         } else if keys::any_match(&b.scroll_down, &k) {
@@ -2125,11 +2225,8 @@ impl App {
         }
         let synth = |code: KeyCode, mods: KeyModifiers| KeyEvent::new(code, mods);
         match action {
-            "submit" => {
-                let t = self.editor.take();
-                self.record_history();
-                self.submit(t);
-            }
+            "submit" => self.submit_editor(),
+            "paste_image" => self.paste_image(),
             "cancel" => self.cancel_turn(),
             "quit" => self.quit = true,
             "clear" => self.slash("clear"),
@@ -2159,7 +2256,7 @@ impl App {
                 for (p, c) in &self.plugin_commands {
                     s.push_str(&format!("\n  /{:<10} {} ({p})", c.name, c.description));
                 }
-                s.push_str("\nkeys: Enter send · Shift/Alt-Enter newline · Esc cancel · Up/Down prompt history · PgUp/PgDn scroll · Shift-Tab next favorite · Ctrl-T tool output · Ctrl-R thinking · Ctrl-C quit");
+                s.push_str("\nkeys: Enter send · Shift/Alt-Enter newline · Esc cancel · Up/Down prompt history · PgUp/PgDn scroll · Shift-Tab next favorite · Ctrl-V paste image · Ctrl-T tool output · Ctrl-R thinking · Ctrl-C quit");
                 self.push(Block::Notice(s));
             }
             "model" | "models" => {
@@ -2498,7 +2595,8 @@ impl App {
             p.draw(f, area, &pal);
         }
         if let Some(u) = &self.usage_pane {
-            u.draw(f, area, &pal, &self.usage, &self.stats);
+            let icons = |id: &str| self.icons_for(id);
+            u.draw(f, area, &pal, &self.usage, &self.stats, &icons);
         }
         if let Some(sel) = self.sel {
             let text = self.highlight_selection(f, area, sel.anchor, sel.cur);
@@ -2605,10 +2703,20 @@ impl App {
             .queue
             .iter()
             .enumerate()
-            .map(|(i, t)| {
+            .map(|(i, (t, images))| {
                 let lines = t.lines().count();
                 let first = t.lines().next().unwrap_or("").trim();
                 let mut spans = vec![Span::styled(format!(" {}. ", i + 1), pal.dim())];
+                if !images.is_empty() {
+                    spans.push(Span::styled(
+                        format!(
+                            "[{} image{}] ",
+                            images.len(),
+                            if images.len() == 1 { "" } else { "s" }
+                        ),
+                        pal.bold(pal.accent),
+                    ));
+                }
                 if lines > collapse_lines.max(1) {
                     spans.push(Span::styled(
                         format!("[{lines} lines] "),
