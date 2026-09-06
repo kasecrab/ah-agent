@@ -38,6 +38,8 @@ pub struct View {
     pub tool_output_lines: u16,
     pub show_reasoning: bool,
     pub wrap: bool,
+    pub markdown: bool,
+    pub code_highlight: bool,
 }
 
 impl Entry {
@@ -58,7 +60,9 @@ impl Entry {
             &mut k,
             view.show_tool_output as u64
                 | (view.show_reasoning as u64) << 1
-                | (view.wrap as u64) << 2,
+                | (view.wrap as u64) << 2
+                | (view.markdown as u64) << 3
+                | (view.code_highlight as u64) << 4,
         );
         mix(&mut k, view.tool_output_lines as u64);
         match &self.block {
@@ -212,6 +216,15 @@ fn render(block: &Block, width: usize, view: &View, pal: &Palette) -> Vec<Line<'
             }
             if text.is_empty() && *streaming && (reasoning.is_empty() || !view.show_reasoning) {
                 out.push(Line::from(Span::styled("…", pal.dim())));
+            } else if !text.is_empty() && view.markdown {
+                out.extend(super::markdown::render(
+                    text,
+                    pal,
+                    super::markdown::Opts {
+                        width,
+                        highlight: view.code_highlight,
+                    },
+                ));
             } else if !text.is_empty() {
                 out.extend(with_prefix(
                     text,

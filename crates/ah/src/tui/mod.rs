@@ -1,7 +1,9 @@
 //! Terminal UI. Threads: render loop, input reader, engine. Idle = blocked on a channel.
 
+mod highlight;
 mod input;
 mod keys;
+mod markdown;
 mod theme;
 mod transcript;
 
@@ -266,6 +268,8 @@ fn run_inner(
             tool_output_lines: settings.layout.tool_output_lines,
             show_reasoning: settings.layout.show_reasoning,
             wrap: settings.layout.wrap,
+            markdown: settings.layout.markdown,
+            code_highlight: settings.layout.code_highlight,
         },
         stack,
         entries: Vec::new(),
@@ -460,6 +464,8 @@ impl App {
             tool_output_lines: s.layout.tool_output_lines,
             show_reasoning: s.layout.show_reasoning,
             wrap: s.layout.wrap,
+            markdown: s.layout.markdown,
+            code_highlight: s.layout.code_highlight,
         };
         self.dirty = true;
         let _ = self

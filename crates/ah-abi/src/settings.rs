@@ -97,6 +97,20 @@ pub struct Theme {
     pub input_fg: String,
     pub input_bg: String,
     pub selection: String,
+    /// Markdown styles.
+    pub heading: String,
+    pub link: String,
+    pub quote: String,
+    pub code: String,
+    pub code_bg: String,
+    pub rule: String,
+    /// Code highlighting.
+    pub syn_keyword: String,
+    pub syn_string: String,
+    pub syn_comment: String,
+    pub syn_number: String,
+    pub syn_type: String,
+    pub syn_function: String,
     pub border_style: BorderStyle,
     pub user_prefix: String,
     pub assistant_prefix: String,
@@ -126,6 +140,18 @@ impl Default for Theme {
             input_fg: "reset".into(),
             input_bg: "reset".into(),
             selection: "blue".into(),
+            heading: "white".into(),
+            link: "blue".into(),
+            quote: "dark_gray".into(),
+            code: "white".into(),
+            code_bg: "235".into(),
+            rule: "dark_gray".into(),
+            syn_keyword: "magenta".into(),
+            syn_string: "green".into(),
+            syn_comment: "dark_gray".into(),
+            syn_number: "yellow".into(),
+            syn_type: "cyan".into(),
+            syn_function: "blue".into(),
             border_style: BorderStyle::Lines,
             user_prefix: "> ".into(),
             assistant_prefix: "".into(),
@@ -180,6 +206,10 @@ pub struct Layout {
     pub kitty_keyboard: bool,
     /// Pastes with more lines than this collapse to a `[Pasted N lines]` chip.
     pub paste_collapse_lines: usize,
+    /// Render assistant messages as markdown.
+    pub markdown: bool,
+    /// Highlight fenced code blocks.
+    pub code_highlight: bool,
 }
 
 impl Default for Layout {
@@ -201,6 +231,8 @@ impl Default for Layout {
             mouse: true,
             kitty_keyboard: true,
             paste_collapse_lines: 3,
+            markdown: true,
+            code_highlight: true,
         }
     }
 }

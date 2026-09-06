@@ -18,4 +18,5 @@ clap = { version = "4", default-features = false, features = ["std", "derive", "
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 crossterm = { version = "0.29", default-features = false, features = ["events"] }
 unicode-width = "0.2"
+pulldown-cmark = { version = "0.13", default-features = false }
 dirs = "7"
