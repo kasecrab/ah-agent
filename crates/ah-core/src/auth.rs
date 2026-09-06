@@ -151,3 +151,94 @@ mod tests {
         assert_eq!(masked("short"), "………");
     }
 }
+
+/// Account-level numbers OpenRouter exposes for a key.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Account {
+    pub label: String,
+    /// Credits bought minus credits spent.
+    pub balance: Option<f64>,
+    pub total_credits: Option<f64>,
+    pub total_usage: Option<f64>,
+    pub usage_daily: Option<f64>,
+    pub usage_weekly: Option<f64>,
+    pub usage_monthly: Option<f64>,
+    pub limit: Option<f64>,
+    pub limit_remaining: Option<f64>,
+    pub free_tier: bool,
+}
+
+/// `/auth/key` plus `/credits`; the second is optional (keys without
+/// credit access still get the first half).
+pub fn account(base_url: &str, key: &str) -> Result<Account> {
+    let client = crate::provider::openrouter::OpenRouter::new(base_url, key);
+    let v = client.get_json("/auth/key")?;
+    let d = v.get("data").unwrap_or(&v);
+    let num = |k: &str| d.get(k).and_then(|x| x.as_f64());
+    let mut a = Account {
+        label: d
+            .get("label")
+            .and_then(|l| l.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        usage_daily: num("usage_daily"),
+        usage_weekly: num("usage_weekly"),
+        usage_monthly: num("usage_monthly"),
+        limit: num("limit"),
+        limit_remaining: num("limit_remaining"),
+        free_tier: d
+            .get("is_free_tier")
+            .and_then(|b| b.as_bool())
+            .unwrap_or(false),
+        ..Account::default()
+    };
+    if let Ok(c) = client.get_json("/credits") {
+        let d = c.get("data").unwrap_or(&c);
+        a.total_credits = d.get("total_credits").and_then(|x| x.as_f64());
+        a.total_usage = d.get("total_usage").and_then(|x| x.as_f64());
+        if let (Some(t), Some(u)) = (a.total_credits, a.total_usage) {
+            a.balance = Some(t - u);
+        }
+    }
+    Ok(a)
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ModelSpend {
+    pub model: String,
+    pub cost: f64,
+    pub requests: u64,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+}
+
+/// Spend per model over the last 30 days from `/activity`, most expensive
+/// first. OpenRouter only serves this to some keys, so callers should treat
+/// an error as "not available".
+pub fn activity(base_url: &str, key: &str) -> Result<Vec<ModelSpend>> {
+    let client = crate::provider::openrouter::OpenRouter::new(base_url, key);
+    let v = client.get_json("/activity")?;
+    let rows = v
+        .get("data")
+        .and_then(|d| d.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut by: std::collections::BTreeMap<String, ModelSpend> = Default::default();
+    for r in rows {
+        let Some(model) = r.get("model").and_then(|m| m.as_str()) else {
+            continue;
+        };
+        let num = |k: &str| r.get(k).and_then(|x| x.as_f64()).unwrap_or(0.0);
+        let e = by.entry(model.to_string()).or_insert_with(|| ModelSpend {
+            model: model.to_string(),
+            ..Default::default()
+        });
+        e.cost += num("usage");
+        e.requests += num("requests") as u64;
+        e.prompt_tokens += num("prompt_tokens") as u64;
+        e.completion_tokens += num("completion_tokens") as u64;
+    }
+    let mut out: Vec<ModelSpend> = by.into_values().collect();
+    out.sort_by(|a, b| b.cost.total_cmp(&a.cost));
+    Ok(out)
+}

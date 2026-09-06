@@ -42,8 +42,9 @@ pub enum Action {
     None,
     Close,
     Accept,
-    /// Ctrl-<letter> (or Delete for `d`); meaning depends on the kind.
-    Ctrl(char),
+    /// A letter shortcut: Ctrl-<letter> (or Delete for `d`) in fuzzy pickers,
+    /// a bare letter when `hotkeys` is on. Meaning depends on the kind.
+    Key(char),
 }
 
 pub struct Picker {
@@ -57,6 +58,8 @@ pub struct Picker {
     pub error: Option<String>,
     /// Shown in the footer when there is nothing else to say.
     pub hint: String,
+    /// Letters act as shortcuts instead of filtering (short, fixed lists).
+    pub hotkeys: bool,
 }
 
 impl Picker {
@@ -71,6 +74,7 @@ impl Picker {
             loading: false,
             error: None,
             hint: String::new(),
+            hotkeys: false,
         };
         p.refilter();
         p
@@ -97,10 +101,17 @@ impl Picker {
             (KeyCode::Esc, _) => return Action::Close,
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => return Action::Close,
             (KeyCode::Enter, _) => return Action::Accept,
-            (KeyCode::Char(c @ ('r' | 'n' | 'e' | 'd')), KeyModifiers::CONTROL) => {
-                return Action::Ctrl(c);
+            (KeyCode::Delete, _) => return Action::Key('d'),
+            (KeyCode::Char('j'), _) if self.hotkeys => {
+                self.selected = (self.selected + 1).min(last)
             }
-            (KeyCode::Delete, _) => return Action::Ctrl('d'),
+            (KeyCode::Char('k'), _) if self.hotkeys => {
+                self.selected = self.selected.saturating_sub(1)
+            }
+            (KeyCode::Char('q'), _) if self.hotkeys => return Action::Close,
+            (KeyCode::Char(c), m) if self.hotkeys && !m.intersects(KeyModifiers::ALT) => {
+                return Action::Key(c.to_ascii_lowercase());
+            }
             (KeyCode::Up, _) | (KeyCode::BackTab, _) => {
                 self.selected = self.selected.saturating_sub(1)
             }
@@ -125,6 +136,9 @@ impl Picker {
                     .unwrap_or_default();
                 self.refilter();
             }
+            (KeyCode::Char(c), KeyModifiers::CONTROL) if c.is_ascii_lowercase() => {
+                return Action::Key(c);
+            }
             (KeyCode::Char(c), m) if !m.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
                 self.query.push(c);
                 self.refilter();
@@ -141,7 +155,7 @@ impl Picker {
         } else {
             (area.width * 9 / 10).clamp(40, 110).min(area.width)
         };
-        let height = if compact {
+        let height = if compact || self.hotkeys {
             (self.rows.len() as u16 + 4).clamp(5, area.height)
         } else {
             (area.height * 4 / 5).clamp(8, 40).min(area.height)
@@ -157,19 +171,21 @@ impl Picker {
         let inner = block.inner(r);
         f.render_widget(block, r);
         let [q_area, list_area, foot_area] = Layout::vertical([
-            Constraint::Length(1),
+            Constraint::Length(if self.hotkeys { 0 } else { 1 }),
             Constraint::Min(1),
             Constraint::Length(1),
         ])
         .areas(inner);
-        f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled("> ", pal.bold(pal.accent)),
-                Span::raw(self.query.clone()),
-            ])),
-            q_area,
-        );
-        f.set_cursor_position((q_area.x + 2 + self.query.chars().count() as u16, q_area.y));
+        if !self.hotkeys {
+            f.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled("> ", pal.bold(pal.accent)),
+                    Span::raw(self.query.clone()),
+                ])),
+                q_area,
+            );
+            f.set_cursor_position((q_area.x + 2 + self.query.chars().count() as u16, q_area.y));
+        }
 
         let rows = list_area.height as usize;
         let first = self.selected.saturating_sub(rows.saturating_sub(1));

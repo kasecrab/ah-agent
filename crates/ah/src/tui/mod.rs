@@ -7,6 +7,7 @@ mod markdown;
 mod picker;
 mod theme;
 mod transcript;
+mod usage;
 
 use std::collections::HashSet;
 use std::sync::atomic::Ordering;
@@ -33,11 +34,13 @@ use picker::{Action, Kind, Picker, Row};
 const NEW_FAVORITE: &str = "\0new";
 use theme::Palette;
 use transcript::{Block, Entry, View};
+use usage::Stats;
 
 enum Msg {
     Input(Event),
     Engine(UiEvent),
     Models(Result<Vec<ModelInfo>, String>),
+    Usage(Result<usage::Remote, String>),
 }
 
 /// Built-in slash commands, alphabetical: `(name, description, takes_args)`.
@@ -66,7 +69,7 @@ const COMMANDS: &[(&str, &str, bool)] = &[
     ("session", "show session id and file", false),
     ("set", "override a setting: /set theme.accent magenta", true),
     ("tools", "list tools", false),
-    ("unfavorite", "remove a favorite: /unfavorite fast", true),
+    ("usage", "session cost, account balance, top models", false),
     ("yolo", "auto-approve tool calls", false),
 ];
 
@@ -170,6 +173,9 @@ struct App {
     session_id: String,
     completion: Option<Completion>,
     picker: Option<Picker>,
+    usage_pane: Option<usage::Pane>,
+    stats: Stats,
+    mouse_on: bool,
     /// Model catalogue, loaded lazily for the picker and reasoning checks.
     catalogue: Option<Vec<ModelInfo>>,
     self_tx: Sender<Msg>,
@@ -283,6 +289,9 @@ fn run_inner(
         session_id,
         completion: None,
         picker: None,
+        usage_pane: None,
+        stats: Stats::default(),
+        mouse_on: settings.layout.mouse,
         catalogue: None,
         self_tx: ui_tx.clone(),
         tx: eng_tx,
@@ -458,6 +467,16 @@ impl App {
             markdown: s.layout.markdown,
             code_highlight: s.layout.code_highlight,
         };
+        if s.layout.mouse != self.mouse_on {
+            use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+            let mut out = std::io::stdout();
+            let _ = if s.layout.mouse {
+                crossterm::execute!(out, EnableMouseCapture)
+            } else {
+                crossterm::execute!(out, DisableMouseCapture)
+            };
+            self.mouse_on = s.layout.mouse;
+        }
         self.dirty = true;
         let _ = self
             .tx
@@ -589,6 +608,20 @@ impl App {
                 self.update_completion();
             }
             Msg::Engine(ev) => self.handle_engine(ev),
+            Msg::Usage(res) => {
+                if let Some(p) = self.usage_pane.as_mut() {
+                    p.loading = false;
+                    match res {
+                        Ok(r) => {
+                            p.remote = Some(r);
+                            p.error = None;
+                            p.fetched = Some(Instant::now());
+                        }
+                        Err(e) => p.error = Some(e),
+                    }
+                    self.dirty = true;
+                }
+            }
             Msg::Models(res) => {
                 self.dirty = true;
                 match res {
@@ -846,11 +879,12 @@ impl App {
         });
         let mut p = Picker::new(
             Kind::Favorites,
-            "favorites · Enter use · ^N new · ^E model · ^R rename · ^D remove",
+            "favorites · Enter use · n new · m model · e effort · r rename · d remove",
             "",
             rows,
         );
-        p.hint = "Shift-Tab cycles favorites in this order".into();
+        p.hotkeys = true;
+        p.hint = "Shift-Tab cycles favorites in this order · Esc close".into();
         p.selected = cur.unwrap_or(0);
         self.picker = Some(p);
         self.dirty = true;
@@ -923,7 +957,7 @@ impl App {
         match p.key(k) {
             Action::None => {}
             Action::Close => self.picker = None,
-            Action::Ctrl(c) => self.picker_ctrl(c),
+            Action::Key(c) => self.picker_shortcut(c),
             Action::Accept => {
                 let chosen = p.current().map(|r| r.id.clone());
                 let Some(p) = self.picker.take() else { return };
@@ -974,7 +1008,7 @@ impl App {
         }
     }
 
-    fn picker_ctrl(&mut self, c: char) {
+    fn picker_shortcut(&mut self, c: char) {
         let Some(p) = self.picker.as_ref() else {
             return;
         };
@@ -992,8 +1026,15 @@ impl App {
                 else {
                     return;
                 };
+                let model = self
+                    .settings()
+                    .model
+                    .favorites
+                    .get(&name)
+                    .map(|f| f.id().to_string());
                 match c {
-                    'e' => self.open_model_picker("", Some(name), false),
+                    'm' => self.open_model_picker("", Some(name), false),
+                    'e' => self.open_effort_picker(model, Some(name)),
                     'r' => self.open_name_picker(Some(name)),
                     'd' => {
                         self.unfavorite(&name);
@@ -1004,6 +1045,35 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    fn fetch_usage(&mut self) {
+        let Some(p) = self.usage_pane.as_mut() else {
+            return;
+        };
+        if p.loading && p.fetched.is_some() {
+            return;
+        }
+        p.loading = true;
+        self.dirty = true;
+        let tx = self.self_tx.clone();
+        let base = self.settings().model.base_url.clone();
+        let key = ah_core::auth::api_key(self.settings().model.api_key.as_deref());
+        std::thread::Builder::new()
+            .name("ah-usage".into())
+            .spawn(move || {
+                let r = match key {
+                    None => Err("no API key".to_string()),
+                    Some(k) => ah_core::auth::account(&base, &k)
+                        .map_err(|e| e.to_string())
+                        .map(|account| usage::Remote {
+                            account,
+                            top: ah_core::auth::activity(&base, &k).map_err(|e| e.to_string()),
+                        }),
+                };
+                let _ = tx.send(Msg::Usage(r));
+            })
+            .ok();
     }
 
     /// A model was chosen: ask for the effort when it reasons, else apply.
@@ -1066,6 +1136,11 @@ impl App {
             Some(e) => format!(" ({e})"),
             None => String::new(),
         };
+        // repeated switches (Shift-Tab) update one line instead of stacking
+        if matches!(self.entries.last().map(|e| &e.block), Some(Block::Notice(t)) if t.starts_with("model → "))
+        {
+            self.entries.pop();
+        }
         self.push(Block::Notice(format!("model → {id}{effort}{favorite}")));
         self.request_status();
     }
@@ -1284,6 +1359,7 @@ impl App {
             UiEvent::Resumed { id, messages } => {
                 self.entries.clear();
                 self.usage = Usage::default();
+                self.stats = Stats::default();
                 self.session_id = id;
                 self.follow = true;
                 self.load_history(&messages);
@@ -1296,6 +1372,7 @@ impl App {
     fn handle_agent(&mut self, ev: AgentEvent) {
         match ev {
             AgentEvent::RequestStart { .. } => {
+                self.stats.request_start();
                 self.set_state(State::Thinking);
                 self.push(Block::Assistant {
                     text: String::new(),
@@ -1322,6 +1399,7 @@ impl App {
                 self.dirty = true;
             }
             AgentEvent::AssistantMessage(m) => {
+                self.stats.request_end();
                 if let Some(Block::Assistant {
                     text,
                     reasoning,
@@ -1344,9 +1422,12 @@ impl App {
             }
             AgentEvent::Usage(u) => {
                 self.usage.add(&u);
+                let model = self.settings().model.id.clone();
+                self.stats.add_usage(&model, &u);
                 self.dirty = true;
             }
             AgentEvent::ToolStart(call) => {
+                self.stats.tool_calls += 1;
                 self.tool_name = call.function.name.clone();
                 self.set_state(State::Tool);
                 self.push(Block::Tool {
@@ -1361,6 +1442,9 @@ impl App {
                 result,
                 duration_ms,
             } => {
+                if let Some(d) = &result.diff {
+                    self.stats.add_diff(d);
+                }
                 for e in self.entries.iter_mut().rev() {
                     if let Block::Tool {
                         call: c,
@@ -1393,8 +1477,12 @@ impl App {
             } => self.push(Block::Notice(format!(
                 "retry {attempt} in {wait_ms} ms: {error}"
             ))),
-            AgentEvent::Error(e) => self.push(Block::Error(e)),
+            AgentEvent::Error(e) => {
+                self.stats.request_end();
+                self.push(Block::Error(e));
+            }
             AgentEvent::TurnEnd(s) => {
+                self.stats.request_end();
                 if s.cancelled {
                     self.push(Block::Notice("cancelled".into()));
                 }
@@ -1457,6 +1545,15 @@ impl App {
         self.dirty = true;
         let b = self.binds.clone();
 
+        if self.usage_pane.is_some() {
+            match (k.code, k.modifiers) {
+                (KeyCode::Esc | KeyCode::Char('q'), _)
+                | (KeyCode::Char('c'), KeyModifiers::CONTROL) => self.usage_pane = None,
+                (KeyCode::Char('r'), _) => self.fetch_usage(),
+                _ => {}
+            }
+            return;
+        }
         if self.picker.is_some() {
             self.picker_key(k);
             return;
@@ -1716,7 +1813,10 @@ impl App {
                     self.open_model_picker("", Some(args.to_string()), false);
                 }
             }
-            "unfavorite" | "unfav" => self.unfavorite(args),
+            "usage" => {
+                self.usage_pane = Some(usage::Pane::new());
+                self.fetch_usage();
+            }
             "resume" => {
                 if args.is_empty() {
                     self.open_session_picker("");
@@ -1729,6 +1829,7 @@ impl App {
             "clear" => {
                 self.entries.clear();
                 self.usage = Usage::default();
+                self.stats = Stats::default();
                 let _ = self.tx.send(EngineCmd::Clear);
                 self.push(Block::Notice("conversation cleared".into()));
             }
@@ -1948,7 +2049,7 @@ impl App {
             ])];
         }
         f.render_widget(Paragraph::new(visible), inner);
-        if self.pending_perm.is_none() && self.picker.is_none() {
+        if self.pending_perm.is_none() && self.picker.is_none() && self.usage_pane.is_none() {
             f.set_cursor_position((
                 inner.x + prefix_w + cursor_rc.1 as u16,
                 inner.y + (cursor_rc.0 - first_row) as u16,
@@ -1963,6 +2064,9 @@ impl App {
         }
         if let Some(p) = &self.picker {
             p.draw(f, area, &pal);
+        }
+        if let Some(u) = &self.usage_pane {
+            u.draw(f, area, &pal, &self.usage, &self.stats);
         }
     }
 

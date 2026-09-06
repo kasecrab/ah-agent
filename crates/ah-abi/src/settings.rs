@@ -272,7 +272,7 @@ impl Default for Layout {
             stream_redraw_ms: 33,
             spinner_ms: 100,
             scroll_step: 3,
-            mouse: true,
+            mouse: false,
             kitty_keyboard: true,
             paste_collapse_lines: 3,
             markdown: true,
