@@ -2,6 +2,7 @@
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
+use alloc::vec;
 use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -107,6 +108,9 @@ pub struct PromptSettings {
     /// in the user config dir, in each directory from the repository root to
     /// the working directory, and in `.ah/`.
     pub instructions: Vec<String>,
+    /// Tell the model that `ah docs <topic>` exists, so it can look up ah's
+    /// own settings, keys and plugin API when asked instead of guessing.
+    pub docs_hint: bool,
 }
 
 impl Default for PromptSettings {
@@ -121,6 +125,7 @@ impl Default for PromptSettings {
             ),
             append: String::new(),
             instructions: vec![String::from("AGENTS.md"), String::from("CLAUDE.md")],
+            docs_hint: true,
         }
     }
 }

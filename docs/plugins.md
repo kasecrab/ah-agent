@@ -1,0 +1,200 @@
+# Plugins
+
+A plugin is a WebAssembly core module (`wasm32-unknown-unknown`) that ah runs
+in the `wasmi` interpreter. Plugins can change any setting, rewrite the system
+prompt and every request, allow, deny, replace or confirm tool calls, add
+tools the model can call, add slash commands, draw the status line and bind
+keys. They talk to the host with JSON in both directions.
+
+Plugins are sandboxed: no filesystem, network or clock except through the
+host calls below, a fuel budget per hook call (`plugins.fuel_per_call`) and a
+memory cap (`plugins.max_memory_bytes`). A hook that traps or runs out of fuel
+is disabled for the rest of the session; the harness keeps going.
+
+## Where plugins load from
+
+1. `~/.config/ah/plugins/*.wasm`
+2. `./.ah/plugins/*.wasm`
+3. files and directories in `plugins.paths` and `--plugin PATH`
+
+`plugins.disabled` lists names or file stems to skip; `plugins.enabled =
+false` or `--no-plugins` loads nothing. `ah plugin list` shows what was found
+and whether it loaded. `/plugins` inside the TUI lists the active ones and
+`/reload` reloads them after a rebuild.
+
+## Writing one in Rust
+
+`Cargo.toml`:
+
+```toml
+[package]
+name = "hello"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ah-plugin-sdk = { path = "/path/to/ah/crates/ah-plugin-sdk" }
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+```
+
+`src/lib.rs`:
+
+```rust
+use ah_plugin_sdk::prelude::*;
+
+fn manifest() -> Manifest {
+    Manifest {
+        name: "hello".into(),
+        version: env!("CARGO_PKG_VERSION").into(),
+        description: "Purple accent, blocks curl | sh".into(),
+        hooks: vec![Hook::BeforeTool, Hook::SlashCommand],
+        commands: vec![SlashCommandSpec {
+            name: "hello".into(),
+            description: "Say hello".into(),
+            usage: "/hello [name]".into(),
+        }],
+        settings_patch: Some(json!({"theme": {"accent": "magenta"}})),
+        ..Default::default()
+    }
+}
+
+fn handle(hook: Hook, input: Value) -> Result<Value, String> {
+    match hook {
+        Hook::BeforeTool => {
+            let inp: BeforeToolIn = serde_json::from_value(input).map_err(|e| e.to_string())?;
+            if inp.call.function.name == "bash" && inp.call.function.arguments.contains("| sh") {
+                return Ok(json!({"decision": "deny", "reason": "piping into sh is off"}));
+            }
+            Ok(json!({"decision": "allow"}))
+        }
+        Hook::SlashCommand => {
+            let inp: SlashCommandIn = serde_json::from_value(input).map_err(|e| e.to_string())?;
+            Ok(json!({"message": format!("hello {}", inp.args)}))
+        }
+        _ => Ok(Value::Null),
+    }
+}
+
+ah_plugin_sdk::plugin!(manifest, handle);
+```
+
+Build and install:
+
+```
+rustup target add wasm32-unknown-unknown
+ah plugin build ./hello            # cargo build --release --target wasm32-unknown-unknown, then copies the .wasm into ~/.config/ah/plugins
+ah plugin build ./hello --no-install
+ah plugin add path/to/hello.wasm   # install a prebuilt module
+ah plugin rm hello
+```
+
+The SDK prelude re-exports every `ah_abi` type (`Manifest`, `Hook`,
+`ToolSpec`, the `*In`/`*Out` payload structs, `Settings`, `Message`,
+`ToolCall`, `ToolResult`), `serde_json` with `json!` and `Value`, and the
+host helpers `settings_get`, `kv_get`, `kv_set`, `host_call` and the `log!`
+macro. Returning `Value::Null` from a hook means "no change". Returning
+`Err(String)` logs the error and is treated as no change; a panic traps and
+disables that hook.
+
+Any language that can produce a core wasm module works. The module must
+export `ah_alloc(len) -> ptr`, `ah_free(ptr, len)`, `ah_manifest() -> i64` and
+`ah_call(hook_ptr, hook_len, in_ptr, in_len) -> i64`, where an `i64` result
+packs `(ptr << 32) | len` of a buffer the host reads then frees with
+`ah_free`. `ah_call` receives the hook name and the input JSON and returns
+`{"ok": <output>}` or `{"err": "<message>"}`. Imports come from module
+`"ah"`: `log(level, ptr, len)`, `host_call(name_ptr, name_len, in_ptr,
+in_len) -> i32` (result length, negative on error) and `host_read(dst, cap)
+-> i32` which copies the pending result.
+
+## Manifest
+
+| Field | Meaning |
+|---|---|
+| `name` | unique name; used by `plugins.disabled`, `ah plugin rm`, log lines |
+| `version` | free text |
+| `abi_version` | must equal the host's (currently 1); the SDK fills it in |
+| `description` | shown by `ah plugin list` and `/plugins` |
+| `hooks` | hooks the plugin handles; others are never called |
+| `tools` | `ToolSpec` entries (OpenAI function shape: name, description, JSON schema) added to the model's tool list; calls arrive through the `tool_call` hook |
+| `commands` | slash commands (`name`, `description`, `usage`) routed to `slash_command` |
+| `settings_patch` | merge patch applied at load, before `on_load` |
+
+## Hooks
+
+Inputs and outputs are JSON objects with these fields. Any `settings_patch`
+in an output is merged into the live settings (and shown as a
+`settings_patch` event in `--json` mode).
+
+| Hook | When | Input | Output |
+|---|---|---|---|
+| `on_load` | after loading, and on `/reload` | `settings` (merged tree), `cwd` | `settings_patch` |
+| `system_prompt` | before each request | `prompt` (assembled text, instructions included), `cwd`, `os`, `shell` | `prompt` |
+| `before_request` | before each request | `request` (`model`, `messages`, `tools`, sampling fields), `turn` | `request` |
+| `before_tool` | before a tool runs | `call`, `cwd` | `decision` (below) plus `settings_patch` |
+| `after_tool` | after a tool ran | `call`, `result`, `duration_ms` | `result` (replacement, optional), `settings_patch` |
+| `tool_call` | the model called a tool this plugin declared | `call`, `cwd` | `result` (`output`, `is_error`, optional `diff`) |
+| `statusline` | every status bar redraw | `StatusContext` (below) | `text` |
+| `slash_command` | user ran a command from `commands` | `name`, `args`, `cwd` | `message` (notice), `send_to_model` (submitted as a user message), `settings_patch` |
+| `on_turn_end` | after the assistant's final message | `message`, `usage`, `total_usage`, `tool_calls` | `message` (notice), `settings_patch` |
+| `keybinds` | reserved | none | `binds`: `[[key, action]]`, action = a `[keys]` field name or a slash command. Declared in the ABI; the TUI does not apply plugin binds yet |
+
+`before_tool` decisions:
+
+```json
+{"decision": "allow"}
+{"decision": "deny", "reason": "why"}
+{"decision": "replace", "arguments": "{\"command\":\"ls -la\"}"}
+{"decision": "ask", "reason": "confirm this one even in auto mode"}
+```
+
+Every plugin with the hook is consulted in load order. A deny stops the chain
+at once; a replace feeds the new arguments to the next plugin; an ask is kept
+unless a replace was already chosen. Built-in `permissions.deny` rules are
+checked after the plugins, on the final arguments, and a plugin cannot lift
+them.
+
+`StatusContext` fields: `model`, `usage` (`prompt_tokens`,
+`completion_tokens`, `cost`), `cwd`, `git_branch`, `plugins` (count), `state`
+(`idle`, `thinking`, `streaming`, `tool:<name>`), `session_id`, `width`,
+`favorite`, `effort`, `context_tokens`, `context_window`, `modalities`
+(`TI→T`), and `rendered`, the text the built-in `statusline.format` produced,
+so a plugin can decorate instead of replace.
+
+## Host calls
+
+Available through `host_call(name, &json)` or the typed helpers.
+
+| Name | Input | Output |
+|---|---|---|
+| `settings_get` | JSON pointer string (`"/theme/accent"`, `""` for all) | the value; unknown top-level tables from config are visible here |
+| `kv_get` | key | string or null; persisted per plugin under `~/.local/share/ah/plugins/<stem>.json` |
+| `kv_set` | `{"key": k, "value": v}` (`null` removes) | null |
+| `cwd` | none | working directory |
+| `now_ms` | none | unix time in milliseconds |
+| `env_get` | variable name | string or null |
+| `read_file` | path, relative to cwd | file contents |
+| `git_branch` | none | current branch, read from `.git/HEAD` |
+
+`log!(LogLevel::Info, "...")` writes to the host log, visible with `AH_LOG=1`
+in `~/.local/share/ah/ah.log`.
+
+## Examples in the repository
+
+`plugins/` in the source tree holds four small plugins built with
+`just plugins` and installed with `just install-plugins`:
+
+| Plugin | Shows |
+|---|---|
+| `theme-dracula` | a static `settings_patch` that sets colours |
+| `statusline` | the `statusline` hook and `kv_set` for a persisted peak cost |
+| `guard` | `before_tool` deny and ask decisions, config read through `settings_get` (`[guard] deny = [...]`), a `/guard` slash command |
+| `tool-wordcount` | a `tools` entry and the `tool_call` hook using `read_file` |

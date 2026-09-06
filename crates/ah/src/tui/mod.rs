@@ -2808,3 +2808,19 @@ impl App {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn commands_page_lists_every_slash_command() {
+        let page = ah_core::docs::find("commands").unwrap().text;
+        for (name, _, _) in COMMANDS {
+            assert!(
+                page.contains(&format!("`/{name}")),
+                "/{name} is not documented"
+            );
+        }
+    }
+}

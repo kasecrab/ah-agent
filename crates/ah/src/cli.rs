@@ -291,6 +291,7 @@ pub fn subcommand(cmd: Command, o: &Overrides) -> Result<(), AnyError> {
         } => models(o, tools, filter, refresh),
         Command::Plugin { cmd } => plugin(o, cmd),
         Command::Config { cmd } => config(o, cmd.unwrap_or(ConfigCmd::Show { origins: false })),
+        Command::Docs { topic } => docs(topic.as_deref()),
         Command::Sessions => {
             for s in ah_core::session::summaries() {
                 println!(
@@ -580,6 +581,23 @@ fn plugin(o: &Overrides, cmd: PluginCmd) -> Result<(), AnyError> {
             }
             Ok(())
         }
+    }
+}
+
+fn docs(topic: Option<&str>) -> Result<(), AnyError> {
+    use ah_core::docs;
+    match topic {
+        None => {
+            println!("{}\n\nah docs <topic> prints a page.", docs::list());
+            Ok(())
+        }
+        Some(t) => match docs::find(t) {
+            Some(page) => {
+                print!("{}", page.text);
+                Ok(())
+            }
+            None => Err(format!("no docs topic `{t}`; topics:\n{}", docs::list()).into()),
+        },
     }
 }
 

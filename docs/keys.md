@@ -1,0 +1,79 @@
+# Key bindings
+
+Bindings live under `[keys]` in the config. Each action takes a list of key
+strings; the first entry is shown in help text.
+
+## Key string syntax
+
+`modifier-modifier-key`, case-insensitive, `+` also works as the separator.
+
+- Modifiers: `ctrl` (`control`, `c`), `alt` (`meta`, `opt`, `option`, `m`),
+  `shift` (`s`), `super` (`cmd`, `win`).
+- Named keys: `enter` (`return`), `esc` (`escape`), `tab`, `backtab`,
+  `backspace` (`bs`), `delete` (`del`), `insert` (`ins`), `home`, `end`,
+  `pageup` (`pgup`), `pagedown` (`pgdn`), `up`, `down`, `left`, `right`,
+  `space`, `minus`, `plus`, `f1` to `f12`.
+- Any single character: `ctrl-j`, `alt-k`, `ctrl-shift-x`.
+- `shift-tab` is the same as `backtab`.
+
+Shift-Enter and other shifted specials need the kitty keyboard protocol
+(`layout.kitty_keyboard = true` and a terminal that speaks it: kitty, WezTerm
+with `enable_kitty_keyboard = true`, foot, ghostty); Alt-Enter and Ctrl-J work
+everywhere.
+
+## Defaults
+
+| Action | Default | Effect |
+|---|---|---|
+| `submit` | `["enter"]` | send the message, or queue it while a turn runs |
+| `newline` | `["shift-enter", "alt-enter", "ctrl-j"]` | insert a line break |
+| `cancel` | `["esc"]` | cancel the running turn; returns queued messages to the input |
+| `quit` | `["ctrl-c", "ctrl-d"]` | exit (Ctrl-C cancels first while busy) |
+| `scroll_up` | `["ctrl-up", "alt-k"]` | scroll transcript one step |
+| `scroll_down` | `["ctrl-down", "alt-j"]` | |
+| `page_up` | `["pageup"]` | scroll a page |
+| `page_down` | `["pagedown"]` | |
+| `scroll_top` | `["ctrl-home"]` | jump to the start |
+| `scroll_bottom` | `["ctrl-end"]` | jump to the end |
+| `clear` | `["ctrl-l"]` | clear the conversation (same as `/clear`) |
+| `toggle_tools` | `["ctrl-t"]` | expand or collapse tool output |
+| `toggle_reasoning` | `["ctrl-r"]` | expand or collapse thinking blocks |
+| `cycle_model` | `["shift-tab"]` | switch to the next favorite model |
+| `history_prev` | `["up", "ctrl-p"]` | earlier prompt; inside a multi-line draft moves the cursor first; with an empty input pulls back the last queued message |
+| `history_next` | `["down", "ctrl-n"]` | later prompt |
+| `delete_word` | `["ctrl-w"]` | delete the word before the cursor |
+| `delete_line` | `["ctrl-u"]` | delete to the start of the line |
+| `line_start` | `["ctrl-a", "home"]` | |
+| `line_end` | `["ctrl-e", "end"]` | |
+| `paste_image` | `["ctrl-v"]` | attach the clipboard image as an `[Image #1: 120 KB]` chip |
+
+Example:
+
+```toml
+[keys]
+submit = ["enter", "ctrl-s"]
+quit = ["ctrl-q"]
+```
+
+`/keys` in the TUI prints the active bindings.
+
+## Fixed keys
+
+- `/` at the start of an empty input opens the command popup; Tab completes,
+  Enter runs, arrows move.
+- Backspace on a `[Pasted #1: N lines]` or `[Image #1: …]` chip removes the
+  whole chip.
+- Mouse wheel scrolls; drag selects and copies through OSC 52 when
+  `layout.mouse` is on. Shift-drag keeps the terminal's own selection.
+- Pickers (`/model`, `/resume`, `/favorite`, `/skills`): type to filter,
+  Up/Down or Tab/Shift-Tab move, PgUp/PgDn page, Enter accepts, Esc closes,
+  Ctrl-U clears the query, Ctrl-R refreshes the model list. `/favorite` uses
+  bare letters: `n` new, `m` model, `e` effort, `r` rename, `d` remove,
+  `j`/`k` move, `q` close.
+
+## Plugin key binds
+
+The plugin ABI defines a `keybinds` hook returning `[(key, action)]` pairs,
+where the action is a `[keys]` field name (`"toggle_tools"`) or a slash
+command (`"/guard"`). The TUI does not apply plugin binds yet; bind keys in
+`[keys]` for now.

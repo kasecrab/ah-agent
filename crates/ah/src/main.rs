@@ -116,6 +116,11 @@ pub enum Command {
     },
     /// List stored sessions.
     Sessions,
+    /// Print the built-in documentation: `ah docs` lists topics, `ah docs plugins` prints one.
+    Docs {
+        /// Topic name (config, keys, commands, instructions, skills, plugins, sessions).
+        topic: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]

@@ -242,6 +242,10 @@ impl<'a> Agent<'a> {
             .replace("{date}", &date);
         let found = crate::instructions::load(&self.cwd, &self.settings.prompt.instructions);
         prompt.push_str(&crate::instructions::render(&found));
+        if self.settings.prompt.docs_hint {
+            prompt.push_str("\n\n");
+            prompt.push_str(&crate::docs::hint());
+        }
         self.hooks.system_prompt(SystemPromptIn {
             prompt,
             cwd,

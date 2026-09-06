@@ -3,6 +3,7 @@
 pub mod agent;
 pub mod auth;
 pub mod clipboard;
+pub mod docs;
 pub mod error;
 pub mod instructions;
 pub mod log;
