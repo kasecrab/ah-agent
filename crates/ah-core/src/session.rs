@@ -125,6 +125,55 @@ impl Session {
     }
 }
 
+/// What `/resume` shows for one stored session.
+#[derive(Debug, Clone)]
+pub struct Summary {
+    pub id: String,
+    pub started_ms: u128,
+    pub cwd: String,
+    pub model: String,
+    /// First user message, single line, trimmed.
+    pub title: String,
+    pub messages: usize,
+}
+
+/// Summaries of stored sessions, newest first. Empty sessions are skipped.
+pub fn summaries() -> Vec<Summary> {
+    let dir = crate::paths::sessions_dir();
+    let mut out: Vec<Summary> = list()
+        .into_iter()
+        .filter_map(|(id, _)| {
+            let f = File::open(dir.join(format!("{id}.jsonl"))).ok()?;
+            let mut lines = BufReader::new(f).lines();
+            let header: Header = serde_json::from_str(&lines.next()?.ok()?).ok()?;
+            let mut title = String::new();
+            let mut messages = 0usize;
+            for line in lines.map_while(|l| l.ok()) {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                messages += 1;
+                if title.is_empty()
+                    && let Ok(m) = serde_json::from_str::<Message>(&line)
+                    && m.role == ah_abi::Role::User
+                {
+                    title = m.content.lines().next().unwrap_or("").trim().to_string();
+                }
+            }
+            (messages > 0).then_some(Summary {
+                id: header.id,
+                started_ms: header.started_ms,
+                cwd: header.cwd,
+                model: header.model,
+                title,
+                messages,
+            })
+        })
+        .collect();
+    out.sort_by_key(|s| std::cmp::Reverse(s.started_ms));
+    out
+}
+
 /// `(id, size_bytes)` for every stored session.
 pub fn list() -> Vec<(String, u64)> {
     let Ok(rd) = std::fs::read_dir(crate::paths::sessions_dir()) else {

@@ -52,16 +52,26 @@ impl SettingsStack {
         s
     }
 
-    /// Defaults + user config + project config.
+    /// Defaults + user config + starred models + project config.
     pub fn from_files() -> Result<Self> {
         let mut s = Self::new();
-        for path in [
-            crate::paths::user_config_file(),
-            crate::paths::project_config_file(),
-        ] {
-            if path.is_file() {
-                s.push_file(&path)?;
-            }
+        let user = crate::paths::user_config_file();
+        if user.is_file() {
+            s.push_file(&user)?;
+        }
+        let starred = crate::paths::starred_file();
+        if starred.is_file() {
+            let text = std::fs::read_to_string(&starred)?;
+            let stars = parse_toml_patch(&text)
+                .map_err(|e| Error::Config(format!("{}: {e}", starred.display())))?;
+            s.push(
+                Origin::File(starred),
+                serde_json::json!({"model": {"starred": stars}}),
+            )?;
+        }
+        let project = crate::paths::project_config_file();
+        if project.is_file() {
+            s.push_file(&project)?;
         }
         Ok(s)
     }
@@ -115,6 +125,18 @@ impl SettingsStack {
         toml::to_string_pretty(&self.resolved)
             .unwrap_or_else(|e| format!("# failed to render: {e}"))
     }
+}
+
+/// Overwrite the starred-models file with `stars` (`key = "model"` or
+/// `key = { id = "model", effort = "high" }` lines).
+pub fn save_starred(stars: &std::collections::BTreeMap<String, ah_abi::Star>) -> Result<()> {
+    let path = crate::paths::starred_file();
+    if let Some(d) = path.parent() {
+        std::fs::create_dir_all(d)?;
+    }
+    let text = toml::to_string(stars).map_err(|e| Error::Config(e.to_string()))?;
+    std::fs::write(&path, text)?;
+    Ok(())
 }
 
 /// TOML → JSON value. TOML has no null so removal is spelled `key = "__unset__"`.

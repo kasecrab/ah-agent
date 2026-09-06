@@ -108,6 +108,8 @@ pub enum EngineCmd {
     /// Drop and reload all plugins with the current settings.
     Reload,
     Clear,
+    /// Switch to a stored session by id.
+    Resume(String),
     Quit,
 }
 
@@ -128,6 +130,10 @@ pub enum UiEvent {
         reason: String,
     },
     Busy(bool),
+    Resumed {
+        id: String,
+        messages: Vec<Message>,
+    },
 }
 
 /// `(reports, settings patches in apply order, slash commands)` from a plugin load.
@@ -338,6 +344,21 @@ impl Engine {
                     }
                 }
                 EngineCmd::Clear => self.session.clear(),
+                EngineCmd::Resume(id) => match Session::open(&id) {
+                    Ok(s) => {
+                        self.session = s;
+                        self.total_usage = Usage::default();
+                        let _ = tx.send(UiEvent::Resumed {
+                            id: self.session.id.clone(),
+                            messages: self.session.messages.clone(),
+                        });
+                    }
+                    Err(e) => {
+                        let _ = tx.send(UiEvent::Agent(AgentEvent::Error(format!(
+                            "resume {id}: {e}"
+                        ))));
+                    }
+                },
                 EngineCmd::Quit => break,
             }
         }
@@ -387,7 +408,10 @@ pub fn render_status_template(fmt: &str, ctx: &StatusContext) -> String {
             ctx.cwd.clone()
         }
     };
-    fmt.replace("{model}", &ctx.model)
+    let out = fmt
+        .replace("{model}", &ctx.model)
+        .replace("{star}", &ctx.star)
+        .replace("{effort}", &ctx.effort)
         .replace("{tokens_in}", &ctx.usage.prompt_tokens.to_string())
         .replace("{tokens_out}", &ctx.usage.completion_tokens.to_string())
         .replace("{cost}", &format!("{:.4}", ctx.usage.cost))
@@ -402,7 +426,19 @@ pub fn render_status_template(fmt: &str, ctx: &StatusContext) -> String {
         )
         .replace("{plugins}", &ctx.plugins.to_string())
         .replace("{state}", &ctx.state)
-        .replace("{session}", &ctx.session_id)
+        .replace("{session}", &ctx.session_id);
+    // empty placeholders leave double spaces behind
+    let mut collapsed = String::with_capacity(out.len());
+    for (i, part) in out.split(' ').enumerate() {
+        if part.is_empty() && i > 0 {
+            continue;
+        }
+        if i > 0 {
+            collapsed.push(' ');
+        }
+        collapsed.push_str(part);
+    }
+    collapsed
 }
 
 #[cfg(test)]

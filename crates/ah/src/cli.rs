@@ -266,8 +266,11 @@ pub fn subcommand(cmd: Command, o: &Overrides) -> Result<(), AnyError> {
         Command::Plugin { cmd } => plugin(o, cmd),
         Command::Config { cmd } => config(o, cmd.unwrap_or(ConfigCmd::Show { origins: false })),
         Command::Sessions => {
-            for (id, size) in ah_core::session::list() {
-                println!("{id}\t{size} bytes");
+            for s in ah_core::session::summaries() {
+                println!(
+                    "{}\t{:>4} msg\t{}\t{}\t{}",
+                    s.id, s.messages, s.model, s.cwd, s.title
+                );
             }
             Ok(())
         }

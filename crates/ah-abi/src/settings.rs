@@ -1,5 +1,6 @@
 //! The configuration tree. Plugins change it via JSON merge patches.
 
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
@@ -35,12 +36,53 @@ pub struct ModelSettings {
     pub base_url: String,
     /// Optional API key override. Prefer `OPENROUTER_API_KEY` or `ah login`.
     pub api_key: Option<String>,
+    /// Named favourites, cycled with `keys.cycle_model`:
+    /// `fast = "deepseek/deepseek-v4-flash-0731"` or
+    /// `smart = { id = "anthropic/claude-sonnet-4.5", effort = "high" }`.
+    pub starred: BTreeMap<String, Star>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Star {
+    Id(String),
+    Full {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effort: Option<String>,
+    },
+}
+
+impl Star {
+    pub fn id(&self) -> &str {
+        match self {
+            Star::Id(id) | Star::Full { id, .. } => id,
+        }
+    }
+
+    /// Reasoning effort, if the star pins one. `"off"` disables reasoning.
+    pub fn effort(&self) -> Option<&str> {
+        match self {
+            Star::Id(_) => None,
+            Star::Full { effort, .. } => effort.as_deref(),
+        }
+    }
+}
+
+impl ModelSettings {
+    /// Current reasoning effort (`model.reasoning.effort`), if set.
+    pub fn effort(&self) -> Option<&str> {
+        self.reasoning
+            .as_ref()
+            .and_then(|r| r.get("effort"))
+            .and_then(|e| e.as_str())
+    }
 }
 
 impl Default for ModelSettings {
     fn default() -> Self {
         Self {
-            id: String::from("anthropic/claude-sonnet-4.5"),
+            id: String::from("deepseek/deepseek-v4-flash-0731"),
             max_tokens: Some(8192),
             temperature: None,
             top_p: None,
@@ -48,6 +90,7 @@ impl Default for ModelSettings {
             provider: None,
             base_url: String::from("https://openrouter.ai/api/v1"),
             api_key: None,
+            starred: BTreeMap::new(),
         }
     }
 }
@@ -192,8 +235,6 @@ pub struct Layout {
     /// Max lines of tool output shown when expanded.
     pub tool_output_lines: u16,
     pub show_reasoning: bool,
-    pub sidebar: bool,
-    pub sidebar_width: u16,
     pub wrap: bool,
     /// Redraw throttle while streaming, in milliseconds. 0 = redraw on every delta.
     pub stream_redraw_ms: u64,
@@ -222,8 +263,6 @@ impl Default for Layout {
             show_tool_output: false,
             tool_output_lines: 20,
             show_reasoning: false,
-            sidebar: false,
-            sidebar_width: 32,
             wrap: true,
             stream_redraw_ms: 33,
             spinner_ms: 100,
@@ -255,7 +294,8 @@ pub struct Keys {
     pub clear: Vec<String>,
     pub toggle_tools: Vec<String>,
     pub toggle_reasoning: Vec<String>,
-    pub toggle_sidebar: Vec<String>,
+    /// Switch to the next starred model.
+    pub cycle_model: Vec<String>,
     pub history_prev: Vec<String>,
     pub history_next: Vec<String>,
     pub delete_word: Vec<String>,
@@ -281,7 +321,7 @@ impl Default for Keys {
             clear: v(&["ctrl-l"]),
             toggle_tools: v(&["ctrl-t"]),
             toggle_reasoning: v(&["ctrl-r"]),
-            toggle_sidebar: v(&["ctrl-b"]),
+            cycle_model: v(&["shift-tab"]),
             history_prev: v(&["up"]),
             history_next: v(&["down"]),
             delete_word: v(&["ctrl-w"]),
@@ -350,8 +390,8 @@ impl Default for PluginSettings {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StatusLine {
-    /// Template. Placeholders: `{model} {tokens_in} {tokens_out} {cost} {cwd}
-    /// {git} {plugins} {state} {session}`.
+    /// Template. Placeholders: `{model} {star} {effort} {tokens_in} {tokens_out}
+    /// {cost} {cwd} {git} {plugins} {state} {session}`.
     pub format: String,
 }
 
@@ -359,7 +399,7 @@ impl Default for StatusLine {
     fn default() -> Self {
         Self {
             format: String::from(
-                " {state} {model} │ ↑{tokens_in} ↓{tokens_out} ${cost} │ {cwd} {git}",
+                " {model} {effort} │ ↑{tokens_in} ↓{tokens_out} ${cost} │ {cwd} {git}",
             ),
         }
     }
@@ -441,5 +481,25 @@ mod tests {
         assert_eq!(s.theme.accent, "magenta");
         assert_eq!(s.extra["guard"]["deny"][0], "rm -rf");
         assert_eq!(s.layout.input_height, 1);
+    }
+
+    #[test]
+    fn star_accepts_string_or_table() {
+        let v = json!({"model": {"starred": {
+            "fast": "deepseek/deepseek-v4-flash-0731",
+            "smart": {"id": "anthropic/claude-sonnet-4.5", "effort": "high"}
+        }}});
+        let s: Settings = serde_json::from_value(v).unwrap();
+        assert_eq!(
+            s.model.starred["fast"].id(),
+            "deepseek/deepseek-v4-flash-0731"
+        );
+        assert_eq!(s.model.starred["fast"].effort(), None);
+        assert_eq!(s.model.starred["smart"].effort(), Some("high"));
+        let m = ModelSettings {
+            reasoning: Some(json!({"effort": "low"})),
+            ..Default::default()
+        };
+        assert_eq!(m.effort(), Some("low"));
     }
 }

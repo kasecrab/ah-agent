@@ -207,6 +207,10 @@ pub struct StatusContext {
     pub state: String,
     pub session_id: String,
     pub width: u16,
+    /// Name of the starred entry matching the current model, if any.
+    pub star: String,
+    /// Reasoning effort in use (`model.reasoning.effort`), or empty.
+    pub effort: String,
     /// Result of the built-in template, so a plugin can decorate instead of replace.
     pub rendered: String,
 }

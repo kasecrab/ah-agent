@@ -4,6 +4,7 @@ mod highlight;
 mod input;
 mod keys;
 mod markdown;
+mod picker;
 mod theme;
 mod transcript;
 
@@ -26,6 +27,7 @@ use ratatui::widgets::{Clear, Paragraph};
 use crate::app::{self, AnyError, Engine, EngineCmd, UiEvent};
 use input::Editor;
 use keys::Chord;
+use picker::{Action, Kind, Picker, Row};
 use theme::Palette;
 use transcript::{Block, Entry, View};
 
@@ -35,56 +37,36 @@ enum Msg {
     Models(Result<Vec<ModelInfo>, String>),
 }
 
-/// Built-in slash commands: `(name, description, takes_args)`.
+/// Built-in slash commands, alphabetical: `(name, description, takes_args)`.
 const COMMANDS: &[(&str, &str, bool)] = &[
+    ("ask", "ask before tool calls", false),
+    ("clear", "clear the conversation", false),
+    ("config", "show config files and layers", false),
+    ("effort", "set reasoning effort: /effort [level]", true),
     ("help", "list commands and keys", false),
+    ("keys", "show key bindings", false),
     (
         "model",
         "pick a model (fuzzy search over OpenRouter catalogue)",
         true,
     ),
-    ("clear", "clear the conversation", false),
-    ("reload", "re-read config and reload plugins", false),
     ("plugins", "list active plugins", false),
-    ("tools", "list tools", false),
-    ("keys", "show key bindings", false),
-    ("config", "show config files and layers", false),
-    ("set", "override a setting: /set theme.accent magenta", true),
-    ("yolo", "auto-approve tool calls", false),
-    ("ask", "ask before tool calls", false),
-    ("reasoning", "toggle reasoning display", false),
-    ("sidebar", "toggle tool sidebar", false),
-    ("session", "show session id and file", false),
     ("quit", "exit", false),
+    ("reasoning", "toggle reasoning display", false),
+    ("reload", "re-read config and reload plugins", false),
+    ("resume", "switch to a previous session", true),
+    ("session", "show session id and file", false),
+    ("set", "override a setting: /set theme.accent magenta", true),
+    ("star", "star the current model: /star fast [model]", true),
+    ("tools", "list tools", false),
+    ("unstar", "remove a starred model: /unstar fast", true),
+    ("yolo", "auto-approve tool calls", false),
 ];
 
 struct Completion {
     /// `(name, description, takes_args)`
     items: Vec<(String, String, bool)>,
     selected: usize,
-}
-
-struct Picker {
-    query: String,
-    all: Vec<ModelInfo>,
-    results: Vec<usize>,
-    selected: usize,
-    loading: bool,
-    error: Option<String>,
-}
-
-impl Picker {
-    fn refilter(&mut self) {
-        let idx: Vec<usize> = (0..self.all.len()).collect();
-        let all = &self.all;
-        self.results = models::rank(&self.query, &idx, |&i| {
-            format!("{} {}", all[i].id, all[i].name)
-        })
-        .into_iter()
-        .copied()
-        .collect();
-        self.selected = 0;
-    }
 }
 
 #[derive(Clone)]
@@ -102,7 +84,7 @@ struct Binds {
     clear: Vec<Chord>,
     toggle_tools: Vec<Chord>,
     toggle_reasoning: Vec<Chord>,
-    toggle_sidebar: Vec<Chord>,
+    cycle_model: Vec<Chord>,
     history_prev: Vec<Chord>,
     history_next: Vec<Chord>,
     delete_word: Vec<Chord>,
@@ -130,7 +112,7 @@ impl Binds {
             clear: p(&k.clear),
             toggle_tools: p(&k.toggle_tools),
             toggle_reasoning: p(&k.toggle_reasoning),
-            toggle_sidebar: p(&k.toggle_sidebar),
+            cycle_model: p(&k.cycle_model),
             history_prev: p(&k.history_prev),
             history_next: p(&k.history_next),
             delete_word: p(&k.delete_word),
@@ -179,9 +161,10 @@ struct App {
     git_branch: String,
     cwd: String,
     session_id: String,
-    sidebar_items: Vec<(String, bool, u64)>,
     completion: Option<Completion>,
     picker: Option<Picker>,
+    /// Model catalogue, loaded lazily for the picker and reasoning checks.
+    catalogue: Option<Vec<ModelInfo>>,
     self_tx: Sender<Msg>,
     tx: Sender<EngineCmd>,
     perm_tx: Sender<bool>,
@@ -291,9 +274,9 @@ fn run_inner(
         git_branch: ah_core::plugins::git_branch(&cwd),
         cwd: cwd.display().to_string(),
         session_id,
-        sidebar_items: Vec::new(),
         completion: None,
         picker: None,
+        catalogue: None,
         self_tx: ui_tx.clone(),
         tx: eng_tx,
         perm_tx,
@@ -487,8 +470,14 @@ impl App {
             State::Streaming => "streaming".into(),
             State::Tool => format!("tool:{}", self.tool_name),
         };
+        let m = &self.settings().model;
+        let star = self
+            .star_index()
+            .and_then(|i| m.starred.keys().nth(i))
+            .map(|k| format!("★{k}"))
+            .unwrap_or_default();
         let mut ctx = StatusContext {
-            model: self.settings().model.id.clone(),
+            model: m.id.clone(),
             usage: self.usage,
             cwd: self.cwd.clone(),
             git_branch: self.git_branch.clone(),
@@ -496,6 +485,8 @@ impl App {
             state,
             session_id: self.session_id.clone(),
             width: self.size.0,
+            star,
+            effort: m.effort().unwrap_or("").to_string(),
             rendered: String::new(),
         };
         ctx.rendered = app::render_status_template(&self.settings().statusline.format, &ctx);
@@ -592,15 +583,23 @@ impl App {
             Msg::Engine(ev) => self.handle_engine(ev),
             Msg::Models(res) => {
                 self.dirty = true;
-                if let Some(p) = self.picker.as_mut() {
-                    p.loading = false;
-                    match res {
-                        Ok(list) => {
-                            p.all = list;
-                            p.error = None;
-                            p.refilter();
+                match res {
+                    Ok(list) => {
+                        self.catalogue = Some(list);
+                        if let Some(p) = &self.picker
+                            && matches!(p.kind, Kind::Model)
+                        {
+                            let q = p.query.clone();
+                            self.open_model_picker(&q, false);
                         }
-                        Err(e) => p.error = Some(e),
+                    }
+                    Err(e) => {
+                        if let Some(p) = self.picker.as_mut()
+                            && matches!(p.kind, Kind::Model)
+                        {
+                            p.loading = false;
+                            p.error = Some(format!("fetch failed: {e}"));
+                        }
                     }
                 }
             }
@@ -632,6 +631,7 @@ impl App {
                 takes_args,
             ));
         }
+        all.sort_by(|a, b| a.0.cmp(&b.0));
         let ranked: Vec<(String, String, bool)> = models::rank(rest, &all, |x| x.0.clone())
             .into_iter()
             .cloned()
@@ -664,8 +664,11 @@ impl App {
         let Some((name, _, takes_args)) = c.items.get(c.selected).cloned() else {
             return;
         };
+        // Enter runs the command when it takes no arguments, or when the user
+        // typed the whole name already (the arguments are optional).
+        let typed_full = self.editor.text.trim() == format!("/{name}");
         self.editor.clear();
-        if submit && (!takes_args || name == "model") {
+        if submit && (!takes_args || typed_full) {
             self.slash(&name);
         } else {
             self.editor.insert_str(&format!("/{name} "));
@@ -673,25 +676,70 @@ impl App {
         self.dirty = true;
     }
 
-    // ---- model picker ----------------------------------------------------
+    // ---- pickers ---------------------------------------------------------
 
-    fn open_picker(&mut self, query: &str, force_refresh: bool) {
-        let cached = models::load_cached();
-        let stale = cached
-            .as_ref()
-            .is_none_or(|(_, age)| age.as_secs() > 24 * 3600);
-        let all = cached.map(|(m, _)| m).unwrap_or_default();
-        let mut p = Picker {
-            query: query.to_string(),
-            all,
-            results: Vec::new(),
-            selected: 0,
-            loading: false,
-            error: None,
-        };
-        p.refilter();
-        if stale || force_refresh {
+    fn open_model_picker(&mut self, query: &str, force_refresh: bool) {
+        let mut stale = force_refresh;
+        if self.catalogue.is_none() {
+            match models::load_cached() {
+                Some((m, age)) => {
+                    stale |= age.as_secs() > 24 * 3600;
+                    self.catalogue = Some(m);
+                }
+                None => stale = true,
+            }
+        }
+        let pal = &self.pal;
+        let current = self.settings().model.id.clone();
+        let rows: Vec<Row> = self
+            .catalogue
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .map(|m| {
+                let ctx = if m.context_length >= 1000 {
+                    format!("{}k", m.context_length / 1000)
+                } else {
+                    m.context_length.to_string()
+                };
+                Row {
+                    id: m.id.clone(),
+                    search: format!("{} {}", m.id, m.name),
+                    label: if m.id == current {
+                        format!("{} •", m.id)
+                    } else {
+                        m.id.clone()
+                    },
+                    cols: vec![
+                        (format!("{ctx:>6} "), pal.dim()),
+                        (
+                            format!("${:>6.2}/${:<6.2}", m.prompt_per_m, m.completion_per_m),
+                            pal.dim(),
+                        ),
+                        (
+                            if m.tools { " tools" } else { "      " }.into(),
+                            Style::default().fg(pal.tool),
+                        ),
+                        (
+                            if m.reasoning { " think" } else { "      " }.into(),
+                            Style::default().fg(pal.reasoning),
+                        ),
+                    ],
+                }
+            })
+            .collect();
+        let mut p = Picker::new(
+            Kind::Model,
+            "model · Enter select · Esc close · Ctrl-R refresh",
+            query,
+            rows,
+        );
+        p.hint = "$/M tokens in/out".into();
+        if stale {
             p.loading = true;
+            if p.rows.is_empty() {
+                p.hint = "fetching model list from OpenRouter…".into();
+            }
             let tx = self.self_tx.clone();
             let base = self.settings().model.base_url.clone();
             let key = ah_core::auth::api_key(self.settings().model.api_key.as_deref());
@@ -707,74 +755,330 @@ impl App {
         self.dirty = true;
     }
 
+    fn open_effort_picker(&mut self, model: Option<String>) {
+        let current = self.settings().model.effort().unwrap_or("off").to_string();
+        let pal = &self.pal;
+        let rows: Vec<Row> = picker::EFFORTS
+            .iter()
+            .map(|(name, desc)| Row {
+                id: name.to_string(),
+                search: name.to_string(),
+                label: if *name == current {
+                    format!("{name} •")
+                } else {
+                    name.to_string()
+                },
+                cols: vec![(format!("{desc:<24}"), pal.dim())],
+            })
+            .collect();
+        let title = match &model {
+            Some(m) => format!("reasoning effort for {m}"),
+            None => "reasoning effort".to_string(),
+        };
+        let mut p = Picker::new(Kind::Effort { model }, &title, "", rows);
+        p.selected = picker::EFFORTS
+            .iter()
+            .position(|(n, _)| *n == current)
+            .unwrap_or(0);
+        self.picker = Some(p);
+        self.dirty = true;
+    }
+
+    fn open_session_picker(&mut self, query: &str) {
+        let pal = &self.pal;
+        let rows: Vec<Row> = ah_core::session::summaries()
+            .into_iter()
+            .filter(|s| s.id != self.session_id)
+            .map(|s| {
+                let title = if s.title.is_empty() {
+                    "(no messages)".to_string()
+                } else {
+                    s.title.clone()
+                };
+                let short_cwd = std::path::Path::new(&s.cwd)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let model = s.model.rsplit('/').next().unwrap_or(&s.model).to_string();
+                Row {
+                    id: s.id.clone(),
+                    search: format!("{} {} {} {}", title, short_cwd, model, s.id),
+                    label: title,
+                    cols: vec![
+                        (format!("{:>8} ", picker::age(s.started_ms)), pal.dim()),
+                        (format!("{:>4} msg ", s.messages), pal.dim()),
+                        (
+                            format!("{short_cwd:<16.16} "),
+                            Style::default().fg(pal.user),
+                        ),
+                        (format!("{model:<20.20}"), pal.dim()),
+                    ],
+                }
+            })
+            .collect();
+        let mut p = Picker::new(
+            Kind::Session,
+            "resume · Enter switch · Esc close",
+            query,
+            rows,
+        );
+        p.hint = if p.rows.is_empty() {
+            "no previous sessions".into()
+        } else {
+            format!("sessions in {}", ah_core::paths::sessions_dir().display())
+        };
+        self.picker = Some(p);
+        self.dirty = true;
+    }
+
     fn picker_key(&mut self, k: KeyEvent) {
         let Some(p) = self.picker.as_mut() else {
             return;
         };
-        let page = 10;
-        let last = p.results.len().saturating_sub(1);
-        match (k.code, k.modifiers) {
-            (KeyCode::Esc, _) => self.picker = None,
-            (KeyCode::Enter, _) => {
-                let chosen = p
-                    .results
-                    .get(p.selected)
-                    .map(|&i| p.all[i].id.clone())
-                    .or_else(|| {
-                        // no match: accept a raw id
-                        let q = p.query.trim();
-                        (!q.is_empty() && q.contains('/')).then(|| q.to_string())
-                    });
-                self.picker = None;
-                if let Some(id) = chosen {
-                    self.set_model(&id);
+        self.dirty = true;
+        match p.key(k) {
+            Action::None => {}
+            Action::Close => self.picker = None,
+            Action::Refresh => {
+                if matches!(p.kind, Kind::Model) {
+                    let q = p.query.clone();
+                    self.open_model_picker(&q, true);
                 }
             }
-            (KeyCode::Up, _) => p.selected = p.selected.saturating_sub(1),
-            (KeyCode::Down, _) => p.selected = (p.selected + 1).min(last),
-            (KeyCode::PageUp, _) => p.selected = p.selected.saturating_sub(page),
-            (KeyCode::PageDown, _) => p.selected = (p.selected + page).min(last),
-            (KeyCode::Home, _) => p.selected = 0,
-            (KeyCode::End, _) => p.selected = last,
-            (KeyCode::Backspace, _) => {
-                p.query.pop();
-                p.refilter();
+            Action::Accept => {
+                let chosen = p.current().map(|r| r.id.clone());
+                let Some(p) = self.picker.take() else { return };
+                match p.kind {
+                    Kind::Model => {
+                        // no match: accept a raw id
+                        let q = p.query.trim();
+                        let id = chosen
+                            .or_else(|| (!q.is_empty() && q.contains('/')).then(|| q.to_string()));
+                        if let Some(id) = id {
+                            if self.model_reasons(&id) {
+                                self.open_effort_picker(Some(id));
+                            } else {
+                                self.set_model(&id, None);
+                            }
+                        }
+                    }
+                    Kind::Session => {
+                        if let Some(id) = chosen {
+                            self.resume(&id);
+                        }
+                    }
+                    Kind::Effort { model } => {
+                        if let Some(level) = chosen {
+                            match model {
+                                Some(id) => self.set_model(&id, Some(&level)),
+                                None => self.set_effort(&level),
+                            }
+                        }
+                    }
+                }
             }
-            (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
-                p.query.clear();
-                p.refilter();
-            }
-            (KeyCode::Char('w'), KeyModifiers::CONTROL) => {
-                let t = p.query.trim_end().to_string();
-                p.query = t
-                    .rsplit_once(' ')
-                    .map(|(a, _)| format!("{a} "))
-                    .unwrap_or_default();
-                p.refilter();
-            }
-            (KeyCode::Char('r'), KeyModifiers::CONTROL) => {
-                let q = p.query.clone();
-                self.open_picker(&q, true);
-            }
-            (KeyCode::Char('c'), KeyModifiers::CONTROL) => self.picker = None,
-            (KeyCode::Char(c), m) if !m.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
-                p.query.push(c);
-                p.refilter();
-            }
-            _ => {}
         }
-        self.dirty = true;
     }
 
-    fn set_model(&mut self, id: &str) {
+    fn catalogue_has(&mut self, id: &str) -> bool {
+        if self.catalogue.is_none() {
+            self.catalogue = models::load_cached().map(|(m, _)| m);
+        }
+        self.catalogue
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .any(|m| m.id == id)
+    }
+
+    /// Whether the catalogue says `id` supports reasoning. Unknown ids: `false`.
+    fn model_reasons(&mut self, id: &str) -> bool {
+        if self.catalogue.is_none() {
+            self.catalogue = models::load_cached().map(|(m, _)| m);
+        }
+        self.catalogue
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .any(|m| m.id == id && m.reasoning)
+    }
+
+    fn effort_patch(level: &str) -> serde_json::Value {
+        if level == "off" {
+            serde_json::Value::Null
+        } else {
+            serde_json::json!({"effort": level})
+        }
+    }
+
+    /// Switch model, optionally pinning a reasoning effort (`"off"` clears it).
+    fn set_model(&mut self, id: &str, effort: Option<&str>) {
+        let mut patch = serde_json::json!({"model": {"id": id}});
+        if let Some(e) = effort {
+            patch["model"]["reasoning"] = Self::effort_patch(e);
+        }
+        self.apply_patch(Origin::Runtime("slash".into()), patch);
+        let star = self
+            .star_index()
+            .and_then(|i| self.settings().model.starred.keys().nth(i).cloned())
+            .map(|k| format!(" ★{k}"))
+            .unwrap_or_default();
+        let effort = match self.settings().model.effort() {
+            Some(e) => format!(" ({e})"),
+            None => String::new(),
+        };
+        self.push(Block::Notice(format!("model → {id}{effort}{star}")));
+        self.request_status();
+    }
+
+    fn set_effort(&mut self, level: &str) {
+        if !picker::EFFORTS.iter().any(|(n, _)| *n == level) {
+            self.push(Block::Error(format!(
+                "unknown effort `{level}` (off, minimal, low, medium, high, xhigh)"
+            )));
+            return;
+        }
+        let id = self.settings().model.id.clone();
+        if level != "off" && !self.model_reasons(&id) {
+            self.push(Block::Notice(format!(
+                "{id} is not listed as a reasoning model; sending effort anyway"
+            )));
+        }
         self.apply_patch(
             Origin::Runtime("slash".into()),
-            serde_json::json!({"model": {"id": id}}),
+            serde_json::json!({"model": {"reasoning": Self::effort_patch(level)}}),
         );
-        self.push(Block::Notice(format!(
-            "model → {id}  (persist with `--set model.id={id}` or config.toml)"
-        )));
+        self.push(Block::Notice(format!("reasoning effort → {level}")));
         self.request_status();
+    }
+
+    /// Index into `model.starred` (key order) of the star matching the current
+    /// model and effort.
+    fn star_index(&self) -> Option<usize> {
+        let m = &self.settings().model;
+        let effort = m.effort().unwrap_or("off");
+        let exact = m
+            .starred
+            .values()
+            .position(|s| s.id() == m.id && s.effort().is_none_or(|e| e == effort));
+        exact.or_else(|| m.starred.values().position(|s| s.id() == m.id))
+    }
+
+    fn cycle_model(&mut self) {
+        let stars = &self.settings().model.starred;
+        if stars.is_empty() {
+            self.push(Block::Notice(
+                "no starred models: /star fast [model], or model.starred in config.toml".into(),
+            ));
+            return;
+        }
+        let next = self
+            .star_index()
+            .map(|i| (i + 1) % stars.len())
+            .unwrap_or(0);
+        let (_, star) = stars.iter().nth(next).expect("index in range");
+        let (id, effort) = (star.id().to_string(), star.effort().map(str::to_string));
+        self.set_model(&id, effort.as_deref());
+    }
+
+    fn star(&mut self, args: &str) {
+        let mut parts = args.split_whitespace();
+        let Some(key) = parts.next() else {
+            let stars = &self.settings().model.starred;
+            if stars.is_empty() {
+                self.push(Block::Notice(
+                    "no starred models. /star <key> [model] stars the current model".into(),
+                ));
+                return;
+            }
+            let cur = self.star_index();
+            let s = stars
+                .iter()
+                .enumerate()
+                .map(|(i, (k, st))| {
+                    format!(
+                        "{} {k}: {}{}",
+                        if Some(i) == cur { "★" } else { " " },
+                        st.id(),
+                        st.effort().map(|e| format!(" ({e})")).unwrap_or_default()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            self.push(Block::Notice(format!("starred (Shift-Tab cycles):\n{s}")));
+            return;
+        };
+        let key = key.to_string();
+        let m = &self.settings().model;
+        let id = parts
+            .next()
+            .map(str::to_string)
+            .unwrap_or_else(|| m.id.clone());
+        let effort = if parts.next().is_some() {
+            None
+        } else if id == m.id {
+            Some(m.effort().unwrap_or("off").to_string())
+        } else {
+            None
+        };
+        let star = match effort {
+            Some(e) => Star::Full {
+                id: id.clone(),
+                effort: Some(e),
+            },
+            None => Star::Id(id.clone()),
+        };
+        let mut file = self.load_starred_file();
+        file.insert(key.clone(), star.clone());
+        if let Err(e) = ah_core::settings::save_starred(&file) {
+            self.push(Block::Error(format!("could not save stars: {e}")));
+        }
+        self.apply_patch(
+            Origin::Runtime("slash".into()),
+            serde_json::json!({"model": {"starred": {&key: star}}}),
+        );
+        self.push(Block::Notice(format!("★ {key} → {id}")));
+        self.request_status();
+    }
+
+    fn unstar(&mut self, key: &str) {
+        let key = key.trim();
+        if key.is_empty() || !self.settings().model.starred.contains_key(key) {
+            self.push(Block::Notice(format!("no star named `{key}`")));
+            return;
+        }
+        let mut file = self.load_starred_file();
+        if file.remove(key).is_some() {
+            if let Err(e) = ah_core::settings::save_starred(&file) {
+                self.push(Block::Error(format!("could not save stars: {e}")));
+            }
+        } else {
+            self.push(Block::Notice(format!(
+                "{key} comes from a config file; removed for this session only"
+            )));
+        }
+        self.apply_patch(
+            Origin::Runtime("slash".into()),
+            serde_json::json!({"model": {"starred": {key: null}}}),
+        );
+        self.push(Block::Notice(format!("unstarred {key}")));
+        self.request_status();
+    }
+
+    fn load_starred_file(&self) -> std::collections::BTreeMap<String, Star> {
+        std::fs::read_to_string(ah_core::paths::starred_file())
+            .ok()
+            .and_then(|t| ah_core::settings::parse_toml_patch(&t).ok())
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default()
+    }
+
+    fn resume(&mut self, id: &str) {
+        if self.busy {
+            self.push(Block::Notice("busy; wait or press Esc to cancel".into()));
+            return;
+        }
+        let _ = self.tx.send(EngineCmd::Resume(id.to_string()));
     }
 
     fn handle_engine(&mut self, ev: UiEvent) {
@@ -850,6 +1154,15 @@ impl App {
                     self.dirty = true;
                 }
             }
+            UiEvent::Resumed { id, messages } => {
+                self.entries.clear();
+                self.usage = Usage::default();
+                self.session_id = id;
+                self.follow = true;
+                self.load_history(&messages);
+                self.request_status();
+                self.dirty = true;
+            }
         }
     }
 
@@ -921,11 +1234,6 @@ impl App {
                 result,
                 duration_ms,
             } => {
-                self.sidebar_items.push((
-                    call.function.name.clone(),
-                    !result.is_error,
-                    duration_ms,
-                ));
                 for e in self.entries.iter_mut().rev() {
                     if let Block::Tool {
                         call: c,
@@ -1131,12 +1439,8 @@ impl App {
                 Origin::Runtime("ui".into()),
                 serde_json::json!({"layout": {"show_reasoning": v}}),
             );
-        } else if keys::any_match(&b.toggle_sidebar, &k) {
-            let v = !self.settings().layout.sidebar;
-            self.apply_patch(
-                Origin::Runtime("ui".into()),
-                serde_json::json!({"layout": {"sidebar": v}}),
-            );
+        } else if keys::any_match(&b.cycle_model, &k) {
+            self.cycle_model();
         } else if keys::any_match(&b.delete_word, &k) {
             self.editor.delete_word();
         } else if keys::any_match(&b.delete_line, &k) {
@@ -1246,30 +1550,53 @@ impl App {
             .unwrap_or((cmd, ""));
         match name {
             "help" | "?" => {
-                let mut s = String::from(
-                    "/help  /model [id]  /clear  /reload  /plugins  /tools  /keys  /config  /set key value  /yolo  /ask  /reasoning  /sidebar  /session  /quit",
-                );
-                for (_, c) in &self.plugin_commands {
-                    s.push_str(&format!("\n/{} — {}", c.name, c.description));
+                let mut s = String::from("commands:");
+                for (n, d, _) in COMMANDS {
+                    s.push_str(&format!("\n  /{n:<10} {d}"));
                 }
-                s.push_str("\nkeys: Enter send · Shift/Alt-Enter newline · Esc cancel · Ctrl-T tool output · Ctrl-R reasoning · PgUp/PgDn scroll · Ctrl-C quit");
+                for (p, c) in &self.plugin_commands {
+                    s.push_str(&format!("\n  /{:<10} {} ({p})", c.name, c.description));
+                }
+                s.push_str("\nkeys: Enter send · Shift/Alt-Enter newline · Esc cancel · Shift-Tab next starred model · Ctrl-T tool output · Ctrl-R reasoning · PgUp/PgDn scroll · Ctrl-C quit");
                 self.push(Block::Notice(s));
             }
             "model" | "models" => {
                 if args == "refresh" {
-                    self.open_picker("", true);
+                    self.open_model_picker("", true);
                 } else if args.is_empty() {
-                    self.open_picker("", false);
-                } else if models::load_cached().is_some_and(|(m, _)| m.iter().any(|x| x.id == args))
-                {
-                    self.set_model(args);
+                    self.open_model_picker("", false);
+                } else if let Some(star) = self.settings().model.starred.get(args).cloned() {
+                    self.set_model(star.id(), star.effort());
+                } else if self.catalogue_has(args) {
+                    if self.model_reasons(args) {
+                        self.open_effort_picker(Some(args.to_string()));
+                    } else {
+                        self.set_model(args, None);
+                    }
                 } else {
-                    self.open_picker(args, false);
+                    self.open_model_picker(args, false);
                 }
             }
+            "effort" => {
+                if args.is_empty() {
+                    self.open_effort_picker(None);
+                } else {
+                    self.set_effort(args);
+                }
+            }
+            "resume" => {
+                if args.is_empty() {
+                    self.open_session_picker("");
+                } else if ah_core::session::list().iter().any(|(id, _)| id == args) {
+                    self.resume(args);
+                } else {
+                    self.open_session_picker(args);
+                }
+            }
+            "star" => self.star(args),
+            "unstar" => self.unstar(args),
             "clear" => {
                 self.entries.clear();
-                self.sidebar_items.clear();
                 self.usage = Usage::default();
                 let _ = self.tx.send(EngineCmd::Clear);
                 self.push(Block::Notice("conversation cleared".into()));
@@ -1302,7 +1629,7 @@ impl App {
             "keys" => {
                 let k = &self.settings().keys;
                 let s = format!(
-                    "submit {:?}\nnewline {:?}\ncancel {:?}\nquit {:?}\nscroll {:?}/{:?} page {:?}/{:?}\ntools {:?} reasoning {:?} sidebar {:?}",
+                    "submit {:?}\nnewline {:?}\ncancel {:?}\nquit {:?}\nscroll {:?}/{:?} page {:?}/{:?}\ntools {:?} reasoning {:?} starred model {:?}",
                     k.submit,
                     k.newline,
                     k.cancel,
@@ -1313,7 +1640,7 @@ impl App {
                     k.page_down,
                     k.toggle_tools,
                     k.toggle_reasoning,
-                    k.toggle_sidebar
+                    k.cycle_model
                 );
                 self.push(Block::Notice(s));
             }
@@ -1360,13 +1687,6 @@ impl App {
                 self.apply_patch(
                     Origin::Runtime("slash".into()),
                     serde_json::json!({"layout": {"show_reasoning": v}}),
-                );
-            }
-            "sidebar" => {
-                let v = !self.settings().layout.sidebar;
-                self.apply_patch(
-                    Origin::Runtime("slash".into()),
-                    serde_json::json!({"layout": {"sidebar": v}}),
                 );
             }
             "session" => {
@@ -1418,7 +1738,7 @@ impl App {
         } else {
             0
         };
-        let status_rows: u16 = if layout.show_status { 2 } else { 0 };
+        let status_rows: u16 = if layout.show_status { 1 } else { 0 };
 
         let [transcript_area, perm_area, input_area, status_area] = Layout::vertical([
             Constraint::Min(1),
@@ -1428,22 +1748,7 @@ impl App {
         ])
         .areas(area);
 
-        let (transcript_area, sidebar_area) =
-            if layout.sidebar && area.width > layout.sidebar_width + 20 {
-                let [t, s] = Layout::horizontal([
-                    Constraint::Min(10),
-                    Constraint::Length(layout.sidebar_width),
-                ])
-                .areas(transcript_area);
-                (t, Some(s))
-            } else {
-                (transcript_area, None)
-            };
-
         self.draw_transcript(f, transcript_area, &pal, layout.transcript_max_width);
-        if let Some(s) = sidebar_area {
-            self.draw_sidebar(f, s, &pal);
-        }
         if let Some((call, reason)) = &self.pending_perm {
             let block = pal.block(true).title(" permission ");
             let inner = block.inner(perm_area);
@@ -1520,19 +1825,13 @@ impl App {
         }
 
         if layout.show_status {
-            // blank row between the input and the status text
-            let bottom = Rect {
-                y: status_area.y + 1,
-                height: 1,
-                ..status_area
-            };
-            self.draw_status(f, bottom, &pal);
+            self.draw_status(f, status_area, &pal);
         }
         if let Some(c) = &self.completion {
             self.draw_completion(f, c, input_area, &pal);
         }
-        if self.picker.is_some() {
-            self.draw_picker(f, area, &pal);
+        if let Some(p) = &self.picker {
+            p.draw(f, area, &pal);
         }
     }
 
@@ -1572,96 +1871,6 @@ impl App {
             })
             .collect();
         f.render_widget(Paragraph::new(lines), inner);
-    }
-
-    fn draw_picker(&self, f: &mut Frame, area: Rect, pal: &Palette) {
-        let Some(p) = &self.picker else { return };
-        let width = (area.width * 9 / 10).clamp(40, 110).min(area.width);
-        let height = (area.height * 4 / 5).clamp(8, 40).min(area.height);
-        let r = Rect {
-            x: (area.width - width) / 2,
-            y: (area.height - height) / 2,
-            width,
-            height,
-        };
-        f.render_widget(Clear, r);
-        let block = pal
-            .block(true)
-            .title(" model · type to search · Enter select · Esc close · Ctrl-R refresh ");
-        let inner = block.inner(r);
-        f.render_widget(block, r);
-        let [q_area, list_area, foot_area] = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(1),
-        ])
-        .areas(inner);
-        f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled("> ", pal.bold(pal.accent)),
-                Span::raw(p.query.clone()),
-            ])),
-            q_area,
-        );
-        f.set_cursor_position((q_area.x + 2 + p.query.chars().count() as u16, q_area.y));
-        let rows = list_area.height as usize;
-        let first = p.selected.saturating_sub(rows.saturating_sub(1));
-        let id_w = (inner.width as usize).saturating_sub(34).max(20);
-        let lines: Vec<Line> = p
-            .results
-            .iter()
-            .enumerate()
-            .skip(first)
-            .take(rows)
-            .map(|(i, &mi)| {
-                let m = &p.all[mi];
-                let sel = i == p.selected;
-                let cur = m.id == self.settings().model.id;
-                let mut id: String = m.id.chars().take(id_w).collect();
-                if cur {
-                    id.push_str(" •");
-                }
-                let ctx = if m.context_length >= 1000 {
-                    format!("{}k", m.context_length / 1000)
-                } else {
-                    m.context_length.to_string()
-                };
-                let style = if sel {
-                    pal.bold(pal.accent).add_modifier(Modifier::REVERSED)
-                } else {
-                    Style::default().fg(pal.fg)
-                };
-                Line::from(vec![
-                    Span::styled(format!(" {id:<id_w$}"), style),
-                    Span::styled(format!(" {ctx:>6} "), pal.dim()),
-                    Span::styled(
-                        format!("${:>6.2}/${:<6.2}", m.prompt_per_m, m.completion_per_m),
-                        pal.dim(),
-                    ),
-                    Span::styled(
-                        if m.tools { " tools" } else { "      " },
-                        Style::default().fg(pal.tool),
-                    ),
-                    Span::styled(
-                        if m.reasoning { " think" } else { "" },
-                        Style::default().fg(pal.reasoning),
-                    ),
-                ])
-            })
-            .collect();
-        f.render_widget(Paragraph::new(lines), list_area);
-        let foot = match (&p.error, p.loading, p.all.is_empty()) {
-            (Some(e), _, _) => format!(" fetch failed: {e}"),
-            (None, true, true) => " fetching model list from OpenRouter…".to_string(),
-            (None, true, false) => format!(" {} of {} · refreshing…", p.results.len(), p.all.len()),
-            (None, false, true) => " no models cached; press Ctrl-R to fetch".to_string(),
-            (None, false, false) => format!(
-                " {} of {} models · $/M tokens in/out",
-                p.results.len(),
-                p.all.len()
-            ),
-        };
-        f.render_widget(Paragraph::new(Span::styled(foot, pal.dim())), foot_area);
     }
 
     fn spinner(&self) -> &str {
@@ -1713,31 +1922,6 @@ impl App {
                 r,
             );
         }
-    }
-
-    fn draw_sidebar(&self, f: &mut Frame, area: Rect, pal: &Palette) {
-        let block = pal.block(false).title(" tools ");
-        let inner = block.inner(area);
-        f.render_widget(block, area);
-        let h = inner.height as usize;
-        let items: Vec<Line> = self
-            .sidebar_items
-            .iter()
-            .rev()
-            .take(h)
-            .rev()
-            .map(|(name, ok, ms)| {
-                Line::from(vec![
-                    Span::styled(
-                        if *ok { "✓ " } else { "✗ " },
-                        Style::default().fg(if *ok { pal.user } else { pal.error }),
-                    ),
-                    Span::raw(name.clone()),
-                    Span::styled(format!(" {ms}ms"), pal.dim()),
-                ])
-            })
-            .collect();
-        f.render_widget(Paragraph::new(items), inner);
     }
 
     fn draw_status(&self, f: &mut Frame, area: Rect, pal: &Palette) {

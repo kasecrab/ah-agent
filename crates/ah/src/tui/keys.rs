@@ -81,6 +81,10 @@ pub fn matches(chord: &Chord, ev: &KeyEvent) -> bool {
                     || ev.modifiers.contains(KeyModifiers::SHIFT)
                     || b.is_ascii_uppercase())
         }
+        // terminals report BackTab with or without an explicit SHIFT
+        (KeyCode::BackTab, KeyCode::BackTab) => {
+            chord.mods - KeyModifiers::SHIFT == ev.modifiers - KeyModifiers::SHIFT
+        }
         (a, b) => a == b && chord.mods == ev.modifiers,
     }
 }
@@ -112,6 +116,15 @@ mod tests {
         assert!(matches(&c, &ev(KeyCode::Char('c'), KeyModifiers::CONTROL)));
         assert!(!matches(&c, &ev(KeyCode::Char('c'), KeyModifiers::NONE)));
         assert_eq!(parse("shift-tab").unwrap().code, KeyCode::BackTab);
+        let chord = parse("shift-tab").unwrap();
+        assert!(matches(
+            &chord,
+            &KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)
+        ));
+        assert!(matches(
+            &chord,
+            &KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE)
+        ));
         assert_eq!(parse("F5").unwrap().code, KeyCode::F(5));
         assert!(matches(
             &parse("enter").unwrap(),

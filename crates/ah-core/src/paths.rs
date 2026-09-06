@@ -32,6 +32,11 @@ pub fn project_config_file() -> PathBuf {
     project_dir().join("config.toml")
 }
 
+/// Stars added from the TUI (`/star`). Config files can also define `model.starred`.
+pub fn starred_file() -> PathBuf {
+    config_dir().join("starred.toml")
+}
+
 pub fn credentials_file() -> PathBuf {
     config_dir().join("credentials.toml")
 }
