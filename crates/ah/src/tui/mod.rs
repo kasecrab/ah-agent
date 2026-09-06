@@ -1702,11 +1702,23 @@ impl App {
                 KeyCode::Delete => self.editor.delete(),
                 KeyCode::Left => self.editor.left(),
                 KeyCode::Right => self.editor.right(),
+                // arrows move inside a multi-line draft; otherwise they scroll
+                // the transcript, which is also what the wheel sends when the
+                // terminal keeps the mouse
                 KeyCode::Up => {
-                    self.editor.up();
+                    if self.editor.line_count() > 1 && self.editor.line_col().0 > 0 {
+                        self.editor.up();
+                    } else {
+                        self.scroll_by(-(self.settings().layout.scroll_step.max(1) as isize));
+                    }
                 }
                 KeyCode::Down => {
-                    self.editor.down();
+                    let (row, _) = self.editor.line_col();
+                    if self.editor.line_count() > 1 && row + 1 < self.editor.line_count() {
+                        self.editor.down();
+                    } else {
+                        self.scroll_by(self.settings().layout.scroll_step.max(1) as isize);
+                    }
                 }
                 KeyCode::Home => self.editor.home(),
                 KeyCode::End => self.editor.end(),
@@ -1781,7 +1793,7 @@ impl App {
                 for (p, c) in &self.plugin_commands {
                     s.push_str(&format!("\n  /{:<10} {} ({p})", c.name, c.description));
                 }
-                s.push_str("\nkeys: Enter send · Shift/Alt-Enter newline · Esc cancel · Shift-Tab next favorites model · Ctrl-T tool output · Ctrl-R reasoning · PgUp/PgDn scroll · Ctrl-C quit");
+                s.push_str("\nkeys: Enter send · Shift/Alt-Enter newline · Esc cancel · Up/Down or wheel scroll · PgUp/PgDn page · Ctrl-P/Ctrl-N prompt history · Shift-Tab next favorite · Ctrl-T tool output · Ctrl-R thinking · Ctrl-C quit");
                 self.push(Block::Notice(s));
             }
             "model" | "models" => {

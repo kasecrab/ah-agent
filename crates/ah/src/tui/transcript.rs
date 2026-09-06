@@ -258,16 +258,32 @@ fn render(block: &Block, width: usize, view: &View, pal: &Palette) -> Vec<Line<'
             reasoning,
             streaming,
         } => {
-            if view.show_reasoning && !reasoning.is_empty() {
-                out.extend(with_prefix(
-                    reasoning,
-                    width,
-                    "… ",
-                    pal.dim(),
-                    Style::default().fg(pal.reasoning),
-                ));
+            if !reasoning.is_empty() {
+                let words = reasoning.split_whitespace().count();
+                let header = if *streaming && text.is_empty() {
+                    "∴ thinking…".to_string()
+                } else if view.show_reasoning {
+                    format!("∴ thinking · {words} words")
+                } else {
+                    format!("∴ thought for {words} words · Ctrl-R shows it")
+                };
+                out.push(Line::from(Span::styled(header, pal.dim())));
+                if view.show_reasoning {
+                    out.extend(with_prefix(
+                        reasoning.trim_end(),
+                        width,
+                        "  ",
+                        pal.dim(),
+                        Style::default()
+                            .fg(pal.reasoning)
+                            .add_modifier(ratatui::style::Modifier::ITALIC),
+                    ));
+                    if !text.is_empty() || !*streaming {
+                        out.push(Line::default());
+                    }
+                }
             }
-            if text.is_empty() && *streaming && (reasoning.is_empty() || !view.show_reasoning) {
+            if text.is_empty() && *streaming && reasoning.is_empty() {
                 out.push(Line::from(Span::styled("…", pal.dim())));
             } else if !text.is_empty() && view.markdown {
                 out.extend(super::markdown::render(
