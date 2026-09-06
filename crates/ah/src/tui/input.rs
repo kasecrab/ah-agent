@@ -12,7 +12,12 @@ pub struct Editor {
     hist_pos: Option<usize>,
     draft: String,
     pastes: Vec<String>,
+    /// Entry added by the last `take`, not yet written to disk.
+    added: Option<String>,
 }
+
+/// Entries kept in memory and in the history file after compaction.
+pub const HISTORY_KEEP: usize = 1000;
 
 impl Editor {
     pub fn is_empty(&self) -> bool {
@@ -179,13 +184,83 @@ impl Editor {
         self.pastes.clear();
         self.cursor = 0;
         self.hist_pos = None;
-        if !t.trim().is_empty() && self.history.last() != Some(&t) {
-            self.history.push(t.clone());
-            if self.history.len() > 200 {
-                self.history.remove(0);
-            }
+        if !t.trim().is_empty() {
+            self.remember(&t);
         }
         t
+    }
+
+    /// True while Up/Down are walking history (the text is a recalled entry).
+    pub fn browsing_history(&self) -> bool {
+        self.hist_pos.is_some()
+    }
+
+    /// Append to history; an earlier identical entry moves to the end.
+    pub fn remember(&mut self, entry: &str) {
+        if self.history.last().map(String::as_str) == Some(entry) {
+            return;
+        }
+        self.history.retain(|h| h != entry);
+        self.history.push(entry.to_string());
+        self.added = Some(entry.to_string());
+        if self.history.len() > HISTORY_KEEP {
+            self.history.remove(0);
+        }
+    }
+
+    /// Entry recorded by the last `take`, once.
+    pub fn history_added(&mut self) -> Option<String> {
+        self.added.take()
+    }
+
+    /// Replace history, keeping the last occurrence of repeated entries.
+    pub fn set_history(&mut self, items: Vec<String>) {
+        let mut seen = std::collections::HashSet::new();
+        let mut out: Vec<String> = items
+            .into_iter()
+            .rev()
+            .filter(|e| seen.insert(e.clone()))
+            .collect();
+        out.reverse();
+        self.history = out;
+        self.hist_pos = None;
+    }
+
+    /// Read the shared history file; rewrites it when it has grown past twice
+    /// the keep limit so it never needs more than one pass.
+    pub fn load_history_file(path: &std::path::Path) -> Vec<String> {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return Vec::new();
+        };
+        let all: Vec<String> = text
+            .lines()
+            .filter_map(|l| serde_json::from_str::<String>(l).ok())
+            .collect();
+        let start = all.len().saturating_sub(HISTORY_KEEP);
+        let kept = all[start..].to_vec();
+        // rewrite once it doubles so reads stay one short pass
+        if all.len() > 2 * HISTORY_KEEP {
+            let body: String = kept
+                .iter()
+                .map(|e| format!("{}\n", serde_json::to_string(e).unwrap_or_default()))
+                .collect();
+            let _ = std::fs::write(path, body);
+        }
+        kept
+    }
+
+    pub fn append_history_file(path: &std::path::Path, entry: &str) {
+        use std::io::Write as _;
+        if let Some(d) = path.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(f, "{}", serde_json::to_string(entry).unwrap_or_default());
+        }
     }
 
     pub fn history_prev(&mut self) -> bool {

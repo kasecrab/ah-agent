@@ -13,6 +13,8 @@ pub enum Block {
         text: String,
         reasoning: String,
         streaming: bool,
+        /// Time spent streaming reasoning; 0 when unknown (replayed history).
+        think_ms: u64,
     },
     Tool {
         call: ToolCall,
@@ -71,10 +73,12 @@ impl Entry {
                 text,
                 reasoning,
                 streaming,
+                think_ms,
             } => {
                 mix(&mut k, text.len() as u64);
                 mix(&mut k, reasoning.len() as u64);
                 mix(&mut k, *streaming as u64);
+                mix(&mut k, *think_ms);
             }
             Block::Tool {
                 call,
@@ -257,15 +261,22 @@ fn render(block: &Block, width: usize, view: &View, pal: &Palette) -> Vec<Line<'
             text,
             reasoning,
             streaming,
+            think_ms,
         } => {
             if !reasoning.is_empty() {
-                let words = reasoning.split_whitespace().count();
+                let took = if *think_ms >= 1000 {
+                    format!(" for {:.1}s", *think_ms as f64 / 1000.0)
+                } else if *think_ms > 0 {
+                    format!(" for {think_ms}ms")
+                } else {
+                    String::new()
+                };
                 let header = if *streaming && text.is_empty() {
                     "∴ thinking…".to_string()
                 } else if view.show_reasoning {
-                    format!("∴ thinking · {words} words")
+                    format!("∴ thought{took}")
                 } else {
-                    format!("∴ thought for {words} words · Ctrl-R shows it")
+                    format!("∴ thought{took} · Ctrl-R shows it")
                 };
                 out.push(Line::from(Span::styled(header, pal.dim())));
                 if view.show_reasoning {

@@ -41,6 +41,11 @@ pub fn credentials_file() -> PathBuf {
     config_dir().join("credentials.toml")
 }
 
+/// Prompt history shared by every session, one JSON string per line.
+pub fn history_file() -> PathBuf {
+    data_dir().join("history")
+}
+
 pub fn sessions_dir() -> PathBuf {
     data_dir().join("sessions")
 }

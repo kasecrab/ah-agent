@@ -175,6 +175,8 @@ struct App {
     picker: Option<Picker>,
     usage_pane: Option<usage::Pane>,
     stats: Stats,
+    /// When the current reply started streaming reasoning.
+    think_start: Option<Instant>,
     mouse_on: bool,
     /// Model catalogue, loaded lazily for the picker and reasoning checks.
     catalogue: Option<Vec<ModelInfo>>,
@@ -291,6 +293,7 @@ fn run_inner(
         picker: None,
         usage_pane: None,
         stats: Stats::default(),
+        think_start: None,
         mouse_on: settings.layout.mouse,
         catalogue: None,
         self_tx: ui_tx.clone(),
@@ -345,6 +348,8 @@ fn run_inner(
     }
 
     enable_extras(&settings);
+    app.editor
+        .set_history(Editor::load_history_file(&ah_core::paths::history_file()));
 
     app.request_status();
     if let Some(p) = initial_prompt {
@@ -408,6 +413,7 @@ impl App {
                             text: m.content.clone(),
                             reasoning: m.reasoning.clone().unwrap_or_default(),
                             streaming: false,
+                            think_ms: 0,
                         });
                     }
                     for c in &m.tool_calls {
@@ -533,6 +539,12 @@ impl App {
         }
     }
 
+    fn record_history(&mut self) {
+        if let Some(e) = self.editor.history_added() {
+            Editor::append_history_file(&ah_core::paths::history_file(), &e);
+        }
+    }
+
     fn submit(&mut self, text: String) {
         let text = text.trim_end().to_string();
         if text.is_empty() {
@@ -655,7 +667,11 @@ impl App {
             self.completion = None;
             return;
         };
-        if rest.contains(' ') || rest.contains('\n') || self.editor.cursor != self.editor.char_len()
+        // a recalled command must stay reachable by more Up/Down presses
+        if rest.contains(' ')
+            || rest.contains('\n')
+            || self.editor.cursor != self.editor.char_len()
+            || self.editor.browsing_history()
         {
             self.completion = None;
             return;
@@ -707,6 +723,8 @@ impl App {
         };
         self.editor.clear();
         if submit {
+            self.editor.remember(&format!("/{name}"));
+            self.record_history();
             self.slash(&name);
         } else if takes_args {
             self.editor.insert_str(&format!("/{name} "));
@@ -1369,19 +1387,32 @@ impl App {
         }
     }
 
+    /// Stamp the reasoning time on the reply being streamed.
+    fn finish_thinking(&mut self) {
+        if let Some(t) = self.think_start.take()
+            && let Some(Block::Assistant { think_ms, .. }) =
+                self.entries.last_mut().map(|e| &mut e.block)
+        {
+            *think_ms = t.elapsed().as_millis() as u64;
+        }
+    }
+
     fn handle_agent(&mut self, ev: AgentEvent) {
         match ev {
             AgentEvent::RequestStart { .. } => {
                 self.stats.request_start();
                 self.set_state(State::Thinking);
+                self.think_start = None;
                 self.push(Block::Assistant {
                     text: String::new(),
                     reasoning: String::new(),
                     streaming: true,
+                    think_ms: 0,
                 });
             }
             AgentEvent::Text(t) => {
                 self.set_state(State::Streaming);
+                self.finish_thinking();
                 if let Some(Block::Assistant { text, .. }) =
                     self.entries.last_mut().map(|e| &mut e.block)
                 {
@@ -1391,6 +1422,7 @@ impl App {
             }
             AgentEvent::Reasoning(t) => {
                 self.set_state(State::Streaming);
+                self.think_start.get_or_insert_with(Instant::now);
                 if let Some(Block::Assistant { reasoning, .. }) =
                     self.entries.last_mut().map(|e| &mut e.block)
                 {
@@ -1400,10 +1432,12 @@ impl App {
             }
             AgentEvent::AssistantMessage(m) => {
                 self.stats.request_end();
+                self.finish_thinking();
                 if let Some(Block::Assistant {
                     text,
                     reasoning,
                     streaming,
+                    ..
                 }) = self.entries.last_mut().map(|e| &mut e.block)
                 {
                     *text = m.content.clone();
@@ -1639,6 +1673,7 @@ impl App {
             self.editor.insert_char('\n');
         } else if keys::any_match(&b.submit, &k) {
             let t = self.editor.take();
+            self.record_history();
             self.submit(t);
         } else if keys::any_match(&b.scroll_up, &k) {
             self.scroll_by(-(self.settings().layout.scroll_step.max(1) as isize));
@@ -1702,23 +1737,11 @@ impl App {
                 KeyCode::Delete => self.editor.delete(),
                 KeyCode::Left => self.editor.left(),
                 KeyCode::Right => self.editor.right(),
-                // arrows move inside a multi-line draft; otherwise they scroll
-                // the transcript, which is also what the wheel sends when the
-                // terminal keeps the mouse
                 KeyCode::Up => {
-                    if self.editor.line_count() > 1 && self.editor.line_col().0 > 0 {
-                        self.editor.up();
-                    } else {
-                        self.scroll_by(-(self.settings().layout.scroll_step.max(1) as isize));
-                    }
+                    self.editor.up();
                 }
                 KeyCode::Down => {
-                    let (row, _) = self.editor.line_col();
-                    if self.editor.line_count() > 1 && row + 1 < self.editor.line_count() {
-                        self.editor.down();
-                    } else {
-                        self.scroll_by(self.settings().layout.scroll_step.max(1) as isize);
-                    }
+                    self.editor.down();
                 }
                 KeyCode::Home => self.editor.home(),
                 KeyCode::End => self.editor.end(),
@@ -1762,6 +1785,7 @@ impl App {
         match action {
             "submit" => {
                 let t = self.editor.take();
+                self.record_history();
                 self.submit(t);
             }
             "cancel" => self.cancel_turn(),
@@ -1793,7 +1817,7 @@ impl App {
                 for (p, c) in &self.plugin_commands {
                     s.push_str(&format!("\n  /{:<10} {} ({p})", c.name, c.description));
                 }
-                s.push_str("\nkeys: Enter send · Shift/Alt-Enter newline · Esc cancel · Up/Down or wheel scroll · PgUp/PgDn page · Ctrl-P/Ctrl-N prompt history · Shift-Tab next favorite · Ctrl-T tool output · Ctrl-R thinking · Ctrl-C quit");
+                s.push_str("\nkeys: Enter send · Shift/Alt-Enter newline · Esc cancel · Up/Down prompt history · PgUp/PgDn scroll · Shift-Tab next favorite · Ctrl-T tool output · Ctrl-R thinking · Ctrl-C quit");
                 self.push(Block::Notice(s));
             }
             "model" | "models" => {
