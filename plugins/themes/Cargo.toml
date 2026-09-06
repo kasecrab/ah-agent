@@ -1,0 +1,25 @@
+[package]
+name = "themes"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Colour themes for ah: /theme <name> switches between bundled palettes"
+publish = false
+
+# This crate is its own workspace so it builds the same way in-tree and when
+# cloned on its own with `ah plugin install`.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ah-plugin-sdk = { git = "https://github.com/kasecrab/ah-agent", branch = "main" }
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+debug = false

@@ -1,0 +1,4 @@
+# In-tree builds of the standalone example plugins use the local SDK instead
+# of fetching it from GitHub.
+[patch."https://github.com/kasecrab/ah-agent"]
+ah-plugin-sdk = { path = "../crates/ah-plugin-sdk" }

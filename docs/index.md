@@ -24,7 +24,7 @@ the binary. `ah docs` lists them and `ah docs <topic>` prints one in full.
 | `~/.config/ah/config.toml` | user configuration (`ah config init` writes the defaults with comments) |
 | `~/.config/ah/credentials.toml` | OpenRouter key stored by `ah login`, mode 600 |
 | `~/.config/ah/favorites.toml` | favorites managed by `/favorite` |
-| `~/.config/ah/plugins/*.wasm` | user plugins |
+| `~/.config/ah/plugins/*.wasm` | user plugins (`sources.json` beside them records git origins) |
 | `~/.config/ah/skills/` | user skills |
 | `./.ah/config.toml` | project configuration, merged over the user file |
 | `./.ah/plugins/*.wasm` | project plugins |
@@ -53,7 +53,7 @@ prints the resolved locations.
 
 | Want to | See |
 |---|---|
-| change colours, borders, prefixes, spinner | `[theme]` in config |
+| change colours, borders, prefixes, spinner | `[theme]` in config, or the `themes` plugin (`/theme nord`) |
 | change layout, mouse, markdown, queue size | `[layout]` in config |
 | rebind a key | `[keys]` in config, and the keys page |
 | change model, reasoning effort, favorites | `[model]` in config, `/model`, `/effort`, `/favorite` |
@@ -64,5 +64,6 @@ prints the resolved locations.
 | tune compaction | `[context]` in config |
 | change the status bar | `statusline.format` in config, or a `statusline` plugin hook |
 | add a tool, slash command, policy or theme | plugins page |
+| install a plugin from a git repository | `ah plugin install URL [DIR]`, plugins page |
 | save a prompt for reuse | skills page |
 | script ah from another program | `ah --json -p ...`, commands page |

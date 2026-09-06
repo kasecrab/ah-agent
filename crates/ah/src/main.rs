@@ -2,6 +2,7 @@
 
 mod app;
 mod cli;
+mod plugin_source;
 mod tui;
 
 use std::io::IsTerminal;
@@ -138,6 +139,22 @@ pub enum PluginCmd {
         /// Only build; do not copy into the plugin directory.
         #[arg(long)]
         no_install: bool,
+    },
+    /// Fetch a plugin from a git repository, build it if needed, and install it.
+    Install {
+        /// Git URL or local path, `owner/repo` on GitHub, or a GitHub/GitLab
+        /// `.../tree/<ref>/<path>` link pointing at the plugin directory.
+        source: String,
+        /// Directory inside the repository that holds the plugin.
+        subdir: Option<String>,
+        /// Branch, tag or commit to check out.
+        #[arg(long = "ref", value_name = "REF")]
+        git_ref: Option<String>,
+    },
+    /// Reinstall plugins that came from git from their recorded sources.
+    Update {
+        /// Only this plugin (default: every one with a recorded source).
+        name: Option<String>,
     },
 }
 

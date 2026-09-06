@@ -40,32 +40,59 @@ fn host_with(settings: &mut SettingsStack, names: &[&str]) -> Option<PluginHost>
     Some(host)
 }
 
+fn themes_wasm() -> Option<PathBuf> {
+    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../plugins/themes/target/wasm32-unknown-unknown/release/themes.wasm");
+    p.exists().then_some(p)
+}
+
 #[test]
-fn theme_plugin_patches_settings() {
+fn themes_plugin_switches_palettes() {
     let mut stack = SettingsStack::new();
     stack
         .push(
             Origin::Cli,
-            serde_json::json!({"theme_dracula": {"variant": "soft"}}),
+            serde_json::json!({"theme": {"user": "#123456"}, "themes": {"name": "nord"}}),
         )
         .unwrap();
-    let Some(mut host) = host_with(&mut stack, &["theme_dracula"]) else {
-        eprintln!("skipping: plugins not built");
+    let Some(wasm) = themes_wasm() else {
+        eprintln!("skipping: themes plugin not built");
         return;
     };
-    for (name, patch) in host.manifest_patches() {
-        stack.push(Origin::Plugin(name), patch).unwrap();
-    }
-    assert_eq!(stack.settings().theme.accent, "#bd93f9");
+    let Some(mut host) = host_with(&mut stack, &[]) else {
+        return;
+    };
+    let _ = std::fs::remove_file(ah_core::paths::plugin_state_dir().join("themes.json"));
+    host.load_file(&wasm, stack.settings(), stack.value(), ".");
+    assert!(host.reports.iter().all(|r| r.ok), "{:?}", host.reports);
     for (name, patch) in host.on_load(stack.settings(), ".") {
         stack.push(Origin::Plugin(name), patch).unwrap();
     }
-    assert_eq!(stack.settings().theme.accent, "#caa9fa");
-    assert_eq!(stack.settings().theme.border_style, BorderStyle::Plain);
+    let t = &stack.settings().theme;
+    assert_eq!(t.accent, "#88c0d0");
+    assert_eq!(t.bg, "reset", "background keys are opt-in");
+    let out = host.slash_command("theme", "dracula", ".").unwrap();
+    assert_eq!(out.message.as_deref(), Some("theme: dracula"));
+    stack
+        .push(Origin::Runtime("slash".into()), out.settings_patch.unwrap())
+        .unwrap();
+    assert_eq!(stack.settings().theme.accent, "#bd93f9");
+    let out = host.slash_command("theme", "", ".").unwrap();
+    assert!(out.message.unwrap().contains("* dracula"));
+    let out = host.slash_command("theme", "nope", ".").unwrap();
+    assert!(out.message.unwrap().contains("unknown theme `nope`"));
+    assert!(out.settings_patch.is_none());
+    let out = host.slash_command("theme", "off", ".").unwrap();
+    stack
+        .push(Origin::Runtime("slash".into()), out.settings_patch.unwrap())
+        .unwrap();
+    let t = &stack.settings().theme;
+    assert_eq!(t.accent, "cyan", "back to the theme seen at load");
+    assert_eq!(t.user, "#123456", "config values survive /theme off");
     let logs = host.take_logs();
     assert!(
         logs.iter()
-            .any(|(p, _, m)| p == "theme-dracula" && m.contains("soft")),
+            .any(|(p, _, m)| p == "themes" && m == "theme nord"),
         "{logs:?}"
     );
 }

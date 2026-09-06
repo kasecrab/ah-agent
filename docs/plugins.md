@@ -20,7 +20,39 @@ is disabled for the rest of the session; the harness keeps going.
 `plugins.disabled` lists names or file stems to skip; `plugins.enabled =
 false` or `--no-plugins` loads nothing. `ah plugin list` shows what was found
 and whether it loaded. `/plugins` inside the TUI lists the active ones and
-`/reload` reloads them after a rebuild.
+`/reload` reloads them after a rebuild or install.
+
+## Installing from git
+
+Plugins are shared as git repositories: either the repository is the plugin,
+or the plugin sits in a directory of a larger repository. `ah plugin install`
+clones it, builds it when it ships as source, copies the module into
+`~/.config/ah/plugins/` and records where it came from.
+
+```
+ah plugin install https://github.com/kasecrab/ah-agent plugins/themes   # directory inside a repo
+ah plugin install https://github.com/kasecrab/ah-agent/tree/main/plugins/themes   # same, as a GitHub link
+ah plugin install someone/ah-guard                 # GitHub shorthand, plugin at the repo root
+ah plugin install git@example.com:team/plugin.git --ref v2   # any git URL, a branch, tag or commit
+ah plugin install ../my-plugin                     # a local repository
+ah plugin update [NAME]                            # reinstall from the recorded sources
+ah plugin rm NAME
+```
+
+The source directory (the repository root, or the directory named after the
+URL) is handled in this order:
+
+1. If it holds `*.wasm` files, they are installed as they are. A repository
+   can commit the built module so users need no Rust toolchain.
+2. Otherwise it must hold a `Cargo.toml`; ah runs `cargo build --release
+   --target wasm32-unknown-unknown` there and installs every `cdylib`
+   package it defines. Builds share `~/.local/share/ah/plugin-build/` so
+   updates are incremental. The `wasm32-unknown-unknown` target must be
+   installed (`rustup target add wasm32-unknown-unknown`).
+
+`~/.config/ah/plugins/sources.json` maps each installed file stem to its
+`url`, `path` and `ref`; `ah plugin update` reads it and `ah plugin rm`
+drops the entry.
 
 ## Writing one in Rust
 
@@ -35,8 +67,11 @@ edition = "2024"
 [lib]
 crate-type = ["cdylib"]
 
+# Empty table: build the same way alone and inside another repository.
+[workspace]
+
 [dependencies]
-ah-plugin-sdk = { path = "/path/to/ah/crates/ah-plugin-sdk" }
+ah-plugin-sdk = { git = "https://github.com/kasecrab/ah-agent", branch = "main" }
 
 [profile.release]
 opt-level = "z"
@@ -94,6 +129,7 @@ rustup target add wasm32-unknown-unknown
 ah plugin build ./hello            # cargo build --release --target wasm32-unknown-unknown, then copies the .wasm into ~/.config/ah/plugins
 ah plugin build ./hello --no-install
 ah plugin add path/to/hello.wasm   # install a prebuilt module
+ah plugin install <git url> [DIR]  # clone, build and install (section above)
 ah plugin rm hello
 ```
 
@@ -187,14 +223,45 @@ Available through `host_call(name, &json)` or the typed helpers.
 `log!(LogLevel::Info, "...")` writes to the host log, visible with `AH_LOG=1`
 in `~/.local/share/ah/ah.log`.
 
+## Publishing a plugin
+
+A plugin repository needs nothing beyond the crate: `Cargo.toml` with the
+`[workspace]` table and the git dependency shown above, and `src/lib.rs`. The
+same layout works in a subdirectory of any repository; users then pass the
+directory as the second argument of `ah plugin install`, or paste the
+GitHub link to it. Commit the built `.wasm` next to `Cargo.toml` when users
+should be able to install without a Rust toolchain; ah prefers a prebuilt
+module over building.
+
+Read config from your own top-level table (`[my_plugin] key = ...`) through
+`settings_get("/my_plugin")`; unknown tables are kept in the settings tree
+for that purpose. Keep state in `kv_set`, which persists per plugin. Return
+messages, not `Err`, for user mistakes such as a bad argument, so the user
+sees them in the transcript.
+
 ## Examples in the repository
 
-`plugins/` in the source tree holds four small plugins built with
-`just plugins` and installed with `just install-plugins`:
+`plugins/themes/` is the reference example: a complete, installable plugin
+with a `/theme` slash command, `on_load`, `settings_get`, `kv_get`/`kv_set`,
+`log!` and a `README.md` describing the layout.
+
+```
+ah plugin install https://github.com/kasecrab/ah-agent plugins/themes
+```
+
+Inside ah, `/theme` lists the bundled palettes (dracula, nord, gruvbox,
+gruvbox-light, catppuccin-mocha, catppuccin-latte, tokyo-night,
+solarized-dark, solarized-light, one-dark, monokai), `/theme nord` switches
+and remembers the choice, `/theme off` restores the colours from the config
+file. `[themes] name = "nord"` sets a default, `[themes] background = true`
+also paints the background keys, and `[themes.palettes.<name>]` adds a
+palette (`base = "nord"` starts from a bundled one).
+
+The unpublished `plugins/` workspace in a source checkout has three more
+small examples built with `just plugins`:
 
 | Plugin | Shows |
 |---|---|
-| `theme-dracula` | a static `settings_patch` that sets colours |
 | `statusline` | the `statusline` hook and `kv_set` for a persisted peak cost |
 | `guard` | `before_tool` deny and ask decisions, config read through `settings_get` (`[guard] deny = [...]`), a `/guard` slash command |
 | `tool-wordcount` | a `tools` entry and the `tool_call` hook using `read_file` |

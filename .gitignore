@@ -28,9 +28,12 @@ flamegraph.svg
 # Project-local state (config, plugins, sessions)
 .ah/
 
-# Not published yet
+# Not published yet. plugins/themes is the published reference plugin.
 /README.md
 /justfile
 /Cargo.lock
 /scripts/
-/plugins/
+/plugins/*
+!/plugins/themes/
+/plugins/themes/Cargo.lock
+!/plugins/.cargo/

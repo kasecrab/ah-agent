@@ -44,6 +44,8 @@ One-shot mode keeps the session in memory only; the TUI writes a session file
 | `ah plugin add FILE.wasm` | copy into the user plugin dir |
 | `ah plugin rm NAME` | remove from the user plugin dir |
 | `ah plugin build [DIR] [--no-install]` | build a plugin crate for wasm32 and install it |
+| `ah plugin install SOURCE [SUBDIR] [--ref REF]` | clone a git repository (URL, `owner/repo`, GitHub `tree` link or local path), build the plugin in it or in `SUBDIR`, install it and record the source |
+| `ah plugin update [NAME]` | reinstall plugins that came from git |
 | `ah config [show] [--origins]` | merged settings as TOML |
 | `ah config path` | config, credentials, plugin and session locations |
 | `ah config init [--force]` | write a commented default config |

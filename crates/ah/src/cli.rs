@@ -8,6 +8,7 @@ use ah_core::agent::{AgentEvent, AgentIo};
 use ah_core::settings::Origin;
 
 use crate::app::{self, AnyError, Engine};
+use crate::plugin_source;
 use crate::{Command, ConfigCmd, Overrides, PluginCmd};
 
 struct PrintIo {
@@ -529,47 +530,25 @@ fn plugin(o: &Overrides, cmd: PluginCmd) -> Result<(), AnyError> {
             } else {
                 format!("{name}.wasm")
             };
-            let p = user_dir.join(&file);
+            let mut p = user_dir.join(&file);
             if !p.exists() {
                 let alt = user_dir.join(file.replace('-', "_"));
-                if alt.exists() {
-                    std::fs::remove_file(&alt)?;
-                    println!("removed {}", alt.display());
-                    return Ok(());
+                if !alt.exists() {
+                    return Err(format!("{} not found", p.display()).into());
                 }
-                return Err(format!("{} not found", p.display()).into());
+                p = alt;
             }
             std::fs::remove_file(&p)?;
             println!("removed {}", p.display());
+            let mut sources = plugin_source::load_sources(&user_dir);
+            if sources.remove(&plugin_source::stem(&p)).is_some() {
+                plugin_source::save_sources(&user_dir, &sources)?;
+            }
             Ok(())
         }
         PluginCmd::Build { dir, no_install } => {
             let dir = dir.unwrap_or(PathBuf::from("."));
-            let status = std::process::Command::new("cargo")
-                .args(["build", "--release", "--target", "wasm32-unknown-unknown"])
-                .current_dir(&dir)
-                .status()?;
-            if !status.success() {
-                return Err("cargo build failed (is the wasm32-unknown-unknown target installed? `rustup target add wasm32-unknown-unknown`)".into());
-            }
-            let mut candidates = vec![dir.join("target/wasm32-unknown-unknown/release")];
-            if let Some(parent) = dir.parent() {
-                candidates.push(parent.join("target/wasm32-unknown-unknown/release"));
-            }
-            let mut found = Vec::new();
-            for c in candidates {
-                if let Ok(rd) = std::fs::read_dir(&c) {
-                    found.extend(
-                        rd.flatten()
-                            .map(|e| e.path())
-                            .filter(|p| p.extension().is_some_and(|e| e == "wasm")),
-                    );
-                }
-            }
-            if found.is_empty() {
-                return Err("build succeeded but no .wasm found".into());
-            }
-            for f in found {
+            for f in plugin_source::build_crate(&dir, None)? {
                 if no_install {
                     println!("{}", f.display());
                 } else {
@@ -581,7 +560,54 @@ fn plugin(o: &Overrides, cmd: PluginCmd) -> Result<(), AnyError> {
             }
             Ok(())
         }
+        PluginCmd::Install {
+            source,
+            subdir,
+            git_ref,
+        } => {
+            let src = plugin_source::parse_source(&source, subdir.as_deref(), git_ref.as_deref());
+            install_from(&src, &user_dir)
+        }
+        PluginCmd::Update { name } => {
+            let sources = plugin_source::load_sources(&user_dir);
+            let wanted: Vec<(String, plugin_source::Source)> = match name {
+                Some(n) => {
+                    let key = n.trim_end_matches(".wasm").replace('-', "_");
+                    let src = sources
+                        .get(&key)
+                        .or_else(|| sources.get(n.trim_end_matches(".wasm")))
+                        .ok_or_else(|| {
+                            format!(
+                                "no recorded source for `{n}`; install it with `ah plugin install`"
+                            )
+                        })?;
+                    vec![(key, src.clone())]
+                }
+                None => sources.into_iter().collect(),
+            };
+            if wanted.is_empty() {
+                println!("no plugins were installed from git");
+                return Ok(());
+            }
+            for (name, src) in wanted {
+                println!("updating {name} from {}", src.describe());
+                install_from(&src, &user_dir)?;
+            }
+            Ok(())
+        }
     }
+}
+
+fn install_from(src: &plugin_source::Source, user_dir: &std::path::Path) -> Result<(), AnyError> {
+    let installed = plugin_source::install(src, user_dir)?;
+    let mut sources = plugin_source::load_sources(user_dir);
+    for f in &installed {
+        sources.insert(plugin_source::stem(f), src.clone());
+        println!("installed {} (from {})", f.display(), src.describe());
+    }
+    plugin_source::save_sources(user_dir, &sources)?;
+    println!("run /reload in a running ah, or start it again, to load the plugin");
+    Ok(())
 }
 
 fn docs(topic: Option<&str>) -> Result<(), AnyError> {
