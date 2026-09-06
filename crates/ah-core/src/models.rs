@@ -26,25 +26,38 @@ pub struct ModelInfo {
     /// `text`, `image`, `audio`, `video`, `file` as OpenRouter reports them.
     #[serde(default)]
     pub input_modalities: Vec<String>,
+    #[serde(default)]
+    pub output_modalities: Vec<String>,
 }
 
 impl ModelInfo {
     pub fn accepts(&self, modality: &str) -> bool {
         self.input_modalities.iter().any(|m| m == modality)
     }
+
+    pub fn produces(&self, modality: &str) -> bool {
+        self.output_modalities.iter().any(|m| m == modality)
+    }
+
+    /// `🅃🄸🄵→🅃`: input icons, arrow, output icons.
+    pub fn modality_icons(&self) -> String {
+        modality_icons(&self.input_modalities, &self.output_modalities)
+    }
 }
 
-/// Modalities in display order with their icons.
+/// Modalities in display order with their icons (boxed initials, one cell each).
 pub const MODALITIES: &[(&str, &str)] = &[
     ("text", "🅃"),
-    ("image", "▣"),
-    ("audio", "♪"),
-    ("video", "▶"),
-    ("file", "▤"),
+    ("image", "🄸"),
+    ("audio", "🄰"),
+    ("video", "🅅"),
+    ("file", "🄵"),
 ];
 
-/// Icons of the supported modalities only, e.g. `🅃▣▤`.
-pub fn modality_icons(mods: &[String]) -> String {
+/// Separates input from output icons.
+pub const MODALITY_ARROW: &str = "→";
+
+fn icons(mods: &[String]) -> String {
     MODALITIES
         .iter()
         .filter(|(m, _)| mods.iter().any(|x| x == m))
@@ -52,8 +65,19 @@ pub fn modality_icons(mods: &[String]) -> String {
         .collect()
 }
 
+/// `🅃🄸🄵→🅃`; only the input half when outputs are unknown, empty when
+/// both are.
+pub fn modality_icons(input: &[String], output: &[String]) -> String {
+    let (i, o) = (icons(input), icons(output));
+    match (i.is_empty(), o.is_empty()) {
+        (true, true) => String::new(),
+        (_, true) => i,
+        _ => format!("{i}{MODALITY_ARROW}{o}"),
+    }
+}
+
 /// Bumped when `ModelInfo` gains fields; older caches are refetched.
-const CACHE_VERSION: u32 = 2;
+const CACHE_VERSION: u32 = 3;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Cache {
@@ -127,20 +151,24 @@ pub fn fetch(base_url: &str, api_key: Option<&str>) -> Result<Vec<ModelInfo>> {
                 completion_per_m: price("completion"),
                 tools: has("tools"),
                 reasoning: has("reasoning") || has("include_reasoning"),
-                input_modalities: m["architecture"]["input_modalities"]
-                    .as_array()
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|x| x.as_str().map(str::to_string))
-                            .collect()
-                    })
-                    .unwrap_or_default(),
+                input_modalities: strings(&m["architecture"]["input_modalities"]),
+                output_modalities: strings(&m["architecture"]["output_modalities"]),
             })
         })
         .collect();
     models.sort_by(|a, b| a.id.cmp(&b.id));
     save_cache(&models)?;
     Ok(models)
+}
+
+fn strings(v: &serde_json::Value) -> Vec<String> {
+    v.as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Cached if younger than `max_age`, otherwise fetched (falling back to a

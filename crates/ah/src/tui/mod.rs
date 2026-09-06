@@ -189,6 +189,8 @@ struct App {
     queue: std::collections::VecDeque<(String, Vec<String>)>,
     /// Input modalities of the current model from the catalogue.
     modalities: Vec<String>,
+    /// `🅃🄸→🅃` for the current model, empty when unknown.
+    modality_icons: String,
     /// A catalogue fetch is in flight.
     fetching_models: bool,
     scroll: usize,
@@ -322,6 +324,7 @@ fn run_inner(
         editor: Editor::default(),
         queue: std::collections::VecDeque::new(),
         modalities: Vec::new(),
+        modality_icons: String::new(),
         fetching_models: false,
         scroll: 0,
         follow: true,
@@ -575,6 +578,7 @@ impl App {
             info.map(|m| m.context_length).unwrap_or(0)
         };
         self.modalities = info.map(|m| m.input_modalities.clone()).unwrap_or_default();
+        self.modality_icons = info.map(|m| m.modality_icons()).unwrap_or_default();
     }
 
     /// Fetch the catalogue on a worker thread; the result arrives as `Msg::Models`.
@@ -604,7 +608,7 @@ impl App {
         self.catalogue
             .as_deref()
             .and_then(|c| c.iter().find(|m| m.id == id))
-            .map(|m| models::modality_icons(&m.input_modalities))
+            .map(|m| m.modality_icons())
             .unwrap_or_default()
     }
 
@@ -673,7 +677,7 @@ impl App {
             context_tokens: self.context_tokens,
             context_window: self.context_window,
             modalities: if self.settings().layout.show_modalities {
-                models::modality_icons(&self.modalities)
+                self.modality_icons.clone()
             } else {
                 String::new()
             },
@@ -1028,15 +1032,20 @@ impl App {
                 };
                 if show_modalities {
                     row.cols.push((" ".into(), pal.dim()));
+                    let on_style = Style::default().fg(pal.accent);
                     for (name, icon) in models::MODALITIES {
                         let on = m.accepts(name);
                         row.cols.push((
                             if on { (*icon).to_string() } else { "·".into() },
-                            if on {
-                                Style::default().fg(pal.accent)
-                            } else {
-                                pal.dim()
-                            },
+                            if on { on_style } else { pal.dim() },
+                        ));
+                    }
+                    row.cols.push((models::MODALITY_ARROW.into(), pal.dim()));
+                    for (name, icon) in models::MODALITIES {
+                        let on = m.produces(name);
+                        row.cols.push((
+                            if on { (*icon).to_string() } else { "·".into() },
+                            if on { on_style } else { pal.dim() },
                         ));
                     }
                 }
@@ -1132,7 +1141,7 @@ impl App {
                         Style::default().fg(pal.reasoning),
                     ),
                     (
-                        format!("{:<6}", self.icons_for(f.id())),
+                        format!("{:<12}", self.icons_for(f.id())),
                         Style::default().fg(pal.accent),
                     ),
                 ],
@@ -2596,7 +2605,11 @@ impl App {
         }
         if let Some(u) = &self.usage_pane {
             let icons = |id: &str| self.icons_for(id);
-            u.draw(f, area, &pal, &self.usage, &self.stats, &icons);
+            let models = usage::Models {
+                current: &self.settings().model.id,
+                icons: &icons,
+            };
+            u.draw(f, area, &pal, &self.usage, &self.stats, &models);
         }
         if let Some(sel) = self.sel {
             let text = self.highlight_selection(f, area, sel.anchor, sel.cur);

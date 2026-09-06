@@ -13,6 +13,12 @@ use ratatui::widgets::{Clear, Paragraph};
 
 use super::theme::Palette;
 
+/// The current model and a modality-icon lookup for the models listed.
+pub struct Models<'a> {
+    pub current: &'a str,
+    pub icons: &'a dyn Fn(&str) -> String,
+}
+
 /// Counters for the current session, kept by the TUI as events arrive.
 pub struct Stats {
     pub started: Instant,
@@ -97,8 +103,10 @@ impl Pane {
         pal: &Palette,
         usage: &Usage,
         s: &Stats,
-        icons: &dyn Fn(&str) -> String,
+        models: &Models<'_>,
     ) {
+        let model = models.current;
+        let icons = models.icons;
         let dim = pal.dim();
         let key = pal.bold(pal.accent);
         let val = Style::default().fg(pal.fg);
@@ -120,6 +128,11 @@ impl Pane {
         };
 
         let mut lines: Vec<Line> = Vec::new();
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {:<11}", "model"), key),
+            Span::styled(format!("{model} "), val),
+            Span::styled(icons(model), Style::default().fg(pal.accent)),
+        ]));
         let api = s.api_time
             + s.request_started
                 .map(|t| t.elapsed())
