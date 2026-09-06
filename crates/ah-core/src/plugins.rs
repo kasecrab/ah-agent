@@ -446,7 +446,13 @@ impl PluginHost {
     }
 
     /// Dispatch a slash command to the plugin that declared it.
-    pub fn slash_command(&mut self, name: &str, args: &str, cwd: &str) -> Option<SlashCommandOut> {
+    pub fn slash_command(
+        &mut self,
+        name: &str,
+        args: &str,
+        cwd: &str,
+        stage: SlashStage,
+    ) -> Option<SlashCommandOut> {
         let idx = self
             .plugins
             .iter()
@@ -455,6 +461,7 @@ impl PluginHost {
             name: name.into(),
             args: args.into(),
             cwd: cwd.into(),
+            stage,
         };
         let r = self.plugins[idx].call_typed::<_, SlashCommandOut>(Hook::SlashCommand, &input);
         self.drain_logs();
@@ -546,6 +553,10 @@ impl Plugin {
                     return None;
                 }
                 let ok = v.get("ok").cloned().unwrap_or(Value::Null);
+                // `null` is the documented "no change" answer.
+                if ok.is_null() {
+                    return None;
+                }
                 match serde_json::from_value::<O>(ok) {
                     Ok(o) => Some(o),
                     Err(e) => {

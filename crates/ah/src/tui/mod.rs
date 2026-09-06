@@ -1310,14 +1310,24 @@ impl App {
         };
         self.dirty = true;
         match p.key(k) {
-            Action::None => {}
-            Action::Close => self.picker = None,
+            Action::None => self.plugin_preview(),
+            Action::Close => self.close_picker(),
             Action::Key(c) => self.picker_shortcut(c),
             Action::Accept => {
                 let chosen = p.current().map(|r| r.id.clone());
                 let Some(p) = self.picker.take() else { return };
                 let query = p.query.trim().to_string();
                 match p.kind {
+                    Kind::Plugin { command, .. } => match chosen {
+                        Some(value) => {
+                            let _ = self.tx.send(EngineCmd::Slash {
+                                name: command,
+                                args: value,
+                                stage: SlashStage::Pick,
+                            });
+                        }
+                        None => self.drop_previews(),
+                    },
                     Kind::Model { favorite } => {
                         // no match: accept a raw id
                         let id = chosen.or_else(|| {
@@ -1367,6 +1377,136 @@ impl App {
                     }
                 }
             }
+        }
+    }
+
+    /// Close the picker; preview patches from a plugin picker are undone.
+    fn close_picker(&mut self) {
+        if let Some(p) = self.picker.take()
+            && matches!(p.kind, Kind::Plugin { preview: true, .. })
+        {
+            self.drop_previews();
+        }
+    }
+
+    /// Remove every settings layer a plugin picker preview added.
+    fn drop_previews(&mut self) {
+        let keep = |o: &Origin| !matches!(o, Origin::Runtime(s) if s == "preview");
+        match self.stack.retain(keep) {
+            Ok(()) => self.refresh_from_settings(&[]),
+            Err(e) => self.push(Block::Error(format!("settings: {e}"))),
+        }
+    }
+
+    /// Ask the plugin to preview the item under the cursor, if it changed.
+    fn plugin_preview(&mut self) {
+        let Some(p) = self.picker.as_mut() else {
+            return;
+        };
+        let current = p.current().map(|r| r.id.clone());
+        if let Kind::Plugin {
+            command,
+            preview: true,
+            last,
+        } = &mut p.kind
+            && let Some(value) = current
+            && last.as_deref() != Some(value.as_str())
+        {
+            *last = Some(value.clone());
+            let _ = self.tx.send(EngineCmd::Slash {
+                name: command.clone(),
+                args: value,
+                stage: SlashStage::Preview,
+            });
+        }
+    }
+
+    fn open_plugin_picker(&mut self, command: String, spec: PickerSpec) {
+        let dim = self.pal.dim();
+        let rows: Vec<Row> = spec
+            .items
+            .iter()
+            .map(|it| Row {
+                id: it.value.clone(),
+                search: format!("{} {}", it.label, it.value),
+                label: if it.label.is_empty() {
+                    it.value.clone()
+                } else {
+                    it.label.clone()
+                },
+                style: None,
+                cols: if it.detail.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![(it.detail.clone(), dim)]
+                },
+            })
+            .collect();
+        if rows.is_empty() {
+            self.push(Block::Notice(format!("/{command}: nothing to pick")));
+            return;
+        }
+        let title = if spec.title.is_empty() {
+            format!("/{command}")
+        } else {
+            spec.title
+        };
+        let mut p = Picker::new(
+            Kind::Plugin {
+                command,
+                preview: spec.preview,
+                last: None,
+            },
+            &title,
+            "",
+            rows,
+        );
+        p.selected = spec.selected.min(p.rows.len() - 1);
+        p.hint = "Enter picks · Esc cancels".into();
+        self.picker = Some(p);
+        self.dirty = true;
+        self.plugin_preview();
+    }
+
+    /// Apply what a plugin slash command returned.
+    fn slash_result(&mut self, name: &str, out: SlashCommandOut, stage: SlashStage) {
+        match stage {
+            SlashStage::Preview => {
+                // Late answers after the picker closed are dropped.
+                if !matches!(
+                    self.picker.as_ref().map(|p| &p.kind),
+                    Some(Kind::Plugin { preview: true, .. })
+                ) {
+                    return;
+                }
+                if let Some(p) = out.settings_patch {
+                    self.apply_patch(Origin::Runtime("preview".into()), p);
+                }
+                return;
+            }
+            SlashStage::Pick => {
+                if let Some(p) = out.settings_patch
+                    && let Err(e) = self.stack.push(Origin::Runtime("slash".into()), p)
+                {
+                    self.push(Block::Error(format!("settings patch rejected: {e}")));
+                }
+                // The final patch is in place: the previews can go without a flicker.
+                self.drop_previews();
+            }
+            SlashStage::Run => {
+                if let Some(p) = out.settings_patch {
+                    self.apply_patch(Origin::Runtime("slash".into()), p);
+                }
+            }
+        }
+        if let Some(m) = out.message {
+            self.push(Block::Notice(m));
+        }
+        if let Some(t) = out.send_to_model {
+            self.submit(t);
+        }
+        if let Some(spec) = out.picker {
+            self.open_plugin_picker(name.to_string(), spec);
         }
     }
 
@@ -1746,17 +1886,7 @@ impl App {
                 self.plugin_status = Some(s);
                 self.dirty = true;
             }
-            UiEvent::Slash(out) => {
-                if let Some(m) = out.message {
-                    self.push(Block::Notice(m));
-                }
-                if let Some(p) = out.settings_patch {
-                    self.apply_patch(Origin::Runtime("slash".into()), p);
-                }
-                if let Some(t) = out.send_to_model {
-                    self.submit(t);
-                }
-            }
+            UiEvent::Slash(out, name, stage) => self.slash_result(&name, *out, stage),
             UiEvent::AskPermission { call, reason } => {
                 if self.always_allow.contains(&call.function.name) {
                     let _ = self.perm_tx.send(true);
@@ -2455,6 +2585,7 @@ impl App {
                     let _ = self.tx.send(EngineCmd::Slash {
                         name: other.into(),
                         args: args.into(),
+                        stage: SlashStage::Run,
                     });
                 } else {
                     self.push(Block::Notice(format!(

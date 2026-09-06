@@ -12,9 +12,10 @@ ah plugin install https://github.com/kasecrab/ah-agent plugins/themes
 Then, inside ah:
 
 ```
-/theme                 list palettes, mark the active one
-/theme nord            switch (persists across sessions)
-/theme off             back to ah's defaults
+/theme                 picker: arrows preview live, Enter keeps, Esc reverts
+/theme nord            switch directly (persists across sessions)
+/theme off             back to the colours from your config file
+/theme list            print the names (one-shot mode too)
 ```
 
 Palettes: `dracula`, `nord`, `gruvbox`, `gruvbox-light`, `catppuccin-mocha`,
@@ -40,6 +41,7 @@ What it demonstrates:
 | Piece | Where |
 |---|---|
 | manifest with hooks and a slash command | `manifest()` |
+| a picker with live preview (`stage` = `run`, `preview`, `pick`) | `picker()` and the `Hook::SlashCommand` arm |
 | `on_load` returning a `settings_patch` | `Hook::OnLoad` arm |
 | reading plugin config through `settings_get` | `config()` |
 | persisting state with `kv_get` / `kv_set` | `active()` / `Hook::SlashCommand` |

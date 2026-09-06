@@ -105,6 +105,7 @@ pub enum EngineCmd {
     Slash {
         name: String,
         args: String,
+        stage: SlashStage,
     },
     Statusline(Box<StatusContext>),
     /// Fully merged settings after the UI applied new layers.
@@ -131,7 +132,8 @@ pub enum UiEvent {
     },
     PluginLogs(Vec<(String, LogLevel, String)>),
     Statusline(String),
-    Slash(Box<SlashCommandOut>),
+    /// Result of a plugin slash command: output, command name, stage.
+    Slash(Box<SlashCommandOut>, String, SlashStage),
     AskPermission {
         call: ToolCall,
         reason: String,
@@ -379,11 +381,11 @@ impl Engine {
         self.host.as_mut().and_then(|h| h.statusline(ctx))
     }
 
-    pub fn slash(&mut self, name: &str, args: &str) -> Option<SlashCommandOut> {
+    pub fn slash(&mut self, name: &str, args: &str, stage: SlashStage) -> Option<SlashCommandOut> {
         let cwd = self.cwd.display().to_string();
         self.host
             .as_mut()
-            .and_then(|h| h.slash_command(name, args, &cwd))
+            .and_then(|h| h.slash_command(name, args, &cwd, stage))
     }
 
     /// Engine thread main loop for the TUI.
@@ -404,15 +406,17 @@ impl Engine {
                     }
                     let _ = tx.send(UiEvent::Busy(false));
                 }
-                EngineCmd::Slash { name, args } => {
-                    if let Some(out) = self.slash(&name, &args) {
-                        let _ = tx.send(UiEvent::Slash(Box::new(out)));
-                    } else {
-                        let _ = tx.send(UiEvent::Slash(Box::new(SlashCommandOut {
+                EngineCmd::Slash { name, args, stage } => {
+                    let out = match self.slash(&name, &args, stage) {
+                        Some(out) => out,
+                        None if stage == SlashStage::Run => SlashCommandOut {
                             message: Some(format!("unknown command /{name} (try /help)")),
                             ..Default::default()
-                        })));
-                    }
+                        },
+                        // No answer to a preview or pick still ends the picker cleanly.
+                        None => SlashCommandOut::default(),
+                    };
+                    let _ = tx.send(UiEvent::Slash(Box::new(out), name, stage));
                 }
                 EngineCmd::Statusline(ctx) => {
                     if let Some(s) = self.statusline(&ctx) {

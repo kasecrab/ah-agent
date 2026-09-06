@@ -71,18 +71,26 @@ fn themes_plugin_switches_palettes() {
     let t = &stack.settings().theme;
     assert_eq!(t.accent, "#88c0d0");
     assert_eq!(t.bg, "reset", "background keys are opt-in");
-    let out = host.slash_command("theme", "dracula", ".").unwrap();
+    let out = host
+        .slash_command("theme", "dracula", ".", SlashStage::Run)
+        .unwrap();
     assert_eq!(out.message.as_deref(), Some("theme: dracula"));
     stack
         .push(Origin::Runtime("slash".into()), out.settings_patch.unwrap())
         .unwrap();
     assert_eq!(stack.settings().theme.accent, "#bd93f9");
-    let out = host.slash_command("theme", "", ".").unwrap();
+    let out = host
+        .slash_command("theme", "list", ".", SlashStage::Run)
+        .unwrap();
     assert!(out.message.unwrap().contains("* dracula"));
-    let out = host.slash_command("theme", "nope", ".").unwrap();
+    let out = host
+        .slash_command("theme", "nope", ".", SlashStage::Run)
+        .unwrap();
     assert!(out.message.unwrap().contains("unknown theme `nope`"));
     assert!(out.settings_patch.is_none());
-    let out = host.slash_command("theme", "off", ".").unwrap();
+    let out = host
+        .slash_command("theme", "off", ".", SlashStage::Pick)
+        .unwrap();
     stack
         .push(Origin::Runtime("slash".into()), out.settings_patch.unwrap())
         .unwrap();
@@ -129,7 +137,7 @@ fn guard_denies_and_asks() {
     let (d, _) = host.before_tool(&ToolCall::new("5", "read_file", r#"{"path":"x"}"#), ".");
     assert!(matches!(d, ToolDecision::Allow), "{d:?}");
     let out = host
-        .slash_command("guard", "", ".")
+        .slash_command("guard", "", ".", SlashStage::Run)
         .expect("command handled");
     assert!(out.message.unwrap().contains("| sh"));
 }

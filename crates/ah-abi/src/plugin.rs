@@ -229,11 +229,28 @@ pub struct StatuslineOut {
     pub text: String,
 }
 
+/// Why a `slash_command` call is made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SlashStage {
+    /// The user typed the command; `args` is what followed it.
+    #[default]
+    Run,
+    /// The cursor in a picker this command opened moved to an item; `args`
+    /// is that item's `value`. Return a `settings_patch` to preview it and
+    /// change nothing else: the host undoes preview patches on cancel.
+    Preview,
+    /// The user pressed Enter on a picker item; `args` is its `value`.
+    Pick,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SlashCommandIn {
     pub name: String,
     pub args: String,
     pub cwd: String,
+    #[serde(default)]
+    pub stage: SlashStage,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -244,6 +261,31 @@ pub struct SlashCommandOut {
     pub settings_patch: Option<Value>,
     /// If set, submitted to the model as a user message.
     pub send_to_model: Option<String>,
+    /// Open a list the user picks from; the choice comes back as another
+    /// `slash_command` call with stage `pick`. TUI only.
+    pub picker: Option<PickerSpec>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct PickerSpec {
+    pub title: String,
+    pub items: Vec<PickerItem>,
+    /// Index of the item under the cursor when the list opens.
+    pub selected: usize,
+    /// Call the command with stage `preview` whenever the cursor moves.
+    pub preview: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct PickerItem {
+    /// Sent back as `args`.
+    pub value: String,
+    /// Shown in the list; `value` when empty.
+    pub label: String,
+    /// Dim text at the right of the row.
+    pub detail: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

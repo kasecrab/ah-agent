@@ -239,6 +239,33 @@ fn active() -> Option<String> {
     kv_get(KV_ACTIVE).filter(|s| !s.is_empty())
 }
 
+/// The list `/theme` opens: every palette plus `off`, the active one under
+/// the cursor, previewed live as the cursor moves.
+fn picker(cfg: &Config, current: Option<&str>) -> PickerSpec {
+    let mut items: Vec<PickerItem> = names(cfg)
+        .into_iter()
+        .map(|n| PickerItem {
+            detail: if cfg.palettes.contains_key(&n) { "config".into() } else { String::new() },
+            value: n.clone(),
+            label: n,
+        })
+        .collect();
+    items.push(PickerItem {
+        value: "off".into(),
+        label: "off".into(),
+        detail: "colours from config".into(),
+    });
+    let selected = current
+        .and_then(|c| items.iter().position(|i| i.value == c))
+        .unwrap_or(items.len() - 1);
+    PickerSpec {
+        title: "theme".into(),
+        items,
+        selected,
+        preview: true,
+    }
+}
+
 fn handle(hook: Hook, input: Value) -> Result<Value, String> {
     match hook {
         Hook::OnLoad => {
@@ -264,17 +291,32 @@ fn handle(hook: Hook, input: Value) -> Result<Value, String> {
             let inp: SlashCommandIn = serde_json::from_value(input).map_err(|e| e.to_string())?;
             let cfg = config();
             let arg = inp.args.trim();
-            if arg.is_empty() || arg == "list" {
-                let current = active().or_else(|| cfg.name.clone());
-                let list = names(&cfg)
-                    .iter()
-                    .map(|n| {
-                        let mark = if current.as_deref() == Some(n) { "*" } else { " " };
-                        format!("{mark} {n}")
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                return Ok(json!({ "message": format!("themes (/theme <name>, /theme off):\n{list}") }));
+            let current = active().or_else(|| cfg.name.clone());
+            match inp.stage {
+                // Cursor moved in the picker: patch only, remember nothing.
+                SlashStage::Preview => {
+                    let name = (arg != "off").then_some(arg);
+                    return Ok(match patch_for(&cfg, name) {
+                        Ok(patch) => json!({ "settings_patch": patch }),
+                        Err(_) => Value::Null,
+                    });
+                }
+                SlashStage::Pick => {}
+                SlashStage::Run if arg.is_empty() => {
+                    return Ok(json!({ "picker": picker(&cfg, current.as_deref()) }));
+                }
+                SlashStage::Run if arg == "list" => {
+                    let list = names(&cfg)
+                        .iter()
+                        .map(|n| {
+                            let mark = if current.as_deref() == Some(n) { "*" } else { " " };
+                            format!("{mark} {n}")
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    return Ok(json!({ "message": format!("themes (/theme <name>, /theme off):\n{list}") }));
+                }
+                SlashStage::Run => {}
             }
             if arg == "off" || arg == "default" {
                 kv_set(KV_ACTIVE, None);
@@ -349,6 +391,17 @@ mod tests {
         assert!(p.get("base").is_none());
         assert!(palette(&cfg, "nope").is_none());
         assert_eq!(names(&cfg).last().map(String::as_str), Some("mine"));
+    }
+
+    #[test]
+    fn picker_marks_the_active_palette() {
+        let cfg = Config { name: None, background: false, palettes: Map::new() };
+        let p = picker(&cfg, Some("nord"));
+        assert_eq!(p.items[p.selected].value, "nord");
+        assert_eq!(p.items.last().unwrap().value, "off");
+        let p = picker(&cfg, None);
+        assert_eq!(p.items[p.selected].value, "off");
+        assert!(p.preview);
     }
 
     #[test]

@@ -50,9 +50,24 @@ URL) is handled in this order:
    updates are incremental. The `wasm32-unknown-unknown` target must be
    installed (`rustup target add wasm32-unknown-unknown`).
 
+### Updating
+
 `~/.config/ah/plugins/sources.json` maps each installed file stem to its
-`url`, `path` and `ref`; `ah plugin update` reads it and `ah plugin rm`
-drops the entry.
+`url`, `path` and `ref`. `ah plugin update` repeats the install for every
+entry (or one, `ah plugin update themes`): a fresh clone of the recorded
+ref, a build when the repository ships source, and the module replaced in
+place. A branch ref, or none, follows the branch's newest commit; a tag or
+commit ref reinstalls the same code and only changes anything when its
+build inputs did. `ah plugin rm` deletes the module and its entry. Plugins
+added by hand with `ah plugin add` or `ah plugin build` have no source and
+are not touched by `update`.
+
+A plugin keeps working across ah releases as long as the ABI version
+matches: new fields in hook payloads have defaults and unknown fields are
+ignored on both sides. When ah bumps `abi_version`, `ah plugin list` reports
+`abi version N != host M` for the module and `ah plugin update` rebuilds it
+against the SDK the plugin's `Cargo.toml` points at (`branch = "main"` in
+the examples, so the rebuild picks up the current SDK).
 
 ## Writing one in Rust
 
@@ -179,7 +194,7 @@ in an output is merged into the live settings (and shown as a
 | `after_tool` | after a tool ran | `call`, `result`, `duration_ms` | `result` (replacement, optional), `settings_patch` |
 | `tool_call` | the model called a tool this plugin declared | `call`, `cwd` | `result` (`output`, `is_error`, optional `diff`) |
 | `statusline` | every status bar redraw | `StatusContext` (below) | `text` |
-| `slash_command` | user ran a command from `commands` | `name`, `args`, `cwd` | `message` (notice), `send_to_model` (submitted as a user message), `settings_patch` |
+| `slash_command` | user ran a command from `commands`, or used a picker it opened | `name`, `args`, `cwd`, `stage` (`run`, `preview`, `pick`) | `message` (notice), `send_to_model` (submitted as a user message), `settings_patch`, `picker` (below) |
 | `on_turn_end` | after the assistant's final message | `message`, `usage`, `total_usage`, `tool_calls` | `message` (notice), `settings_patch` |
 | `keybinds` | reserved | none | `binds`: `[[key, action]]`, action = a `[keys]` field name or a slash command. Declared in the ABI; the TUI does not apply plugin binds yet |
 
@@ -197,6 +212,28 @@ at once; a replace feeds the new arguments to the next plugin; an ask is kept
 unless a replace was already chosen. Built-in `permissions.deny` rules are
 checked after the plugins, on the final arguments, and a plugin cannot lift
 them.
+
+### Pickers
+
+A `slash_command` answer may carry a `picker` to let the user choose from a
+list instead of typing an argument:
+
+```json
+{"picker": {"title": "theme", "selected": 1, "preview": true,
+            "items": [{"value": "nord", "label": "nord", "detail": ""},
+                      {"value": "off", "label": "off", "detail": "colours from config"}]}}
+```
+
+The TUI opens the list with the `selected` item under the cursor; typing
+filters it. Enter calls the command again with `stage = "pick"` and the
+item's `value` as `args`; the plugin then does what it would do for a typed
+argument. With `preview = true` every cursor move calls the command with
+`stage = "preview"` and the item's `value`; return only a `settings_patch`
+so the user sees the effect at once, and change no state, because the host
+undoes all preview patches when the picker is cancelled with Esc, or after
+the `pick` answer was applied. Pickers are ignored in one-shot mode, so a
+command should also accept a typed argument. Answering `null` to any hook
+means "no change" and is never an error.
 
 `StatusContext` fields: `model`, `usage` (`prompt_tokens`,
 `completion_tokens`, `cost`), `cwd`, `git_branch`, `plugins` (count), `state`
@@ -242,18 +279,19 @@ sees them in the transcript.
 ## Examples in the repository
 
 `plugins/themes/` is the reference example: a complete, installable plugin
-with a `/theme` slash command, `on_load`, `settings_get`, `kv_get`/`kv_set`,
+with a `/theme` slash command and live-preview picker, `on_load`, `settings_get`, `kv_get`/`kv_set`,
 `log!` and a `README.md` describing the layout.
 
 ```
 ah plugin install https://github.com/kasecrab/ah-agent plugins/themes
 ```
 
-Inside ah, `/theme` lists the bundled palettes (dracula, nord, gruvbox,
-gruvbox-light, catppuccin-mocha, catppuccin-latte, tokyo-night,
-solarized-dark, solarized-light, one-dark, monokai), `/theme nord` switches
-and remembers the choice, `/theme off` restores the colours from the config
-file. `[themes] name = "nord"` sets a default, `[themes] background = true`
+Inside ah, `/theme` opens a picker over the bundled palettes (dracula, nord,
+gruvbox, gruvbox-light, catppuccin-mocha, catppuccin-latte, tokyo-night,
+solarized-dark, solarized-light, one-dark, monokai) that previews each one
+as the cursor moves; Enter keeps it, Esc goes back. `/theme nord` switches
+directly and `/theme off` restores the colours from the config file, both
+also in one-shot mode; `/theme list` prints the names. `[themes] name = "nord"` sets a default, `[themes] background = true`
 also paints the background keys, and `[themes.palettes.<name>]` adds a
 palette (`base = "nord"` starts from a bundled one).
 
