@@ -101,6 +101,8 @@ pub struct Theme {
     pub user_prefix: String,
     pub assistant_prefix: String,
     pub tool_prefix: String,
+    /// Prompt glyph at the left of the input line.
+    pub input_prefix: String,
     pub spinner: Vec<String>,
 }
 
@@ -117,17 +119,18 @@ impl Default for Theme {
             tool_output: "dark_gray".into(),
             error: "red".into(),
             dim: "dark_gray".into(),
-            border: "dark_gray".into(),
-            border_focus: "cyan".into(),
-            status_fg: "black".into(),
-            status_bg: "cyan".into(),
+            border: "gray".into(),
+            border_focus: "gray".into(),
+            status_fg: "gray".into(),
+            status_bg: "reset".into(),
             input_fg: "reset".into(),
             input_bg: "reset".into(),
             selection: "blue".into(),
-            border_style: BorderStyle::Rounded,
+            border_style: BorderStyle::Lines,
             user_prefix: "> ".into(),
             assistant_prefix: "".into(),
             tool_prefix: "⚙ ".into(),
+            input_prefix: "› ".into(),
             spinner: ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
                 .iter()
                 .map(|s| String::from(*s))
@@ -140,8 +143,10 @@ impl Default for Theme {
 #[serde(rename_all = "snake_case")]
 pub enum BorderStyle {
     None,
-    Plain,
+    /// Horizontal rules above and below the input, no sides.
     #[default]
+    Lines,
+    Plain,
     Rounded,
     Double,
     Thick,
@@ -180,7 +185,7 @@ pub struct Layout {
 impl Default for Layout {
     fn default() -> Self {
         Self {
-            input_height: 3,
+            input_height: 1,
             input_max_height: 10,
             transcript_max_width: 0,
             show_status: true,
@@ -403,6 +408,6 @@ mod tests {
         let s: Settings = serde_json::from_value(v).unwrap();
         assert_eq!(s.theme.accent, "magenta");
         assert_eq!(s.extra["guard"]["deny"][0], "rm -rf");
-        assert_eq!(s.layout.input_height, 3);
+        assert_eq!(s.layout.input_height, 1);
     }
 }

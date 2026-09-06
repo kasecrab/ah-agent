@@ -1399,7 +1399,9 @@ impl App {
         f.render_widget(ratatui::widgets::Block::default().style(pal.base()), area);
 
         let border = if pal.has_borders() { 2 } else { 0 };
-        let input_width = area.width.saturating_sub(border) as usize;
+        let side = if pal.has_side_borders() { 2 } else { 0 };
+        let prefix_w = unicode_width::UnicodeWidthStr::width(pal.input_prefix.as_str()) as u16;
+        let input_width = area.width.saturating_sub(side + prefix_w) as usize;
         let (rows, cursor_rc) = self.editor.layout(input_width.max(1));
         let input_rows = rows.len().clamp(
             layout.input_height.max(1) as usize,
@@ -1410,7 +1412,7 @@ impl App {
         } else {
             0
         };
-        let status_rows: u16 = if layout.show_status { 1 } else { 0 };
+        let status_rows: u16 = if layout.show_status { 2 } else { 0 };
 
         let [transcript_area, perm_area, input_area, status_area] = Layout::vertical([
             Constraint::Min(1),
@@ -1473,7 +1475,7 @@ impl App {
             String::new()
         };
         let block = pal
-            .block(!self.busy)
+            .input_block(!self.busy)
             .title(title)
             .style(Style::default().fg(pal.input_fg).bg(pal.input_bg));
         let inner = block.inner(input_area);
@@ -1481,32 +1483,44 @@ impl App {
         let first_row = cursor_rc
             .0
             .saturating_sub(inner.height.saturating_sub(1) as usize);
-        let visible: Vec<Line> = rows
+        let prefix_style = pal.bold(pal.accent);
+        let pad = " ".repeat(prefix_w as usize);
+        let mut visible: Vec<Line> = rows
             .iter()
+            .enumerate()
             .skip(first_row)
             .take(inner.height as usize)
-            .map(|r| Line::from(r.clone()))
+            .map(|(i, r)| {
+                let lead = if i == 0 {
+                    pal.input_prefix.clone()
+                } else {
+                    pad.clone()
+                };
+                Line::from(vec![Span::styled(lead, prefix_style), Span::raw(r.clone())])
+            })
             .collect();
         if self.editor.is_empty() && !self.busy {
-            f.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    "Type a message, /help for commands",
-                    pal.dim(),
-                ))),
-                inner,
-            );
-        } else {
-            f.render_widget(Paragraph::new(visible), inner);
+            visible = vec![Line::from(vec![
+                Span::styled(pal.input_prefix.clone(), prefix_style),
+                Span::styled("Type a message, /help for commands", pal.dim()),
+            ])];
         }
+        f.render_widget(Paragraph::new(visible), inner);
         if self.pending_perm.is_none() && self.picker.is_none() {
             f.set_cursor_position((
-                inner.x + cursor_rc.1 as u16,
+                inner.x + prefix_w + cursor_rc.1 as u16,
                 inner.y + (cursor_rc.0 - first_row) as u16,
             ));
         }
 
         if layout.show_status {
-            self.draw_status(f, status_area, &pal);
+            // blank row between the input and the status text
+            let bottom = Rect {
+                y: status_area.y + 1,
+                height: 1,
+                ..status_area
+            };
+            self.draw_status(f, bottom, &pal);
         }
         if let Some(c) = &self.completion {
             self.draw_completion(f, c, input_area, &pal);
@@ -1727,7 +1741,9 @@ impl App {
             text = format!(" {}{}", self.spinner(), text);
         }
         let style = Style::default().fg(pal.status_fg).bg(pal.status_bg);
-        let line = Line::from(Span::styled(text, style.add_modifier(Modifier::BOLD)));
-        f.render_widget(Paragraph::new(line).style(style), area);
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(text, style))).style(style),
+            area,
+        );
     }
 }

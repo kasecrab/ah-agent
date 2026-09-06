@@ -26,6 +26,7 @@ pub struct Palette {
     pub user_prefix: String,
     pub assistant_prefix: String,
     pub tool_prefix: String,
+    pub input_prefix: String,
     pub spinner: Vec<String>,
 }
 
@@ -63,6 +64,7 @@ impl Palette {
             user_prefix: t.user_prefix.clone(),
             assistant_prefix: t.assistant_prefix.clone(),
             tool_prefix: t.tool_prefix.clone(),
+            input_prefix: t.input_prefix.clone(),
             spinner: if t.spinner.is_empty() {
                 vec!["|".into(), "/".into(), "-".into(), "\\".into()]
             } else {
@@ -79,26 +81,52 @@ impl Palette {
         self.border_style != BorderStyle::None
     }
 
-    /// Bordered block (or none) in the configured style.
-    pub fn block(&self, focused: bool) -> Block<'static> {
-        if !self.has_borders() {
-            return Block::default();
-        }
-        let kind = match self.border_style {
-            BorderStyle::Plain => BorderType::Plain,
-            BorderStyle::Rounded => BorderType::Rounded,
+    pub fn has_side_borders(&self) -> bool {
+        !matches!(self.border_style, BorderStyle::None | BorderStyle::Lines)
+    }
+
+    fn border_type(&self) -> BorderType {
+        match self.border_style {
             BorderStyle::Double => BorderType::Double,
             BorderStyle::Thick => BorderType::Thick,
-            BorderStyle::None => BorderType::Plain,
+            BorderStyle::Rounded => BorderType::Rounded,
+            BorderStyle::Plain | BorderStyle::Lines | BorderStyle::None => BorderType::Plain,
+        }
+    }
+
+    fn border_color(&self, focused: bool) -> Style {
+        Style::default().fg(if focused {
+            self.border_focus
+        } else {
+            self.border
+        })
+    }
+
+    /// Popup/overlay block: always fully bordered (rounded for the `lines` style).
+    pub fn block(&self, focused: bool) -> Block<'static> {
+        let kind = match self.border_style {
+            BorderStyle::Lines | BorderStyle::None => BorderType::Rounded,
+            _ => self.border_type(),
         };
         Block::default()
             .borders(Borders::ALL)
             .border_type(kind)
-            .border_style(Style::default().fg(if focused {
-                self.border_focus
-            } else {
-                self.border
-            }))
+            .border_style(self.border_color(focused))
+    }
+
+    /// Input box block in the configured style.
+    pub fn input_block(&self, focused: bool) -> Block<'static> {
+        match self.border_style {
+            BorderStyle::None => Block::default(),
+            BorderStyle::Lines => Block::default()
+                .borders(Borders::TOP | Borders::BOTTOM)
+                .border_type(BorderType::Plain)
+                .border_style(self.border_color(focused)),
+            _ => Block::default()
+                .borders(Borders::ALL)
+                .border_type(self.border_type())
+                .border_style(self.border_color(focused)),
+        }
     }
 
     pub fn dim(&self) -> Style {
