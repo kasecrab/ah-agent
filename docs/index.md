@@ -61,6 +61,7 @@ prints the resolved locations.
 | give the model project rules | instructions page (AGENTS.md) |
 | approve tool calls by hand | `permissions.mode = "ask"`, `--ask`, `/ask` |
 | block shell commands | `permissions.deny` in config |
+| run read-only tool calls at once | `parallel` in `[tools]`, config page |
 | tune compaction | `[context]` in config |
 | cut input cost on long sessions | `cache` in `[context]`, config page |
 | change the status bar | `statusline.format` in config, or a `statusline` plugin hook |

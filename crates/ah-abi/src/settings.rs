@@ -380,6 +380,16 @@ pub struct ToolSettings {
     /// Shell used by the `bash` tool. Empty = `$SHELL` or `sh`.
     pub shell: String,
     pub read_default_limit: usize,
+    /// Run consecutive read-only tool calls from one model message at the same
+    /// time. Calls that change anything keep their order.
+    pub parallel: bool,
+    /// Most tool calls in flight at once.
+    pub max_parallel: u32,
+    /// Shell commands treated as read-only, and so safe to run beside another
+    /// call. Matched like `permissions.deny`: a rule matches a command segment
+    /// that equals it or starts with it followed by a space, `*` matches any
+    /// continuation. A command that redirects or substitutes is never parallel.
+    pub parallel_bash: Vec<String>,
 }
 
 impl Default for ToolSettings {
@@ -394,6 +404,40 @@ impl Default for ToolSettings {
             bash_timeout_ms: 120_000,
             shell: String::new(),
             read_default_limit: 2000,
+            parallel: true,
+            max_parallel: 8,
+            parallel_bash: [
+                "ls",
+                "cat",
+                "head",
+                "tail",
+                "wc",
+                "stat",
+                "file",
+                "find",
+                "fd",
+                "rg",
+                "grep",
+                "tree",
+                "du",
+                "df",
+                "pwd",
+                "which",
+                "echo",
+                "date",
+                "git log",
+                "git status",
+                "git diff",
+                "git show",
+                "git branch",
+                "git ls-files",
+                "git blame",
+                "cargo metadata",
+                "cargo tree",
+            ]
+            .iter()
+            .map(|s| String::from(*s))
+            .collect(),
         }
     }
 }

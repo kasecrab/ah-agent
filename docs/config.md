@@ -165,6 +165,27 @@ the full default table.
 | `bash_timeout_ms` | `120000` | `bash` tool time limit |
 | `shell` | `""` | shell binary for `bash`; empty = `$SHELL` or `sh` |
 | `read_default_limit` | `2000` | lines `read_file` returns without an explicit limit |
+| `parallel` | `true` | run consecutive read-only calls from one model message at the same time |
+| `max_parallel` | `8` | most calls in flight at once |
+| `parallel_bash` | `["ls", "cat", "rg", "git log", …]` | shell commands treated as read-only |
+
+### Parallel tool calls
+
+Models ask for several tools in one message: read these four files, grep for
+that symbol in two places. ah runs consecutive read-only calls together on
+scoped threads and stitches the results back into call order, so the model
+sees exactly what it would have seen one at a time.
+
+A call joins a batch only when it reads: `read_file` always, `bash` when every
+segment of the command matches `parallel_bash` and the command has no
+redirection or command substitution. Everything else — `write_file`,
+`edit_file`, any other shell command, every plugin tool — runs alone, in the
+order the model asked for it, so a write never races a read of the same file.
+A batch stops at the first call that writes and starts again after it.
+
+Threads are only spawned for a batch of two or more, permission prompts and
+plugin hooks still run one at a time on the main thread, and `max_parallel`
+caps how many run together. Set `parallel = false` to go back to one at a time.
 
 ## [plugins]
 

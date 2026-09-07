@@ -148,6 +148,12 @@ pub trait Hooks {
 }
 
 pub struct NoHooks;
+
+/// Outcome of the checks a call passes before it runs.
+enum Gate {
+    Run(ToolCall),
+    Refused(ToolResult),
+}
 impl Hooks for NoHooks {}
 
 pub struct Agent<'a> {
@@ -400,32 +406,40 @@ impl<'a> Agent<'a> {
                 break;
             }
 
-            for call in &acc.tool_calls {
+            let calls = &acc.tool_calls;
+            let mut i = 0;
+            while i < calls.len() {
                 if self.cancel.load(Ordering::Relaxed) {
                     summary.cancelled = true;
                     // The API requires a tool message for every call; record the cancel.
-                    let m = Message::tool_result(&call.id, "[cancelled by user]");
+                    for call in &calls[i..] {
+                        let m = Message::tool_result(&call.id, "[cancelled by user]");
+                        io.emit(AgentEvent::ToolMessage(m.clone()));
+                        messages.push(m);
+                    }
+                    break;
+                }
+                let n = self.batch_len(calls, i);
+                crate::debug!("running {n} tool call(s) at once");
+                summary.tool_calls += n as u32;
+                for (call, result, dur) in self.run_batch(&calls[i..i + n], &cwd_str, io) {
+                    let m = Message::tool_result(
+                        &call.id,
+                        if result.is_error {
+                            format!("ERROR: {}", result.output)
+                        } else {
+                            result.output.clone()
+                        },
+                    );
+                    io.emit(AgentEvent::ToolEnd {
+                        call,
+                        result,
+                        duration_ms: dur,
+                    });
                     io.emit(AgentEvent::ToolMessage(m.clone()));
                     messages.push(m);
-                    continue;
                 }
-                summary.tool_calls += 1;
-                let (result, dur) = self.run_tool(call, &cwd_str, io);
-                let m = Message::tool_result(
-                    &call.id,
-                    if result.is_error {
-                        format!("ERROR: {}", result.output)
-                    } else {
-                        result.output.clone()
-                    },
-                );
-                io.emit(AgentEvent::ToolEnd {
-                    call: call.clone(),
-                    result,
-                    duration_ms: dur,
-                });
-                io.emit(AgentEvent::ToolMessage(m.clone()));
-                messages.push(m);
+                i += n;
             }
             if summary.cancelled {
                 break;
@@ -450,7 +464,8 @@ impl<'a> Agent<'a> {
         Ok(summary)
     }
 
-    fn run_tool(&mut self, call: &ToolCall, cwd: &str, io: &dyn AgentIo) -> (ToolResult, u64) {
+    /// Hooks, deny rules and the permission prompt, before anything runs.
+    fn gate_tool(&mut self, call: &ToolCall, cwd: &str, io: &dyn AgentIo) -> Gate {
         let mut call = call.clone();
         let (decision, patches) = self.hooks.before_tool(&call, cwd);
         for p in patches {
@@ -467,10 +482,10 @@ impl<'a> Agent<'a> {
             ToolDecision::Allow => {}
             ToolDecision::Deny { reason } => {
                 io.emit(AgentEvent::ToolDenied {
-                    call: call.clone(),
+                    call,
                     reason: reason.clone(),
                 });
-                return (ToolResult::err(format!("denied by policy: {reason}")), 0);
+                return Gate::Refused(ToolResult::err(format!("denied by policy: {reason}")));
             }
             ToolDecision::Replace { arguments } => call.function.arguments = arguments,
             ToolDecision::Ask { reason } => {
@@ -485,42 +500,124 @@ impl<'a> Agent<'a> {
         {
             let reason = format!("matches deny rule `{rule}`");
             io.emit(AgentEvent::ToolDenied {
-                call: call.clone(),
+                call,
                 reason: reason.clone(),
             });
-            return (
-                ToolResult::err(format!(
-                    "denied by policy: {reason}. Ask the user to run it themselves if it is really needed."
-                )),
-                0,
-            );
+            return Gate::Refused(ToolResult::err(format!(
+                "denied by policy: {reason}. Ask the user to run it themselves if it is really needed."
+            )));
         }
         if must_ask && !io.ask_permission(&call, &ask_reason) {
             io.emit(AgentEvent::ToolDenied {
-                call: call.clone(),
+                call,
                 reason: "user declined".into(),
             });
-            return (ToolResult::err("user declined to run this tool"), 0);
+            return Gate::Refused(ToolResult::err("user declined to run this tool"));
         }
+        Gate::Run(call)
+    }
 
-        io.emit(AgentEvent::ToolStart(call.clone()));
-        let start = Instant::now();
-        let result = match self.hooks.plugin_tool(&call, cwd) {
-            Some(r) => r,
-            None => {
-                let ctx = ToolCtx {
-                    cwd: &self.cwd,
-                    settings: &self.settings.tools,
-                };
-                self.registry.run(&call, &ctx)
-            }
-        };
-        let dur = start.elapsed().as_millis() as u64;
-        let (result, patches) = self.hooks.after_tool(&call, result, dur);
-        for p in patches {
-            io.emit(AgentEvent::SettingsPatch(p));
+    /// How many calls starting at `at` may run at the same time. Always at
+    /// least one; more only for read-only calls, so order still holds for
+    /// anything that writes.
+    fn batch_len(&self, calls: &[ToolCall], at: usize) -> usize {
+        let t = &self.settings.tools;
+        if !t.parallel {
+            return 1;
         }
-        (result, dur)
+        let max = (t.max_parallel.max(1) as usize).min(calls.len() - at);
+        let mut n = 0;
+        while n < max && self.registry.is_parallel(&calls[at + n], t) {
+            n += 1;
+        }
+        n.max(1)
+    }
+
+    /// Run one batch and return `(call, result, duration)` in call order. A
+    /// batch of one runs on this thread; a longer batch is read-only calls, so
+    /// they run at once on scoped threads and are stitched back into order.
+    fn run_batch(
+        &mut self,
+        calls: &[ToolCall],
+        cwd: &str,
+        io: &dyn AgentIo,
+    ) -> Vec<(ToolCall, ToolResult, u64)> {
+        let mut gates = Vec::with_capacity(calls.len());
+        for c in calls {
+            gates.push(self.gate_tool(c, cwd, io));
+        }
+        let mut results: Vec<Option<(ToolResult, u64)>> = Vec::with_capacity(gates.len());
+        let mut pending = Vec::new();
+        for (i, g) in gates.iter().enumerate() {
+            match g {
+                Gate::Refused(r) => results.push(Some((r.clone(), 0))),
+                Gate::Run(c) => {
+                    io.emit(AgentEvent::ToolStart(c.clone()));
+                    pending.push(i);
+                    results.push(None);
+                }
+            }
+        }
+        if pending.len() == 1 {
+            let i = pending[0];
+            let Gate::Run(call) = &gates[i] else {
+                unreachable!()
+            };
+            let start = Instant::now();
+            // Plugin tools share one interpreter, so they never join a batch.
+            let r = match self.hooks.plugin_tool(call, cwd) {
+                Some(r) => r,
+                None => self.registry.run(call, &self.tool_ctx()),
+            };
+            results[i] = Some((r, start.elapsed().as_millis() as u64));
+        } else if !pending.is_empty() {
+            let registry = self.registry;
+            let ctx = self.tool_ctx();
+            let done: Vec<(usize, ToolResult, u64)> = std::thread::scope(|scope| {
+                let handles: Vec<_> = pending
+                    .iter()
+                    .map(|&i| {
+                        let Gate::Run(call) = &gates[i] else {
+                            unreachable!()
+                        };
+                        let ctx = &ctx;
+                        scope.spawn(move || {
+                            let start = Instant::now();
+                            let r = registry.run(call, ctx);
+                            (i, r, start.elapsed().as_millis() as u64)
+                        })
+                    })
+                    .collect();
+                handles.into_iter().filter_map(|h| h.join().ok()).collect()
+            });
+            for (i, r, d) in done {
+                results[i] = Some((r, d));
+            }
+        }
+        let mut out = Vec::with_capacity(calls.len());
+        for (i, gate) in gates.into_iter().enumerate() {
+            let (result, dur) = results[i]
+                .take()
+                .unwrap_or_else(|| (ToolResult::err("tool did not run"), 0));
+            match gate {
+                Gate::Run(call) => {
+                    let (result, patches) = self.hooks.after_tool(&call, result, dur);
+                    for p in patches {
+                        io.emit(AgentEvent::SettingsPatch(p));
+                    }
+                    out.push((call, result, dur));
+                }
+                Gate::Refused(_) => out.push((calls[i].clone(), result, dur)),
+            }
+        }
+        out
+    }
+
+    fn tool_ctx(&self) -> ToolCtx<'_> {
+        ToolCtx {
+            cwd: &self.cwd,
+            settings: &self.settings.tools,
+        }
     }
 
     fn stream_with_retry(&self, req: &ChatRequest, io: &dyn AgentIo) -> Result<Accumulator> {
@@ -665,6 +762,7 @@ pub mod test_support {
 mod tests {
     use super::test_support::*;
     use super::*;
+    use crate::tools::Tool;
 
     fn tool_call_script(name: &str, args: &str) -> Vec<StreamEvent> {
         vec![
@@ -964,6 +1062,133 @@ mod tests {
         )];
         let n = prompt_bytes("system", &[m], tools_bytes(&specs));
         assert_eq!(n, 6 + 2 + 4 + 16 + 4 + 13 + 2);
+    }
+
+    /// A tool that only finishes when a second copy of itself is running, so a
+    /// serial loop would time out instead of reporting the meeting.
+    struct Rendezvous {
+        state: std::sync::Arc<(std::sync::Mutex<usize>, std::sync::Condvar)>,
+        met: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl Tool for Rendezvous {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec::new("peek", "test tool", serde_json::json!({"type": "object"}))
+        }
+        fn parallel(&self, _args: &Value, _settings: &ah_abi::ToolSettings) -> bool {
+            true
+        }
+        fn run(&self, _args: &Value, _ctx: &ToolCtx<'_>) -> ToolResult {
+            let (lock, cv) = &*self.state;
+            let mut n = lock.lock().unwrap();
+            *n += 1;
+            if *n >= 2 {
+                self.met.store(true, Ordering::Relaxed);
+                cv.notify_all();
+                return ToolResult::ok("peeked");
+            }
+            let (_n, wait) = cv
+                .wait_timeout_while(n, Duration::from_secs(2), |n| *n < 2)
+                .unwrap();
+            if !wait.timed_out() {
+                self.met.store(true, Ordering::Relaxed);
+            }
+            ToolResult::ok("peeked")
+        }
+    }
+
+    fn two_peeks() -> Vec<StreamEvent> {
+        vec![
+            StreamEvent::ToolCallDelta {
+                index: 0,
+                id: Some("a".into()),
+                name: Some("peek".into()),
+                arguments: "{}".into(),
+            },
+            StreamEvent::ToolCallDelta {
+                index: 1,
+                id: Some("b".into()),
+                name: Some("peek".into()),
+                arguments: "{}".into(),
+            },
+            StreamEvent::Finish("tool_calls".into()),
+        ]
+    }
+
+    #[test]
+    fn read_only_calls_run_at_the_same_time() {
+        let met = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut registry = Registry::new();
+        registry.register(Box::new(Rendezvous {
+            state: std::sync::Arc::new(Default::default()),
+            met: met.clone(),
+        }));
+        let provider = MockProvider::new(vec![
+            two_peeks(),
+            vec![
+                StreamEvent::Text("done".into()),
+                StreamEvent::Finish("stop".into()),
+            ],
+        ]);
+        let settings = Settings::default();
+        let mut hooks = NoHooks;
+        let cancel = AtomicBool::new(false);
+        let mut agent = Agent::new(
+            &provider,
+            &registry,
+            &mut hooks,
+            &settings,
+            std::env::current_dir().unwrap(),
+            &cancel,
+        );
+        let mut messages = vec![Message::user("look twice")];
+        let io = RecordingIo::default();
+        agent.run_turn(&mut messages, &io).unwrap();
+        assert!(met.load(Ordering::Relaxed), "calls did not overlap");
+        // Both results come back, in call order.
+        let tools: Vec<&Message> = messages.iter().filter(|m| m.role == Role::Tool).collect();
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0].tool_call_id.as_deref(), Some("a"));
+        assert_eq!(tools[1].tool_call_id.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn batches_stop_at_the_first_write() {
+        let provider = MockProvider::new(vec![]);
+        let mut settings = Settings::default();
+        let registry = Registry::builtins(&settings.tools);
+        let calls = vec![
+            ToolCall::new("1", "read_file", "{\"path\":\"a\"}"),
+            ToolCall::new("2", "bash", "{\"command\":\"rg todo\"}"),
+            ToolCall::new("3", "write_file", "{\"path\":\"a\",\"content\":\"x\"}"),
+            ToolCall::new("4", "read_file", "{\"path\":\"b\"}"),
+        ];
+        let mut hooks = NoHooks;
+        let cancel = AtomicBool::new(false);
+        {
+            let agent = Agent::new(
+                &provider,
+                &registry,
+                &mut hooks,
+                &settings,
+                std::env::current_dir().unwrap(),
+                &cancel,
+            );
+            assert_eq!(agent.batch_len(&calls, 0), 2);
+            assert_eq!(agent.batch_len(&calls, 2), 1);
+            assert_eq!(agent.batch_len(&calls, 3), 1);
+        }
+        settings.tools.parallel = false;
+        let mut hooks = NoHooks;
+        let agent = Agent::new(
+            &provider,
+            &registry,
+            &mut hooks,
+            &settings,
+            std::env::current_dir().unwrap(),
+            &cancel,
+        );
+        assert_eq!(agent.batch_len(&calls, 0), 1);
     }
 
     #[test]

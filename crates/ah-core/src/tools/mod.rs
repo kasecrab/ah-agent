@@ -19,6 +19,11 @@ pub struct ToolCtx<'a> {
 pub trait Tool: Send + Sync {
     fn spec(&self) -> ToolSpec;
     fn run(&self, args: &Value, ctx: &ToolCtx<'_>) -> ToolResult;
+    /// True when this call only reads, so it may run beside other calls from
+    /// the same model message.
+    fn parallel(&self, _args: &Value, _settings: &ToolSettings) -> bool {
+        false
+    }
 }
 
 /// Built-in tools plus dynamically registered ones (plugins).
@@ -79,6 +84,18 @@ impl Registry {
 
     pub fn has(&self, name: &str) -> bool {
         self.index.contains_key(name)
+    }
+
+    /// Whether `call` may run at the same time as its neighbours. Unknown tools
+    /// (plugin tools, which run on the host's single interpreter) never do.
+    pub fn is_parallel(&self, call: &ToolCall, settings: &ToolSettings) -> bool {
+        let Some(&i) = self.index.get(&call.function.name) else {
+            return false;
+        };
+        match serde_json::from_str::<Value>(&call.function.arguments) {
+            Ok(args) => self.tools[i].parallel(&args, settings),
+            Err(_) => false,
+        }
     }
 
     pub fn run(&self, call: &ToolCall, ctx: &ToolCtx<'_>) -> ToolResult {

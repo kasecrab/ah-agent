@@ -40,6 +40,20 @@ pub fn denied<'a>(command: &str, rules: &'a [String]) -> Option<&'a str> {
         .map(String::as_str)
 }
 
+/// True when every segment of `command` matches one of `rules` and the command
+/// neither redirects nor substitutes, which is as close to "reads only" as a
+/// shell command can be judged without running it.
+pub fn read_only(command: &str, rules: &[String]) -> bool {
+    if command.contains('>') || command.contains('`') || command.contains("$(") {
+        return false;
+    }
+    let segs = segments(command);
+    !segs.is_empty()
+        && segs
+            .iter()
+            .all(|s| rules.iter().any(|r| rule_matches(r, s)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -59,5 +73,20 @@ mod tests {
         assert_eq!(denied("git push --force-with-lease", &rules), None);
         assert_eq!(denied("mkfs.ext4 /dev/sdb", &rules), Some("mkfs*"));
         assert_eq!(denied("git reset --soft HEAD~1", &rules), None);
+    }
+
+    #[test]
+    fn read_only_needs_every_segment() {
+        let rules: Vec<String> = ["rg", "git log", "wc"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(read_only("rg -n todo src | wc -l", &rules));
+        assert!(read_only("git log --oneline -5", &rules));
+        assert!(!read_only("rg -n todo > out.txt", &rules));
+        assert!(!read_only("rg -n $(cat f)", &rules));
+        assert!(!read_only("rg -n todo && rm -rf x", &rules));
+        assert!(!read_only("git commit -m x", &rules));
+        assert!(!read_only("", &rules));
     }
 }

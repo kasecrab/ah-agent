@@ -2,7 +2,7 @@ use std::io::Read;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use ah_abi::{ToolResult, ToolSpec};
+use ah_abi::{ToolResult, ToolSettings, ToolSpec};
 use serde_json::{Value, json};
 
 use super::{Tool, ToolCtx, arg_str, arg_u64};
@@ -44,6 +44,11 @@ impl Tool for Bash {
             ctx.settings.shell.clone()
         };
         run_shell(&shell, cmd, ctx.cwd, timeout)
+    }
+
+    fn parallel(&self, args: &Value, settings: &ToolSettings) -> bool {
+        arg_str(args, "command")
+            .is_some_and(|cmd| crate::policy::read_only(cmd, &settings.parallel_bash))
     }
 }
 

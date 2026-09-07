@@ -1,6 +1,6 @@
 use std::fmt::Write as _;
 
-use ah_abi::{ToolResult, ToolSpec};
+use ah_abi::{ToolResult, ToolSettings, ToolSpec};
 use serde_json::{Value, json};
 
 use super::{Tool, ToolCtx, arg_str, arg_u64, resolve_path};
@@ -65,6 +65,10 @@ impl Tool for ReadFile {
             );
         }
         ToolResult::ok(out)
+    }
+
+    fn parallel(&self, _args: &Value, _settings: &ToolSettings) -> bool {
+        true
     }
 }
 
