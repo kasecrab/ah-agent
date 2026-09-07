@@ -3,7 +3,7 @@ use std::fmt::Write as _;
 use ah_abi::{ToolResult, ToolSettings, ToolSpec};
 use serde_json::{Value, json};
 
-use super::{Tool, ToolCtx, arg_str, arg_u64, resolve_path};
+use super::{Tool, ToolCtx, arg_str, arg_u64, edit, resolve_path};
 
 pub struct ReadFile;
 pub struct WriteFile;
@@ -131,17 +131,34 @@ impl Tool for EditFile {
     fn spec(&self) -> ToolSpec {
         ToolSpec::new(
             "edit_file",
-            "Replace an exact string in a file. `old_string` must match exactly once unless `replace_all` is true. \
-             Include enough surrounding lines to make it unique.",
+            "Replace text in a file. Give one edit with old_string/new_string, or several in \
+             `edits`, applied in order to the same file. Each old_string must match one place \
+             unless replace_all is set; include enough surrounding lines to make it unique. \
+             Trailing whitespace, carriage returns, how far a block is indented and the amount \
+             of space between words may differ from the file. Nothing is written unless every \
+             edit applies.",
             json!({
                 "type": "object",
                 "properties": {
                     "path": {"type": "string"},
                     "old_string": {"type": "string"},
                     "new_string": {"type": "string"},
-                    "replace_all": {"type": "boolean", "default": false}
+                    "replace_all": {"type": "boolean", "default": false},
+                    "edits": {
+                        "type": "array",
+                        "description": "Several replacements, applied in order",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "old_string": {"type": "string"},
+                                "new_string": {"type": "string"},
+                                "replace_all": {"type": "boolean", "default": false}
+                            },
+                            "required": ["old_string", "new_string"]
+                        }
+                    }
                 },
-                "required": ["path", "old_string", "new_string"]
+                "required": ["path"]
             }),
         )
     }
@@ -150,65 +167,79 @@ impl Tool for EditFile {
         let Some(p) = arg_str(args, "path") else {
             return ToolResult::err("missing `path`");
         };
-        let Some(old) = arg_str(args, "old_string") else {
-            return ToolResult::err("missing `old_string`");
+        let edits = match edits_from(args) {
+            Ok(e) => e,
+            Err(e) => return ToolResult::err(e),
         };
-        let Some(new) = arg_str(args, "new_string") else {
-            return ToolResult::err("missing `new_string`");
-        };
-        let replace_all = args
-            .get("replace_all")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
         let path = resolve_path(ctx.cwd, p);
         let text = match std::fs::read_to_string(&path) {
             Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return ToolResult::err(format!(
+                    "{}: no such file; use write_file to create it",
+                    path.display()
+                ));
+            }
             Err(e) => return ToolResult::err(format!("{}: {e}", path.display())),
         };
-        match apply_edit(&text, old, new, replace_all) {
-            Ok((updated, n)) => match std::fs::write(&path, &updated) {
-                Ok(()) => {
-                    let mut r = ToolResult::ok(format!(
-                        "edited {} ({n} replacement{})",
-                        path.display(),
-                        if n == 1 { "" } else { "s" }
-                    ));
-                    r.diff = Some(super::diff::unified(&text, &updated, 2));
-                    r
-                }
-                Err(e) => ToolResult::err(format!("{}: {e}", path.display())),
-            },
-            Err(e) => ToolResult::err(e),
+        let borrowed: Vec<edit::Edit<'_>> = edits
+            .iter()
+            .map(|(o, n, all)| edit::Edit {
+                old: o,
+                new: n,
+                replace_all: *all,
+            })
+            .collect();
+        let applied = match edit::apply(&text, &borrowed) {
+            Ok(a) => a,
+            Err(e) => return ToolResult::err(e),
+        };
+        if let Err(e) = std::fs::write(&path, &applied.text) {
+            return ToolResult::err(format!("{}: {e}", path.display()));
         }
+        let mut out = format!(
+            "edited {} ({} edit{}, {} replacement{})",
+            path.display(),
+            borrowed.len(),
+            if borrowed.len() == 1 { "" } else { "s" },
+            applied.replacements,
+            if applied.replacements == 1 { "" } else { "s" }
+        );
+        for n in &applied.notes {
+            out.push_str(&format!("\n{n}"));
+        }
+        let mut r = ToolResult::ok(out);
+        r.diff = Some(super::diff::unified(&text, &applied.text, 2));
+        r
     }
 }
 
-pub fn apply_edit(
-    text: &str,
-    old: &str,
-    new: &str,
-    replace_all: bool,
-) -> Result<(String, usize), String> {
-    if old.is_empty() {
-        return Err("old_string must not be empty".into());
+/// `(old, new, replace_all)` from either the single-edit arguments or `edits`.
+fn edits_from(args: &Value) -> Result<Vec<(String, String, bool)>, String> {
+    let all = |v: &Value| {
+        v.get("replace_all")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    };
+    if let Some(list) = args.get("edits").and_then(Value::as_array) {
+        if list.is_empty() {
+            return Err("`edits` is empty".into());
+        }
+        return list
+            .iter()
+            .enumerate()
+            .map(|(i, e)| {
+                let old = arg_str(e, "old_string")
+                    .ok_or_else(|| format!("edit {}: missing `old_string`", i + 1))?;
+                let new = arg_str(e, "new_string")
+                    .ok_or_else(|| format!("edit {}: missing `new_string`", i + 1))?;
+                Ok((old.to_string(), new.to_string(), all(e)))
+            })
+            .collect();
     }
-    if old == new {
-        return Err("old_string and new_string are identical".into());
-    }
-    let count = text.matches(old).count();
-    if count == 0 {
-        return Err("old_string not found in file".into());
-    }
-    if count > 1 && !replace_all {
-        return Err(format!(
-            "old_string matches {count} times; add context to make it unique or set replace_all"
-        ));
-    }
-    Ok(if replace_all {
-        (text.replace(old, new), count)
-    } else {
-        (text.replacen(old, new, 1), 1)
-    })
+    let old = arg_str(args, "old_string").ok_or("missing `old_string`")?;
+    let new = arg_str(args, "new_string").ok_or("missing `new_string`")?;
+    Ok(vec![(old.to_string(), new.to_string(), all(args))])
 }
 
 #[cfg(test)]
@@ -216,22 +247,75 @@ mod tests {
     use super::*;
 
     #[test]
-    fn edit_rules() {
+    fn several_edits_in_one_call() {
+        let dir = std::env::temp_dir().join(format!("ah-edits-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let settings = ah_abi::ToolSettings::default();
+        let ctx = ToolCtx {
+            cwd: &dir,
+            settings: &settings,
+        };
+        WriteFile.run(
+            &json!({"path": "f.rs", "content": "fn a() {\n    one();\n    two();\n}\n"}),
+            &ctx,
+        );
+        let r = EditFile.run(
+            &json!({"path": "f.rs", "edits": [
+                {"old_string": "one();", "new_string": "ONE();"},
+                {"old_string": "two();", "new_string": "TWO();"}
+            ]}),
+            &ctx,
+        );
+        assert!(!r.is_error, "{}", r.output);
+        assert!(r.output.contains("2 edits, 2 replacements"), "{}", r.output);
         assert_eq!(
-            apply_edit("a b a", "b", "c", false).unwrap(),
-            ("a c a".into(), 1)
+            std::fs::read_to_string(dir.join("f.rs")).unwrap(),
+            "fn a() {\n    ONE();\n    TWO();\n}\n"
         );
-        assert!(
-            apply_edit("a b a", "a", "c", false)
-                .unwrap_err()
-                .contains("2 times")
+
+        // A failing edit leaves the file exactly as it was.
+        let r = EditFile.run(
+            &json!({"path": "f.rs", "edits": [
+                {"old_string": "ONE();", "new_string": "1();"},
+                {"old_string": "nope", "new_string": "x"}
+            ]}),
+            &ctx,
         );
+        assert!(r.is_error, "{}", r.output);
+        assert!(r.output.starts_with("edit 2: "), "{}", r.output);
         assert_eq!(
-            apply_edit("a b a", "a", "c", true).unwrap(),
-            ("c b c".into(), 2)
+            std::fs::read_to_string(dir.join("f.rs")).unwrap(),
+            "fn a() {\n    ONE();\n    TWO();\n}\n"
         );
-        assert!(apply_edit("a", "z", "c", false).is_err());
-        assert!(apply_edit("a", "", "c", false).is_err());
+
+        // Indentation the model got wrong is fixed up, and reported.
+        let r = EditFile.run(
+            &json!({"path": "f.rs", "old_string": "ONE();\nTWO();\n", "new_string": "done();\n"}),
+            &ctx,
+        );
+        assert!(!r.is_error, "{}", r.output);
+        assert!(r.output.contains("indentation"), "{}", r.output);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("f.rs")).unwrap(),
+            "fn a() {\n    done();\n}\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn editing_a_missing_file_points_at_write_file() {
+        let dir = std::env::temp_dir().join(format!("ah-missing-{}", std::process::id()));
+        let settings = ah_abi::ToolSettings::default();
+        let ctx = ToolCtx {
+            cwd: &dir,
+            settings: &settings,
+        };
+        let r = EditFile.run(
+            &json!({"path": "nope.txt", "old_string": "a", "new_string": "b"}),
+            &ctx,
+        );
+        assert!(r.is_error);
+        assert!(r.output.contains("write_file"), "{}", r.output);
     }
 
     #[test]

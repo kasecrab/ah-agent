@@ -88,10 +88,24 @@ name in, Enter runs it. Plugins can add commands (`ah docs plugins`).
 | `bash` | `command`, optional `timeout_ms` and `background`; runs in the working directory with `tools.shell`, combined output plus exit code, `tools.bash_timeout_ms` limit, `permissions.deny` applies |
 | `read_file` | `path`, optional `offset` and `limit`; numbered lines |
 | `write_file` | `path`, `content`; creates parent directories |
-| `edit_file` | `path`, `old_string`, `new_string`, optional `replace_all`; `old_string` must match exactly once unless `replace_all` |
+| `edit_file` | `path` and either `old_string`/`new_string`/`replace_all` or `edits` (a list of those, applied in order); each `old_string` must match one place unless `replace_all`; nothing is written unless every edit applies |
 | `jobs` | `action` (`list`, `output`, `wait`, `kill`), `id`, optional `from_line`, `tail`, `timeout_ms`; background commands |
 
 `tools.enabled` and `tools.disabled` choose which are offered.
+
+### Matching in edit_file
+
+`old_string` is looked for exactly first. If that finds nothing, the same text
+is tried ignoring trailing whitespace and carriage returns, then ignoring how
+far the block is indented (the replacement is re-indented to the file), then
+ignoring how much whitespace sits between words. Each step is only accepted
+when it finds a single place, so leniency never edits the wrong one, and the
+result says which step was needed.
+
+When several places match, the error lists their line numbers. When nothing
+matches, the error points at the closest lines in the file and the first line
+that differs, which is usually enough to fix the call without reading the file
+again.
 
 ## Background jobs
 
