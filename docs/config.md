@@ -212,15 +212,25 @@ caps how many run together. Set `parallel = false` to go back to one at a time.
 
 ## [statusline]
 
-| Key | Default |
-|---|---|
-| `format` | `" {favorite} {model} {effort} {modalities} │ ↑{tokens_in} ↓{tokens_out} ${cost} │ {context} │ {cwd} {git}"` |
+| Key | Default | Meaning |
+|---|---|---|
+| `items` | `["favorite", "model", "effort", "modalities", "context", "tokens", "cost", "cwd", "git"]` | what the row shows, left to right, joined with ` · ` |
+| `colors` | `true` | give each item a colour of its own instead of one flat row |
+| `format` | `""` | a template that replaces `items` when set, drawn in one colour |
 
-Placeholders: `{model}`, `{favorite}`, `{effort}`, `{modalities}`,
-`{tokens_in}`, `{tokens_out}`, `{cost}`, `{context}` (`42%`, or `12k ctx`
-when the window is unknown), `{cwd}`, `{git}`, `{plan}` (`2/7` while a plan is
-unfinished), `{plugins}`, `{state}`, `{session}`. A plugin with the `statusline` hook receives the rendered text
-and can replace it.
+Items: `favorite`, `model`, `effort`, `modalities`, `context` (`42%`, or
+`12k ctx` when the window is unknown), `tokens`, `cost`, `plan` (`2/7` while a
+plan is unfinished), `cwd`, `git`, `plugins`, `state`, `session`. `tokens`,
+`cost` and `plugins` stay out of the way while they are zero. `/statusline`
+ticks them off a list for the session; this key keeps a choice for good.
+
+`format` is the way out for a line the items cannot express. Placeholders:
+`{model}`, `{favorite}`, `{effort}`, `{modalities}`, `{tokens_in}`,
+`{tokens_out}`, `{cost}`, `{context}`, `{cwd}`, `{git}`, `{plan}`,
+`{plugins}`, `{state}`, `{session}`.
+
+A plugin with the `statusline` hook receives the rendered text and can replace
+it; what it returns is drawn in one colour.
 
 ## [permissions]
 

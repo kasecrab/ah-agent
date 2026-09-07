@@ -73,6 +73,7 @@ name in, Enter runs it. Plugins can add commands (`ah docs plugins`).
 | `/init` | ask the model to write or refresh `AGENTS.md` (`ah docs instructions`) |
 | `/set KEY VALUE` | override a setting for this run |
 | `/config` | config paths and active layers |
+| `/statusline`, `/status` | tick what the status line shows; Space toggles a row, Esc closes; lasts the session, `statusline.items` in config keeps it |
 | `/reload` | re-read config files and reload plugins |
 | `/plan` | show the task list |
 | `/plugins` | active plugins |

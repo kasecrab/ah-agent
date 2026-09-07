@@ -14,6 +14,7 @@ use ah_core::session::Session;
 use ah_core::settings::{Origin, SettingsStack};
 use ah_core::tools::Registry;
 use serde_json::Value;
+use unicode_width::UnicodeWidthStr;
 
 use crate::Overrides;
 
@@ -549,7 +550,6 @@ pub fn context_label(tokens: u64, window: u64) -> String {
     }
 }
 
-/// Built-in statusline template.
 /// `2/7` while a plan is unfinished, empty otherwise.
 fn plan_label() -> String {
     let (done, total) = ah_core::plan::store().snapshot().counts();
@@ -559,17 +559,142 @@ fn plan_label() -> String {
     format!("{done}/{total}")
 }
 
-pub fn render_status_template(fmt: &str, ctx: &StatusContext) -> String {
-    let short_cwd = {
-        let home = dirs::home_dir()
-            .map(|h| h.display().to_string())
-            .unwrap_or_default();
-        if !home.is_empty() && ctx.cwd.starts_with(&home) {
-            format!("~{}", &ctx.cwd[home.len()..])
-        } else {
-            ctx.cwd.clone()
+/// Everything the status line can show: the name `/statusline` lists, and what
+/// it means. The order is the order `/statusline` offers them in.
+pub const STATUS_ITEMS: &[(&str, &str)] = &[
+    ("favorite", "the favorite this model came from"),
+    ("model", "model id"),
+    ("effort", "reasoning effort"),
+    ("modalities", "what the model reads and writes"),
+    ("context", "how full the context window is"),
+    ("tokens", "tokens sent and received"),
+    ("cost", "what the session has cost"),
+    ("plan", "tasks finished out of the total"),
+    ("cwd", "working directory"),
+    ("git", "git branch"),
+    ("plugins", "how many plugins are loaded"),
+    ("state", "what the turn is doing"),
+    ("session", "session id"),
+];
+
+/// What stands between two items.
+pub const STATUS_SEP: &str = " · ";
+
+/// A piece of the status line: the item that produced it, or `""` for the dots
+/// between items and for the text a custom `format` produced.
+pub struct Segment {
+    pub item: &'static str,
+    pub text: String,
+}
+
+/// `~/src/ah` for a path under the home directory.
+fn short_cwd(cwd: &str) -> String {
+    let home = dirs::home_dir()
+        .map(|h| h.display().to_string())
+        .unwrap_or_default();
+    if !home.is_empty() && cwd.starts_with(&home) {
+        format!("~{}", &cwd[home.len()..])
+    } else {
+        cwd.to_string()
+    }
+}
+
+/// What one item reads, empty when it has nothing to say.
+fn item_text(item: &str, ctx: &StatusContext) -> String {
+    let usage = &ctx.usage;
+    match item {
+        "favorite" => ctx.favorite.clone(),
+        "model" => ctx.model.clone(),
+        "effort" => ctx.effort.clone(),
+        "modalities" => ctx.modalities.clone(),
+        "context" => context_label(ctx.context_tokens, ctx.context_window),
+        "tokens" if usage.prompt_tokens + usage.completion_tokens == 0 => String::new(),
+        "tokens" => format!("↑{} ↓{}", usage.prompt_tokens, usage.completion_tokens),
+        "cost" if usage.cost <= 0.0 => String::new(),
+        "cost" => format!("${:.4}", usage.cost),
+        "plan" => plan_label(),
+        "cwd" => short_cwd(&ctx.cwd),
+        "git" => ctx.git_branch.clone(),
+        "plugins" if ctx.plugins == 0 => String::new(),
+        "plugins" => format!("{} plugins", ctx.plugins),
+        "state" => ctx.state.clone(),
+        "session" => ctx.session_id.clone(),
+        _ => String::new(),
+    }
+}
+
+/// The status line in pieces, so each item can be painted on its own. A custom
+/// `format` skips the items and comes back as a single piece.
+pub fn status_segments(cfg: &StatusLine, ctx: &StatusContext) -> Vec<Segment> {
+    if !cfg.format.is_empty() {
+        return vec![Segment {
+            item: "",
+            text: render_status_template(&cfg.format, ctx),
+        }];
+    }
+    let mut out: Vec<Segment> = Vec::new();
+    for name in &cfg.items {
+        let Some((item, _)) = STATUS_ITEMS.iter().find(|(n, _)| n == name) else {
+            continue;
+        };
+        let text = item_text(item, ctx);
+        if text.is_empty() {
+            continue;
         }
-    };
+        out.push(Segment {
+            item: "",
+            text: if out.is_empty() { " " } else { STATUS_SEP }.to_string(),
+        });
+        out.push(Segment { item, text });
+    }
+    fit(out, ctx.width as usize)
+}
+
+/// The width of the whole row.
+fn row_width(segs: &[Segment]) -> usize {
+    segs.iter().map(|s| s.text.width()).sum()
+}
+
+/// A deep path as its last parts: `…/crates/ah/src`.
+fn tail_path(path: &str, room: usize) -> String {
+    let mut out = String::new();
+    for part in path.rsplit('/').filter(|p| !p.is_empty()) {
+        if out.width() + part.width() + 2 > room {
+            break;
+        }
+        out = format!("/{part}{out}");
+    }
+    format!("…{out}")
+}
+
+/// Keep the row inside the terminal: the path gives up its head first, then
+/// the items at the right end drop off, since the left of the row matters most.
+fn fit(mut segs: Vec<Segment>, width: usize) -> Vec<Segment> {
+    if width == 0 || row_width(&segs) <= width {
+        return segs;
+    }
+    if let Some(at) = segs.iter().position(|s| s.item == "cwd") {
+        let over = row_width(&segs) - width;
+        let room = segs[at].text.width().saturating_sub(over);
+        segs[at].text = tail_path(&segs[at].text, room);
+    }
+    while row_width(&segs) > width && segs.len() > 2 {
+        segs.truncate(segs.len() - 2);
+    }
+    segs
+}
+
+/// The same pieces, joined, for plugins and for anything that wants the text.
+pub fn status_text(cfg: &StatusLine, ctx: &StatusContext) -> String {
+    status_segments(cfg, ctx)
+        .into_iter()
+        .map(|s| s.text)
+        .collect()
+}
+
+/// A custom `statusline.format`, with its placeholders filled in.
+pub fn render_status_template(fmt: &str, ctx: &StatusContext) -> String {
+    let short_cwd = short_cwd(&ctx.cwd);
     let out = fmt
         .replace("{model}", &ctx.model)
         .replace("{favorite}", &ctx.favorite)
@@ -620,6 +745,99 @@ mod tests {
         assert_eq!(context_label(4000, 8000), "50%");
         assert_eq!(context_label(49, 0), "49 ctx");
         assert_eq!(context_label(12_345, 0), "12k ctx");
+    }
+
+    fn ctx() -> StatusContext {
+        StatusContext {
+            model: "mock/model".into(),
+            usage: Usage {
+                prompt_tokens: 42,
+                completion_tokens: 7,
+                cost: 0.0042,
+                ..Default::default()
+            },
+            cwd: "/tmp/work".into(),
+            git_branch: "main".into(),
+            plugins: 0,
+            state: "idle".into(),
+            session_id: "s1".into(),
+            width: 80,
+            favorite: "★fast".into(),
+            effort: "high".into(),
+            context_tokens: 4000,
+            context_window: 8000,
+            modalities: "T→T".into(),
+            rendered: String::new(),
+        }
+    }
+
+    #[test]
+    fn the_items_are_joined_with_dots_and_keep_their_names() {
+        let cfg = StatusLine::default();
+        let segs = status_segments(&cfg, &ctx());
+        let named: Vec<&str> = segs
+            .iter()
+            .filter(|s| !s.item.is_empty())
+            .map(|s| s.item)
+            .collect();
+        assert_eq!(
+            named,
+            [
+                "favorite",
+                "model",
+                "effort",
+                "modalities",
+                "context",
+                "tokens",
+                "cost",
+                "cwd",
+                "git"
+            ]
+        );
+        assert_eq!(
+            status_text(&cfg, &ctx()),
+            " ★fast · mock/model · high · T→T · 50% · ↑42 ↓7 · $0.0042 · /tmp/work · main"
+        );
+    }
+
+    #[test]
+    fn an_item_with_nothing_to_say_takes_its_dot_with_it() {
+        let cfg = StatusLine {
+            items: ["model", "cost", "git"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            ..Default::default()
+        };
+        let mut c = ctx();
+        c.usage.cost = 0.0;
+        assert_eq!(status_text(&cfg, &c), " mock/model · main");
+    }
+
+    #[test]
+    fn a_narrow_terminal_shortens_the_path_then_drops_the_tail() {
+        let mut c = ctx();
+        c.cwd = "/home/me/src/agent_harness/crates/ah".into();
+        c.width = 80;
+        let text = status_text(&StatusLine::default(), &c);
+        assert!(text.width() <= 80, "{text:?}");
+        assert!(text.ends_with("…/crates/ah · main"), "{text:?}");
+        // Narrower still: what is left of the path goes, and the items with it.
+        c.width = 20;
+        let text = status_text(&StatusLine::default(), &c);
+        assert_eq!(text, " ★fast · mock/model");
+    }
+
+    #[test]
+    fn a_custom_format_is_used_whole() {
+        let cfg = StatusLine {
+            format: "{model} @ {cwd}".into(),
+            ..Default::default()
+        };
+        let segs = status_segments(&cfg, &ctx());
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0].text, "mock/model @ /tmp/work");
+        assert!(segs[0].item.is_empty(), "a template has no items to colour");
     }
 
     #[test]

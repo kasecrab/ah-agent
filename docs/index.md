@@ -65,7 +65,7 @@ prints the resolved locations.
 | keep a server or long build running | `bash` with `background`, commands page |
 | tune compaction | `[context]` in config |
 | cut input cost on long sessions | `cache` in `[context]`, config page |
-| change the status bar | `statusline.format` in config, or a `statusline` plugin hook |
+| change the status bar | `/statusline`, `statusline.items` in config, or a `statusline` plugin hook |
 | add a tool, slash command, policy or theme | plugins page |
 | install a plugin from a git repository | `ah plugin install URL [DIR]`, plugins page |
 | save a prompt for reuse | skills page |

@@ -515,17 +515,39 @@ impl Default for PluginSettings {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StatusLine {
-    /// Template. Placeholders: `{model} {favorite} {effort} {modalities} {tokens_in}
-    /// {tokens_out} {cost} {context} {cwd} {git} {plugins} {state} {session}`.
+    /// What the row shows, left to right, separated by dots. `/statusline`
+    /// edits this. Names: `favorite`, `model`, `effort`, `modalities`,
+    /// `context`, `tokens`, `cost`, `plan`, `cwd`, `git`, `plugins`, `state`,
+    /// `session`.
+    pub items: Vec<String>,
+    /// A template that replaces `items` when set, drawn in one colour.
+    /// Placeholders: `{model} {favorite} {effort} {modalities} {tokens_in}
+    /// {tokens_out} {cost} {context} {plan} {cwd} {git} {plugins} {state}
+    /// {session}`.
     pub format: String,
+    /// Give each item a colour of its own instead of one flat row.
+    pub colors: bool,
 }
 
 impl Default for StatusLine {
     fn default() -> Self {
         Self {
-            format: String::from(
-                " {favorite} {model} {effort} {modalities} │ ↑{tokens_in} ↓{tokens_out} ${cost} │ {context} │ {cwd} {git}",
-            ),
+            items: [
+                "favorite",
+                "model",
+                "effort",
+                "modalities",
+                "context",
+                "tokens",
+                "cost",
+                "cwd",
+                "git",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+            format: String::new(),
+            colors: true,
         }
     }
 }

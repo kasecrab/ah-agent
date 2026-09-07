@@ -38,6 +38,8 @@ pub enum Kind {
     },
     /// Background shell jobs. Enter opens the output view.
     Jobs,
+    /// What the status line shows. Space or Enter turns a row on or off.
+    Statusline,
     /// List returned by a plugin slash command. The command runs again with
     /// stage `pick` on Enter and, when `preview` is set, with stage
     /// `preview` as the cursor moves.
@@ -124,6 +126,9 @@ impl Picker {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => return Action::Close,
             (KeyCode::Enter, _) => return Action::Accept,
             (KeyCode::Delete, _) => return Action::Key('d'),
+            (KeyCode::Char(' '), _) if matches!(self.kind, Kind::Statusline) => {
+                return Action::Key(' ');
+            }
             (KeyCode::Char('j'), _) if self.hotkeys => {
                 self.selected = (self.selected + 1).min(last)
             }
@@ -175,10 +180,11 @@ impl Picker {
             self.kind,
             Kind::Effort { .. } | Kind::Name { .. } | Kind::SessionName | Kind::SkillArgs { .. }
         );
-        let plugin = matches!(self.kind, Kind::Plugin { .. });
+        // Boxes sized to their rows, rather than to the screen.
+        let snug = matches!(self.kind, Kind::Plugin { .. } | Kind::Statusline);
         let width = if compact {
             48.min(area.width)
-        } else if plugin {
+        } else if snug {
             let widest = self
                 .rows
                 .iter()
@@ -189,7 +195,7 @@ impl Picker {
         } else {
             (area.width * 9 / 10).clamp(40, 110).min(area.width)
         };
-        let height = if compact || self.hotkeys || plugin {
+        let height = if compact || self.hotkeys || snug {
             (self.rows.len() as u16 + 4).clamp(5, area.height)
         } else {
             (area.height * 4 / 5).clamp(8, 40).min(area.height)

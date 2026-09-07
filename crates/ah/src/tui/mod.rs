@@ -37,6 +37,8 @@ use picker::{Action, Kind, Picker, Row};
 
 /// Row id of the "+ new favorite" entry in the favorites picker.
 const NEW_FAVORITE: &str = "\0new";
+/// The `/statusline` row that switches the item colours on and off.
+const COLORS: &str = "colors";
 use theme::Palette;
 use transcript::{Block, Entry, View};
 use usage::Stats;
@@ -90,6 +92,7 @@ const COMMANDS: &[(&str, &str, bool)] = &[
     ("session", "show session id and file", false),
     ("skills", "run a saved prompt: /skills [name] [args]", true),
     ("set", "override a setting: /set theme.accent magenta", true),
+    ("statusline", "choose what the status line shows", false),
     ("tools", "list tools", false),
     ("usage", "session cost, account balance, top models", false),
     ("yolo", "auto-approve tool calls", false),
@@ -808,7 +811,7 @@ impl App {
             },
             rendered: String::new(),
         };
-        ctx.rendered = app::render_status_template(&self.settings().statusline.format, &ctx);
+        ctx.rendered = app::status_text(&self.settings().statusline, &ctx);
         ctx
     }
 
@@ -1305,6 +1308,60 @@ impl App {
         self.dirty = true;
     }
 
+    /// A row per status item, ticked when the row is on show.
+    fn statusline_rows(&self) -> Vec<Row> {
+        let cfg = &self.settings().statusline;
+        let dim = self.pal.dim();
+        let tick = |on: bool| if on { "[x]" } else { "[ ]" };
+        let row = |id: &str, on: bool, about: &str| Row {
+            style: None,
+            id: id.to_string(),
+            search: format!("{id} {about}"),
+            label: format!("{} {id}", tick(on)),
+            cols: vec![(format!("{about:<40}"), dim)],
+        };
+        let mut rows = vec![row(
+            COLORS,
+            cfg.colors,
+            "give each item a colour of its own",
+        )];
+        rows.extend(
+            app::STATUS_ITEMS
+                .iter()
+                .map(|(id, about)| row(id, cfg.items.iter().any(|i| i == id), about)),
+        );
+        rows
+    }
+
+    fn open_statusline_picker(&mut self) {
+        let mut p = Picker::new(Kind::Statusline, "status line", "", self.statusline_rows());
+        p.hint = if self.settings().statusline.format.is_empty() {
+            "Space toggles · Esc done".into()
+        } else {
+            "statusline.format is set, and takes the place of these items".into()
+        };
+        self.picker = Some(p);
+        self.dirty = true;
+    }
+
+    /// Turn one status item, or the colours, on or off, and redraw the rows.
+    fn toggle_status_item(&mut self, id: &str) {
+        let cfg = self.settings().statusline.clone();
+        let patch = if id == COLORS {
+            serde_json::json!({"statusline": {"colors": !cfg.colors}})
+        } else {
+            serde_json::json!({"statusline": {"items": toggled(&cfg.items, id)}})
+        };
+        self.apply_patch(Origin::Runtime("slash".into()), patch);
+        let rows = self.statusline_rows();
+        if let Some(p) = self.picker.as_mut() {
+            let at = p.selected;
+            p.rows = rows;
+            p.refilter();
+            p.selected = at.min(p.results.len().saturating_sub(1));
+        }
+    }
+
     fn open_name_picker(&mut self, rename: Option<String>) {
         let title = match &rename {
             Some(k) => format!("rename ★{k}"),
@@ -1501,6 +1558,13 @@ impl App {
                             self.open_job_view(id);
                         }
                     }
+                    // Enter toggles a row and leaves the list open, like Space.
+                    Kind::Statusline => {
+                        if let Some(id) = chosen {
+                            self.picker = Some(p);
+                            self.toggle_status_item(&id);
+                        }
+                    }
                     Kind::SessionName => self.rename_session(&query),
                     Kind::Skills => {
                         if let Some(name) = chosen {
@@ -1659,6 +1723,12 @@ impl App {
         };
         match (&p.kind, c) {
             (Kind::Jobs, 'k') => self.kill_selected_job(),
+            (Kind::Statusline, ' ') => {
+                let Some(id) = p.current().map(|r| r.id.clone()) else {
+                    return;
+                };
+                self.toggle_status_item(&id);
+            }
             (Kind::Model { favorite }, 'r') => {
                 let (q, fav) = (p.query.clone(), favorite.clone());
                 self.open_model_picker(&q, fav, true);
@@ -2782,6 +2852,7 @@ impl App {
                 }
             }
             "init" => self.init_instructions(),
+            "statusline" | "status" => self.open_statusline_picker(),
             "plan" => self.open_plan_view(),
             "usage" => {
                 self.usage_pane = Some(usage::Pane::new());
@@ -3293,13 +3364,77 @@ impl App {
 
     fn draw_status(&self, f: &mut Frame, area: Rect, pal: &Palette) {
         let ctx = self.status_ctx();
-        let text = self.plugin_status.clone().unwrap_or(ctx.rendered);
-        let style = Style::default().fg(pal.status_fg).bg(pal.status_bg);
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled(text, style))).style(style),
-            area,
-        );
+        let plain = Style::default().fg(pal.status_fg).bg(pal.status_bg);
+        let spans = match &self.plugin_status {
+            // A plugin hands back one string; it says nothing about colour.
+            Some(text) => vec![Span::styled(format!(" {}", text.trim_start()), plain)],
+            None => {
+                let cfg = &self.settings().statusline;
+                // A template says nothing about which item is which, so it
+                // stays one colour whatever `colors` says.
+                let colors = cfg.colors && cfg.format.is_empty();
+                app::status_segments(cfg, &ctx)
+                    .into_iter()
+                    .map(|s| {
+                        let style = match colors {
+                            true => status_style(s.item, &ctx, pal).bg(pal.status_bg),
+                            false => plain,
+                        };
+                        Span::styled(s.text, style)
+                    })
+                    .collect()
+            }
+        };
+        f.render_widget(Paragraph::new(Line::from(spans)).style(plain), area);
     }
+}
+
+/// `items` without `id` when it is already there, else with it put back where
+/// `STATUS_ITEMS` says it belongs among the ones on show.
+fn toggled(items: &[String], id: &str) -> Vec<String> {
+    let mut items = items.to_vec();
+    if let Some(at) = items.iter().position(|i| i == id) {
+        items.remove(at);
+        return items;
+    }
+    let rank = |n: &str| {
+        app::STATUS_ITEMS
+            .iter()
+            .position(|(x, _)| *x == n)
+            .unwrap_or(usize::MAX)
+    };
+    let at = items
+        .iter()
+        .position(|i| rank(i) > rank(id))
+        .unwrap_or(items.len());
+    items.insert(at, id.to_string());
+    items
+}
+
+/// The colour of one status item. The model leads, the numbers stay quiet, and
+/// the context fills up from calm to loud as it runs out.
+fn status_style(item: &str, ctx: &StatusContext, pal: &Palette) -> Style {
+    let color = match item {
+        "favorite" => return pal.bold(pal.accent),
+        "model" => return pal.bold(pal.heading),
+        "effort" => pal.tool,
+        "modalities" => pal.dim,
+        "context" => match ctx.context_window {
+            0 => pal.dim,
+            w => match ctx.context_tokens.saturating_mul(100) / w.max(1) {
+                0..=69 => pal.accent,
+                70..=89 => pal.tool,
+                _ => pal.error,
+            },
+        },
+        "cwd" => pal.link,
+        "git" => pal.user,
+        "plan" => pal.accent,
+        // The dots between items, which nobody should read.
+        "" => pal.dim,
+        _ => pal.status_fg,
+    };
+    Style::default().fg(color)
 }
 
 /// Reverse the cells the selection covers, in reading order, and return their
@@ -3370,6 +3505,22 @@ fn highlight_selection(f: &mut Frame, area: Rect, sel: Selection) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_status_item_comes_back_where_it_belongs() {
+        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let items = v(&["model", "context", "cwd"]);
+        assert_eq!(toggled(&items, "context"), v(&["model", "cwd"]));
+        // `effort` sits between `model` and `context` in STATUS_ITEMS.
+        assert_eq!(
+            toggled(&items, "effort"),
+            v(&["model", "effort", "context", "cwd"])
+        );
+        assert_eq!(
+            toggled(&items, "session"),
+            v(&["model", "context", "cwd", "session"])
+        );
+    }
 
     #[test]
     fn the_window_is_named_after_the_work() {

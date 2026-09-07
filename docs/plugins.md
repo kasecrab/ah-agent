@@ -239,7 +239,7 @@ means "no change" and is never an error.
 `completion_tokens`, `cost`), `cwd`, `git_branch`, `plugins` (count), `state`
 (`idle`, `thinking`, `streaming`, `tool:<name>`), `session_id`, `width`,
 `favorite`, `effort`, `context_tokens`, `context_window`, `modalities`
-(`TI→T`), and `rendered`, the text the built-in `statusline.format` produced,
+(`TI→T`), and `rendered`, the text the built-in `statusline.items` produced,
 so a plugin can decorate instead of replace.
 
 ## Host calls
