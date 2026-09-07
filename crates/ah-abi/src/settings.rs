@@ -290,6 +290,11 @@ pub struct Layout {
     pub code_highlight: bool,
     /// Show the plan summary above the input while tasks are open.
     pub show_plan: bool,
+    /// Terminal window title, so several ah windows can be told apart.
+    /// `{task}` is the session name, or the first message of the session, or
+    /// the working directory. `{cwd}`, `{model}` and `{session}` also work.
+    /// Empty leaves the title alone.
+    pub window_title: String,
 }
 
 impl Default for Layout {
@@ -315,6 +320,7 @@ impl Default for Layout {
             markdown: true,
             code_highlight: true,
             show_plan: true,
+            window_title: String::from("{task} · ah"),
         }
     }
 }

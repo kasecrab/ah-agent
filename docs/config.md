@@ -77,6 +77,11 @@ Use the provided tools to inspect and change files and run commands. Prefer read
 Work that takes more than a couple of steps goes in the plan tool first: set the tasks, mark one started before you work on it and done as soon as it is finished, and give a task `needs` when it cannot start until another one is done. Skip it for a single edit or question.
 ```
 
+`window_title` names the terminal window after the work, so a row of ah
+windows can be told apart. `{task}` is the session name when it has one
+(`/rename`), otherwise the first message of the session, otherwise the
+working directory. The previous title is put back when ah exits.
+
 ## [theme]
 
 Colours accept names (`red`, `bright_blue`, `dark_gray`, `gray`, `white`,
@@ -152,6 +157,7 @@ theme Claude Code uses, so both look the same in the same terminal.
 | `markdown` | `true` | render assistant text as markdown |
 | `code_highlight` | `true` | highlight fenced code |
 | `show_plan` | `true` | plan summary above the input while tasks are open |
+| `window_title` | `"{task} · ah"` | terminal window title; `{task}`, `{cwd}`, `{model}`, `{session}`; empty leaves the title alone |
 
 ## [keys]
 

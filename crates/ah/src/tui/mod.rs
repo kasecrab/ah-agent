@@ -122,6 +122,30 @@ enum Grain {
 /// Two clicks count as a double click within this long, in the same place.
 const DOUBLE_CLICK_MS: u128 = 400;
 
+/// The window title for a session: its name, else what it was first asked to
+/// do, else where it is running.
+fn title_text(fmt: &str, task: &str, cwd: &str, model: &str, session: &str) -> String {
+    let dir = cwd.rsplit('/').find(|p| !p.is_empty()).unwrap_or(cwd);
+    let task = if task.is_empty() { dir } else { task };
+    fmt.replace("{task}", task)
+        .replace("{cwd}", dir)
+        .replace("{model}", model)
+        .replace("{session}", session)
+        .trim()
+        .to_string()
+}
+
+/// The first line of a message, short enough for a title bar.
+fn task_from(text: &str) -> String {
+    let line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    let line = line.trim();
+    if line.chars().count() > 40 {
+        format!("{}…", line.chars().take(40).collect::<String>().trim_end())
+    } else {
+        line.to_string()
+    }
+}
+
 /// How many clicks have stacked up in the same spot, counting this one.
 fn click_repeat(
     last: Option<(std::time::Instant, (u16, u16), u8)>,
@@ -268,6 +292,9 @@ struct App {
     stats: Stats,
     /// When the current reply started streaming reasoning.
     think_start: Option<Instant>,
+    /// What this window is working on, for the terminal title.
+    task: String,
+    title: String,
     sel: Option<Selection>,
     /// When and where the last left click landed, and how many have stacked
     /// up there, for double and triple clicks.
@@ -404,6 +431,8 @@ fn run_inner(
         usage_pane: None,
         stats: Stats::default(),
         think_start: None,
+        task: String::new(),
+        title: String::new(),
         sel: None,
         last_click: None,
         copy_pending: false,
@@ -435,6 +464,12 @@ fn run_inner(
             "no API key. Run `ah login` (or set OPENROUTER_API_KEY), then /reload.".into(),
         ));
     }
+    app.task = resumed
+        .iter()
+        .find(|m| m.role == Role::User)
+        .map(|m| task_from(&m.content))
+        .unwrap_or_default();
+    app.set_title();
     app.load_history(&resumed);
     if app.entries.is_empty() {
         app.push(Block::Notice(format!(
@@ -527,6 +562,11 @@ fn enable_extras(settings: &Settings) {
     };
     let mut out = std::io::stdout();
     let _ = crossterm::execute!(out, EnableBracketedPaste);
+    if !settings.layout.window_title.is_empty() {
+        // xterm's title stack: keep whatever the terminal had, put it back on exit
+        let _ = std::io::Write::write_all(&mut out, b"\x1b[22;2t");
+        let _ = std::io::Write::flush(&mut out);
+    }
     if settings.layout.mouse {
         let _ = crossterm::execute!(out, EnableMouseCapture);
     }
@@ -547,6 +587,7 @@ fn disable_extras() {
         DisableBracketedPaste, DisableMouseCapture, PopKeyboardEnhancementFlags,
     };
     let mut out = std::io::stdout();
+    let _ = std::io::Write::write_all(&mut out, b"\x1b[23;2t");
     let _ = crossterm::execute!(out, PopKeyboardEnhancementFlags);
     let _ = crossterm::execute!(out, DisableMouseCapture);
     let _ = crossterm::execute!(out, DisableBracketedPaste);
@@ -809,6 +850,10 @@ impl App {
                 self.queue.push_back((text, images));
             }
             return;
+        }
+        if self.task.is_empty() {
+            self.task = task_from(&text);
+            self.set_title();
         }
         self.push(Block::User(user_display(&text, images.len())));
         self.follow = true;
@@ -1978,6 +2023,7 @@ impl App {
             }
             UiEvent::Renamed(name) => {
                 self.session_name = name;
+                self.set_title();
                 let s = match &self.session_name {
                     Some(n) => format!("session named \u{201c}{n}\u{201d}"),
                     None => "session name removed".into(),
@@ -1992,6 +2038,12 @@ impl App {
                 self.session_id = id;
                 self.session_name = name;
                 self.follow = true;
+                self.task = messages
+                    .iter()
+                    .find(|m| m.role == Role::User)
+                    .map(|m| task_from(&m.content))
+                    .unwrap_or_default();
+                self.set_title();
                 self.load_history(&messages);
                 self.request_status();
                 self.dirty = true;
@@ -2211,6 +2263,31 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Name this window after what it is doing, so a row of terminals can be
+    /// told apart. Only written when it changes.
+    fn set_title(&mut self) {
+        let fmt = self.settings().layout.window_title.clone();
+        if fmt.is_empty() {
+            return;
+        }
+        let task = match &self.session_name {
+            Some(n) => n.clone(),
+            None => self.task.clone(),
+        };
+        let title = title_text(
+            &fmt,
+            &task,
+            &self.cwd,
+            &self.settings().model.id,
+            &self.session_id,
+        );
+        if title == self.title {
+            return;
+        }
+        self.title = title.clone();
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::SetTitle(title));
     }
 
     /// How much of the screen this click takes: one more click in the same
@@ -2727,6 +2804,8 @@ impl App {
             }
             "clear" => {
                 self.entries.clear();
+                self.task.clear();
+                self.set_title();
                 self.usage = Usage::default();
                 self.stats = Stats::default();
                 self.context_tokens = 0;
@@ -3252,6 +3331,37 @@ fn highlight_selection(f: &mut Frame, area: Rect, sel: Selection) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_window_is_named_after_the_work() {
+        let f = "{task} · ah";
+        assert_eq!(
+            title_text(f, "fix the parser", "/home/me/proj", "m", "s1"),
+            "fix the parser · ah"
+        );
+        // No name and no message yet: the directory says which window this is.
+        assert_eq!(title_text(f, "", "/home/me/proj", "m", "s1"), "proj · ah");
+        assert_eq!(
+            title_text(
+                "{cwd} {model} {session}",
+                "t",
+                "/home/me/proj/",
+                "gpt",
+                "s1"
+            ),
+            "proj gpt s1"
+        );
+    }
+
+    #[test]
+    fn a_task_name_is_one_short_line() {
+        assert_eq!(task_from("  fix the parser\nand tests"), "fix the parser");
+        assert_eq!(task_from("\n\nsecond line"), "second line");
+        let long = "a".repeat(60);
+        let cut = task_from(&long);
+        assert_eq!(cut.chars().count(), 41);
+        assert!(cut.ends_with('…'));
+    }
 
     #[test]
     fn clicks_stack_into_word_and_row_selections() {
