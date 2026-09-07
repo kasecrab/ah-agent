@@ -192,6 +192,12 @@ fn main() {
             1
         }
     };
+    // Background jobs are children of this process; none outlives it.
+    let running = ah_core::jobs::table().running();
+    if running > 0 {
+        eprintln!("ah: stopping {running} background job(s)");
+        ah_core::jobs::table().shutdown();
+    }
     std::process::exit(code);
 }
 

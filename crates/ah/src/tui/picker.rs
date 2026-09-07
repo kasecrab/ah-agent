@@ -36,6 +36,8 @@ pub enum Kind {
     SkillArgs {
         name: String,
     },
+    /// Background shell jobs. Enter opens the output view.
+    Jobs,
     /// List returned by a plugin slash command. The command runs again with
     /// stage `pick` on Enter and, when `preview` is set, with stage
     /// `preview` as the cursor moves.

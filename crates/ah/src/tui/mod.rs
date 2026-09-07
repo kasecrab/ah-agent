@@ -2,6 +2,7 @@
 
 mod highlight;
 mod input;
+mod jobs;
 mod keys;
 mod markdown;
 mod picker;
@@ -40,6 +41,8 @@ use usage::Stats;
 
 enum Msg {
     Input(Event),
+    /// A background job printed something or ended.
+    Jobs,
     Engine(UiEvent),
     Models(Result<Vec<ModelInfo>, String>),
     Usage(Result<usage::Remote, String>),
@@ -216,6 +219,7 @@ struct App {
     session_name: Option<String>,
     completion: Option<Completion>,
     picker: Option<Picker>,
+    job_view: Option<jobs::View>,
     usage_pane: Option<usage::Pane>,
     stats: Stats,
     /// When the current reply started streaming reasoning.
@@ -348,6 +352,7 @@ fn run_inner(
         session_name,
         completion: None,
         picker: None,
+        job_view: None,
         usage_pane: None,
         stats: Stats::default(),
         think_start: None,
@@ -405,6 +410,14 @@ fn run_inner(
                 }
             })
             .expect("spawn input");
+    }
+
+    // Background jobs wake the loop when they print or end; nothing polls.
+    {
+        let ui_tx = ui_tx.clone();
+        ah_core::jobs::table().set_waker(Box::new(move || {
+            let _ = ui_tx.send(Msg::Jobs);
+        }));
     }
 
     enable_extras(&settings);
@@ -804,7 +817,8 @@ impl App {
         loop {
             if self.dirty {
                 let throttle = Duration::from_millis(self.settings().layout.stream_redraw_ms);
-                if !self.busy || self.last_draw.elapsed() >= throttle {
+                let stream = self.busy || self.job_view.is_some();
+                if !stream || self.last_draw.elapsed() >= throttle {
                     terminal.draw(|f| self.draw(f))?;
                     self.last_draw = Instant::now();
                     self.dirty = false;
@@ -813,9 +827,11 @@ impl App {
             if self.quit {
                 return Ok(());
             }
-            let msg = if self.busy || self.dirty {
+            let msg = if self.busy || self.dirty || self.job_view.is_some() {
                 let wait = if self.dirty {
                     Duration::from_millis(self.settings().layout.stream_redraw_ms.max(1))
+                } else if self.job_view.is_some() && !self.busy {
+                    Duration::from_millis(250)
                 } else {
                     Duration::from_millis(self.settings().layout.spinner_ms.max(20))
                 };
@@ -824,6 +840,10 @@ impl App {
                     Err(RecvTimeoutError::Timeout) => {
                         if self.busy {
                             self.spinner_i = self.spinner_i.wrapping_add(1);
+                            self.dirty = true;
+                        }
+                        // Keep the clock in the job view moving.
+                        if self.job_view.is_some() {
                             self.dirty = true;
                         }
                         None
@@ -850,6 +870,7 @@ impl App {
                 self.handle_input(ev);
                 self.update_completion();
             }
+            Msg::Jobs => self.jobs_changed(),
             Msg::Engine(ev) => self.handle_engine(ev),
             Msg::Usage(res) => {
                 if let Some(p) = self.usage_pane.as_mut() {
@@ -1358,6 +1379,11 @@ impl App {
                         Some(name) => self.use_favorite(name),
                         None => {}
                     },
+                    Kind::Jobs => {
+                        if let Some(id) = chosen.and_then(|c| c.parse().ok()) {
+                            self.open_job_view(id);
+                        }
+                    }
                     Kind::SessionName => self.rename_session(&query),
                     Kind::Skills => {
                         if let Some(name) = chosen {
@@ -1515,6 +1541,7 @@ impl App {
             return;
         };
         match (&p.kind, c) {
+            (Kind::Jobs, 'k') => self.kill_selected_job(),
             (Kind::Model { favorite }, 'r') => {
                 let (q, fav) = (p.query.clone(), favorite.clone());
                 self.open_model_picker(&q, fav, true);
@@ -2129,6 +2156,105 @@ impl App {
         }
     }
 
+    /// A job printed something or ended: tell the user, refresh what is open.
+    fn jobs_changed(&mut self) {
+        let table = ah_core::jobs::table();
+        table.caught_up();
+        for n in table.notices(ah_core::jobs::Audience::Ui) {
+            self.push(Block::Notice(n));
+        }
+        if self.job_view.is_some() {
+            self.dirty = true;
+        }
+        if matches!(self.picker.as_ref().map(|p| &p.kind), Some(Kind::Jobs)) {
+            self.refresh_jobs_picker();
+        }
+    }
+
+    fn open_jobs_picker(&mut self) {
+        let all = ah_core::jobs::table().all();
+        if all.is_empty() {
+            self.push(Block::Notice(
+                "no background jobs · a long command becomes one when it outruns its timeout"
+                    .into(),
+            ));
+            return;
+        }
+        let rows = jobs::rows(&all, &self.pal);
+        let mut p = Picker::new(Kind::Jobs, "background jobs", "", rows);
+        p.hint = "Enter opens · Ctrl-K stops · Esc closes".into();
+        self.picker = Some(p);
+        self.dirty = true;
+    }
+
+    /// Rebuild the rows of an open job picker, keeping query and cursor.
+    fn refresh_jobs_picker(&mut self) {
+        let rows = jobs::rows(&ah_core::jobs::table().all(), &self.pal);
+        if let Some(p) = self.picker.as_mut() {
+            let selected = p.selected;
+            p.rows = rows;
+            p.refilter();
+            p.selected = selected.min(p.results.len().saturating_sub(1));
+        }
+        self.dirty = true;
+    }
+
+    fn open_job_view(&mut self, id: u32) {
+        self.picker = None;
+        self.job_view = Some(jobs::View::new(id));
+        self.dirty = true;
+    }
+
+    /// Stop the job under the cursor in the job picker.
+    fn kill_selected_job(&mut self) {
+        let id: Option<u32> = self
+            .picker
+            .as_ref()
+            .and_then(|p| p.current())
+            .and_then(|r| r.id.parse().ok());
+        if let Some(id) = id {
+            self.kill_job(id);
+            self.refresh_jobs_picker();
+        }
+    }
+
+    fn kill_job(&mut self, id: u32) {
+        let grace = self.settings().tools.job_kill_grace_ms;
+        if let Some(job) = ah_core::jobs::table().get(id) {
+            job.kill(Duration::from_millis(grace));
+            self.push(Block::Notice(format!("stopping job {id}")));
+        }
+    }
+
+    fn job_view_key(&mut self, k: KeyEvent) {
+        let Some(view) = self.job_view.as_mut() else {
+            return;
+        };
+        let id = view.id;
+        let Some(job) = ah_core::jobs::table().get(id) else {
+            self.job_view = None;
+            return;
+        };
+        let (total, _) = job.counts();
+        let page = (self.size.1 as usize * 4 / 5).saturating_sub(4).max(1);
+        match (k.code, k.modifiers) {
+            (KeyCode::Esc, _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                self.job_view = None;
+                self.open_jobs_picker();
+            }
+            (KeyCode::Char('q'), _) => self.job_view = None,
+            (KeyCode::Char('k'), _) => self.kill_job(id),
+            (KeyCode::Up, _) => view.scroll(-1, total, page),
+            (KeyCode::Down, _) => view.scroll(1, total, page),
+            (KeyCode::PageUp, _) => view.scroll(-(page as i64), total, page),
+            (KeyCode::PageDown, _) => view.scroll(page as i64, total, page),
+            (KeyCode::Home, _) => view.scroll(-(total as i64), total, page),
+            (KeyCode::End, _) => view.scroll(total as i64, total, page),
+            _ => {}
+        }
+        self.dirty = true;
+    }
+
     fn scroll_by(&mut self, delta: isize) {
         let max = self.total_lines.saturating_sub(self.viewport_lines);
         let cur = if self.follow { max } else { self.scroll };
@@ -2155,6 +2281,10 @@ impl App {
         self.sel = None;
         let b = self.binds.clone();
 
+        if self.job_view.is_some() {
+            self.job_view_key(k);
+            return;
+        }
         if self.usage_pane.is_some() {
             match (k.code, k.modifiers) {
                 (KeyCode::Esc | KeyCode::Char('q'), _)
@@ -2284,6 +2414,8 @@ impl App {
             self.editor.home();
         } else if keys::any_match(&b.line_end, &k) {
             self.editor.end();
+        } else if keys::any_match(&b.history_next, &k) && self.editor.is_empty() {
+            self.open_jobs_picker();
         } else if keys::any_match(&b.history_prev, &k)
             && self.editor.is_empty()
             && !self.queue.is_empty()
@@ -2395,7 +2527,7 @@ impl App {
                 for (p, c) in &self.plugin_commands {
                     s.push_str(&format!("\n  /{:<10} {} ({p})", c.name, c.description));
                 }
-                s.push_str("\nkeys: Enter send · Shift/Alt-Enter newline · Esc cancel · Up/Down prompt history · PgUp/PgDn scroll · Shift-Tab next favorite · Ctrl-V paste image · Ctrl-T tool output · Ctrl-R thinking · Ctrl-C quit");
+                s.push_str("\nkeys: Down (empty input) background jobs · Enter send · Shift/Alt-Enter newline · Esc cancel · Up/Down prompt history · PgUp/PgDn scroll · Shift-Tab next favorite · Ctrl-V paste image · Ctrl-T tool output · Ctrl-R thinking · Ctrl-C quit");
                 self.push(Block::Notice(s));
             }
             "model" | "models" => {
@@ -2733,6 +2865,11 @@ impl App {
         }
         if let Some(p) = &self.picker {
             p.draw(f, area, &pal);
+        }
+        if let Some(v) = self.job_view.as_mut()
+            && let Some(job) = ah_core::jobs::table().get(v.id)
+        {
+            v.draw(f, area, &pal, &job);
         }
         if let Some(u) = &self.usage_pane {
             let icons = |id: &str| self.icons_for(id);

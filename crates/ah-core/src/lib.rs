@@ -6,6 +6,7 @@ pub mod clipboard;
 pub mod docs;
 pub mod error;
 pub mod instructions;
+pub mod jobs;
 pub mod log;
 pub mod models;
 pub mod paths;

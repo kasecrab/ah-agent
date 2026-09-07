@@ -390,12 +390,21 @@ pub struct ToolSettings {
     /// that equals it or starts with it followed by a space, `*` matches any
     /// continuation. A command that redirects or substitutes is never parallel.
     pub parallel_bash: Vec<String>,
+    /// A foreground command that outruns its timeout keeps running as a
+    /// background job instead of being killed.
+    pub background_on_timeout: bool,
+    /// Output kept per job: the first third of it, then the most recent lines.
+    pub job_buffer_bytes: usize,
+    /// Time a job gets to stop politely before it is killed outright.
+    pub job_kill_grace_ms: u64,
+    /// Default limit for a `jobs` wait, when the model does not give one.
+    pub job_wait_ms: u64,
 }
 
 impl Default for ToolSettings {
     fn default() -> Self {
         Self {
-            enabled: ["bash", "read_file", "write_file", "edit_file"]
+            enabled: ["bash", "read_file", "write_file", "edit_file", "jobs"]
                 .iter()
                 .map(|s| String::from(*s))
                 .collect(),
@@ -438,6 +447,10 @@ impl Default for ToolSettings {
             .iter()
             .map(|s| String::from(*s))
             .collect(),
+            background_on_timeout: true,
+            job_buffer_bytes: 256 * 1024,
+            job_kill_grace_ms: 2000,
+            job_wait_ms: 60_000,
         }
     }
 }

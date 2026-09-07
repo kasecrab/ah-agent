@@ -40,7 +40,7 @@ everywhere.
 | `toggle_reasoning` | `["ctrl-r"]` | expand or collapse thinking blocks |
 | `cycle_model` | `["shift-tab"]` | switch to the next favorite model |
 | `history_prev` | `["up", "ctrl-p"]` | earlier prompt; inside a multi-line draft moves the cursor first; with an empty input pulls back the last queued message |
-| `history_next` | `["down", "ctrl-n"]` | later prompt |
+| `history_next` | `["down", "ctrl-n"]` | later prompt; with an empty input opens the background job list |
 | `delete_word` | `["ctrl-w"]` | delete the word before the cursor |
 | `delete_line` | `["ctrl-u"]` | delete to the start of the line |
 | `line_start` | `["ctrl-a", "home"]` | |

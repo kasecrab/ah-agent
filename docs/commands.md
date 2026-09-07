@@ -85,12 +85,34 @@ name in, Enter runs it. Plugins can add commands (`ah docs plugins`).
 
 | Tool | Arguments |
 |---|---|
-| `bash` | `command`; runs in the working directory with `tools.shell`, combined output plus exit code, `tools.bash_timeout_ms` limit, `permissions.deny` applies |
+| `bash` | `command`, optional `timeout_ms` and `background`; runs in the working directory with `tools.shell`, combined output plus exit code, `tools.bash_timeout_ms` limit, `permissions.deny` applies |
 | `read_file` | `path`, optional `offset` and `limit`; numbered lines |
 | `write_file` | `path`, `content`; creates parent directories |
 | `edit_file` | `path`, `old_string`, `new_string`, optional `replace_all`; `old_string` must match exactly once unless `replace_all` |
+| `jobs` | `action` (`list`, `output`, `wait`, `kill`), `id`, optional `from_line`, `tail`, `timeout_ms`; background commands |
 
 `tools.enabled` and `tools.disabled` choose which are offered.
+
+## Background jobs
+
+A command that should keep running — a dev server, a long build, a big
+download — is started with `bash` and `background: true`. It returns a job id
+straight away. A foreground command that outruns `tools.bash_timeout_ms` is not
+killed either: it becomes a background job and the model is told its id, so a
+slow download costs one timeout instead of the whole command.
+
+The model looks after a job with the `jobs` tool: `list` shows every job with
+its state, `output` reads it (`tail` for the last lines, `from_line` with the
+`next_line` from the previous read for only what is new), `wait` blocks until
+the job ends or `timeout_ms` passes, and `kill` stops it. Waiting is cheaper
+than polling: it costs no request until something actually happens.
+
+When a job ends, the next request carries one `[background] job 2 exited 0
+after 12.4s · 340 lines` line, so the model finds out without asking.
+
+In the TUI, `Down` on an empty input opens the job list; `Enter` on a job
+follows its output live, `k` stops the job, `Esc` closes the view. Jobs are
+children of the ah process: leaving ah stops them.
 
 ## JSONL events (`--json`)
 

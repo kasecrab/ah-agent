@@ -62,6 +62,7 @@ prints the resolved locations.
 | approve tool calls by hand | `permissions.mode = "ask"`, `--ask`, `/ask` |
 | block shell commands | `permissions.deny` in config |
 | run read-only tool calls at once | `parallel` in `[tools]`, config page |
+| keep a server or long build running | `bash` with `background`, commands page |
 | tune compaction | `[context]` in config |
 | cut input cost on long sessions | `cache` in `[context]`, config page |
 | change the status bar | `statusline.format` in config, or a `statusline` plugin hook |

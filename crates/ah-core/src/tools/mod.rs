@@ -3,6 +3,7 @@
 pub mod bash;
 pub mod diff;
 pub mod fs;
+pub mod jobs;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -54,6 +55,7 @@ impl Registry {
             Box::new(fs::ReadFile),
             Box::new(fs::WriteFile),
             Box::new(fs::EditFile),
+            Box::new(jobs::JobsTool),
         ];
         for t in all {
             let name = t.spec().function.name.clone();

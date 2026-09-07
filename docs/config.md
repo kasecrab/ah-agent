@@ -159,7 +159,7 @@ the full default table.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `enabled` | `["bash", "read_file", "write_file", "edit_file"]` | built-in tools offered to the model |
+| `enabled` | `["bash", "read_file", "write_file", "edit_file", "jobs"]` | built-in tools offered to the model |
 | `disabled` | `[]` | tools removed, including plugin tools by name |
 | `max_output_bytes` | `32768` | larger tool output is truncated head and tail |
 | `bash_timeout_ms` | `120000` | `bash` tool time limit |
@@ -168,6 +168,10 @@ the full default table.
 | `parallel` | `true` | run consecutive read-only calls from one model message at the same time |
 | `max_parallel` | `8` | most calls in flight at once |
 | `parallel_bash` | `["ls", "cat", "rg", "git log", …]` | shell commands treated as read-only |
+| `background_on_timeout` | `true` | a foreground command that outruns its timeout keeps running as a background job |
+| `job_buffer_bytes` | `262144` | output kept per background job: the first third, then the newest lines |
+| `job_kill_grace_ms` | `2000` | time between the polite stop and the hard kill |
+| `job_wait_ms` | `60000` | default limit for a `jobs` wait |
 
 ### Parallel tool calls
 

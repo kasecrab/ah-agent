@@ -171,6 +171,9 @@ pub struct Agent<'a> {
     pub context_tokens: u64,
     /// Compactions performed by this agent (the caller re-persists messages).
     pub compactions: u32,
+    /// Tell the model about background jobs that ended. Off in tests that
+    /// assert on exact message lists.
+    pub background_notices: bool,
 }
 
 impl<'a> Agent<'a> {
@@ -193,6 +196,7 @@ impl<'a> Agent<'a> {
             context_window: 0,
             context_tokens: 0,
             compactions: 0,
+            background_notices: true,
         }
     }
 
@@ -364,6 +368,14 @@ impl<'a> Agent<'a> {
                         break;
                     }
                     Err(e) => io.emit(AgentEvent::Notice(format!("compaction failed: {e}"))),
+                }
+            }
+
+            // Jobs that ended since the last request; the model hears about
+            // them here instead of having to poll.
+            if self.background_notices {
+                for note in crate::jobs::table().notices(crate::jobs::Audience::Model) {
+                    messages.push(Message::user(format!("[background] {note}")));
                 }
             }
 
@@ -824,6 +836,7 @@ mod tests {
             std::env::current_dir().unwrap(),
             &cancel,
         );
+        agent.background_notices = false;
         agent.context_window = 100;
         let mut messages = vec![Message::user("say hi via bash")];
         let io = RecordingIo::default();
@@ -870,6 +883,7 @@ mod tests {
             std::env::current_dir().unwrap(),
             &cancel,
         );
+        agent.background_notices = false;
         let mut messages = vec![Message::user("x")];
         let io = RecordingIo::default();
         agent.run_turn(&mut messages, &io).unwrap();
@@ -897,6 +911,7 @@ mod tests {
             std::env::current_dir().unwrap(),
             &cancel,
         );
+        agent.background_notices = false;
         let mut messages = vec![Message::user("say hi via bash")];
         let io = RecordingIo::default();
         let summary = agent.run_turn(&mut messages, &io).unwrap();
@@ -933,6 +948,7 @@ mod tests {
             std::env::current_dir().unwrap(),
             &cancel,
         );
+        agent.background_notices = false;
         let mut messages = vec![Message::user("x")];
         let io = RecordingIo {
             allow: false,
@@ -1017,6 +1033,7 @@ mod tests {
             std::env::current_dir().unwrap(),
             &cancel,
         );
+        agent.background_notices = false;
         let text = if big { "x".repeat(40_000) } else { "hi".into() };
         let mut messages = vec![Message::user(text)];
         agent
@@ -1141,6 +1158,7 @@ mod tests {
             std::env::current_dir().unwrap(),
             &cancel,
         );
+        agent.background_notices = false;
         let mut messages = vec![Message::user("look twice")];
         let io = RecordingIo::default();
         agent.run_turn(&mut messages, &io).unwrap();
@@ -1189,6 +1207,41 @@ mod tests {
             &cancel,
         );
         assert_eq!(agent.batch_len(&calls, 0), 1);
+    }
+
+    #[test]
+    fn a_finished_job_is_mentioned_in_the_next_request() {
+        let job = crate::jobs::table()
+            .spawn("sh", "true", &std::env::current_dir().unwrap(), 4096)
+            .unwrap();
+        assert!(job.wait(Duration::from_secs(5)));
+        let provider = MockProvider::new(vec![vec![
+            StreamEvent::Text("ok".into()),
+            StreamEvent::Finish("stop".into()),
+        ]]);
+        let settings = Settings::default();
+        let registry = Registry::builtins(&settings.tools);
+        let mut hooks = NoHooks;
+        let cancel = AtomicBool::new(false);
+        let mut agent = Agent::new(
+            &provider,
+            &registry,
+            &mut hooks,
+            &settings,
+            std::env::current_dir().unwrap(),
+            &cancel,
+        );
+        let mut messages = vec![Message::user("anything")];
+        agent
+            .run_turn(&mut messages, &RecordingIo::default())
+            .unwrap();
+        crate::jobs::table().remove(job.id);
+        let note = messages
+            .iter()
+            .find(|m| m.content.starts_with("[background]"))
+            .expect("the model is told a job ended");
+        assert!(note.content.contains("exited 0"), "{}", note.content);
+        assert_eq!(note.role, Role::User);
     }
 
     #[test]
