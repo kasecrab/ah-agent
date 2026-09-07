@@ -450,6 +450,14 @@ fn signal(pid: i32, sig: i32) {
 #[cfg(not(unix))]
 fn signal(_pid: i32, _sig: i32) {}
 
+/// Job notices are process-wide, and reading them claims them; tests that
+/// collect notices queue up behind this.
+#[cfg(test)]
+pub(crate) fn notice_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -507,6 +515,7 @@ mod tests {
 
     #[test]
     fn a_finish_is_announced_once_per_audience() {
+        let _guard = notice_lock();
         let j = table().spawn("sh", "true", &cwd(), 65536).unwrap();
         assert!(j.wait(Duration::from_secs(5)));
         let mine = format!("job {} exited 0", j.id);

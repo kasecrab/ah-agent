@@ -171,9 +171,13 @@ pub struct Agent<'a> {
     pub context_tokens: u64,
     /// Compactions performed by this agent (the caller re-persists messages).
     pub compactions: u32,
-    /// Tell the model about background jobs that ended. Off in tests that
-    /// assert on exact message lists.
-    pub background_notices: bool,
+    /// Tell the model about background jobs that ended and plans it has left
+    /// alone. Off in tests that assert on exact message lists.
+    pub notices: bool,
+    /// Plan version behind the last reminder, and how many requests have gone
+    /// by without the plan changing.
+    plan_seen: u64,
+    plan_quiet: u32,
 }
 
 impl<'a> Agent<'a> {
@@ -196,7 +200,9 @@ impl<'a> Agent<'a> {
             context_window: 0,
             context_tokens: 0,
             compactions: 0,
-            background_notices: true,
+            notices: true,
+            plan_seen: 0,
+            plan_quiet: 0,
         }
     }
 
@@ -373,10 +379,13 @@ impl<'a> Agent<'a> {
 
             // Jobs that ended since the last request; the model hears about
             // them here instead of having to poll.
-            if self.background_notices {
+            if self.notices {
                 for note in crate::jobs::table().notices(crate::jobs::Audience::Model) {
                     messages.push(Message::user(format!("[background] {note}")));
                 }
+            }
+            if let Some(line) = self.plan_reminder().filter(|_| self.notices) {
+                messages.push(Message::user(line));
             }
 
             let mut all = Vec::with_capacity(messages.len() + 1);
@@ -474,6 +483,35 @@ impl<'a> Agent<'a> {
         }
         io.emit(AgentEvent::TurnEnd(summary.clone()));
         Ok(summary)
+    }
+
+    /// One line about a plan the model has left alone for a while. A plan it
+    /// just changed needs no reminder: the tool reply already showed it.
+    fn plan_reminder(&mut self) -> Option<String> {
+        if !self.settings.context.plan_reminder {
+            return None;
+        }
+        let store = crate::plan::store();
+        let version = store.version();
+        if version != self.plan_seen {
+            self.plan_seen = version;
+            self.plan_quiet = 0;
+            return None;
+        }
+        self.plan_quiet += 1;
+        if self.plan_quiet < self.settings.context.plan_reminder_every.max(1) {
+            return None;
+        }
+        self.plan_quiet = 0;
+        let plan = store.snapshot();
+        let (done, total) = plan.counts();
+        if total == 0 || done == total {
+            return None;
+        }
+        Some(format!(
+            "[plan] {}\nUpdate it with the plan tool as you go.",
+            plan.summary()
+        ))
     }
 
     /// Hooks, deny rules and the permission prompt, before anything runs.
@@ -836,7 +874,7 @@ mod tests {
             std::env::current_dir().unwrap(),
             &cancel,
         );
-        agent.background_notices = false;
+        agent.notices = false;
         agent.context_window = 100;
         let mut messages = vec![Message::user("say hi via bash")];
         let io = RecordingIo::default();
@@ -883,7 +921,7 @@ mod tests {
             std::env::current_dir().unwrap(),
             &cancel,
         );
-        agent.background_notices = false;
+        agent.notices = false;
         let mut messages = vec![Message::user("x")];
         let io = RecordingIo::default();
         agent.run_turn(&mut messages, &io).unwrap();
@@ -911,7 +949,7 @@ mod tests {
             std::env::current_dir().unwrap(),
             &cancel,
         );
-        agent.background_notices = false;
+        agent.notices = false;
         let mut messages = vec![Message::user("say hi via bash")];
         let io = RecordingIo::default();
         let summary = agent.run_turn(&mut messages, &io).unwrap();
@@ -948,7 +986,7 @@ mod tests {
             std::env::current_dir().unwrap(),
             &cancel,
         );
-        agent.background_notices = false;
+        agent.notices = false;
         let mut messages = vec![Message::user("x")];
         let io = RecordingIo {
             allow: false,
@@ -1003,6 +1041,7 @@ mod tests {
         );
         let mut messages = vec![Message::user("x")];
         let io = RecordingIo::default();
+        agent.notices = false;
         agent.run_turn(&mut messages, &io).unwrap();
         assert_eq!(messages[1].content, "fine");
         assert!(
@@ -1033,7 +1072,7 @@ mod tests {
             std::env::current_dir().unwrap(),
             &cancel,
         );
-        agent.background_notices = false;
+        agent.notices = false;
         let text = if big { "x".repeat(40_000) } else { "hi".into() };
         let mut messages = vec![Message::user(text)];
         agent
@@ -1158,7 +1197,7 @@ mod tests {
             std::env::current_dir().unwrap(),
             &cancel,
         );
-        agent.background_notices = false;
+        agent.notices = false;
         let mut messages = vec![Message::user("look twice")];
         let io = RecordingIo::default();
         agent.run_turn(&mut messages, &io).unwrap();
@@ -1211,6 +1250,8 @@ mod tests {
 
     #[test]
     fn a_finished_job_is_mentioned_in_the_next_request() {
+        // Notices are process-wide: only one test at a time may collect them.
+        let _notices = crate::jobs::notice_lock();
         let job = crate::jobs::table()
             .spawn("sh", "true", &std::env::current_dir().unwrap(), 4096)
             .unwrap();
@@ -1242,6 +1283,54 @@ mod tests {
             .expect("the model is told a job ended");
         assert!(note.content.contains("exited 0"), "{}", note.content);
         assert_eq!(note.role, Role::User);
+    }
+
+    #[test]
+    fn a_plan_left_alone_is_recalled() {
+        let _notices = crate::jobs::notice_lock();
+        let _guard = crate::plan::test_lock();
+        crate::plan::store()
+            .edit(|p| {
+                p.set(&[crate::plan::NewTask {
+                    title: "write the parser".into(),
+                    ..Default::default()
+                }])
+            })
+            .unwrap();
+        let script = || {
+            vec![
+                StreamEvent::Text("ok".into()),
+                StreamEvent::Finish("stop".into()),
+            ]
+        };
+        let provider = MockProvider::new(vec![script(), script()]);
+        let mut settings = Settings::default();
+        settings.context.plan_reminder_every = 1;
+        let registry = Registry::builtins(&settings.tools);
+        let mut hooks = NoHooks;
+        let cancel = AtomicBool::new(false);
+        let mut agent = Agent::new(
+            &provider,
+            &registry,
+            &mut hooks,
+            &settings,
+            std::env::current_dir().unwrap(),
+            &cancel,
+        );
+        let mut messages = vec![Message::user("go")];
+        agent
+            .run_turn(&mut messages, &RecordingIo::default())
+            .unwrap();
+        // The plan had just changed, so the first request said nothing about it.
+        assert!(!messages.iter().any(|m| m.content.starts_with("[plan]")));
+        agent
+            .run_turn(&mut messages, &RecordingIo::default())
+            .unwrap();
+        let note = messages
+            .iter()
+            .find(|m| m.content.starts_with("[plan]"))
+            .expect("a quiet plan is recalled");
+        assert!(note.content.contains("0/1 done"), "{}", note.content);
     }
 
     #[test]

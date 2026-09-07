@@ -5,6 +5,7 @@ pub mod diff;
 pub mod edit;
 pub mod fs;
 pub mod jobs;
+pub mod plan;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -57,6 +58,7 @@ impl Registry {
             Box::new(fs::WriteFile),
             Box::new(fs::EditFile),
             Box::new(jobs::JobsTool),
+            Box::new(plan::PlanTool),
         ];
         for t in all {
             let name = t.spec().function.name.clone();

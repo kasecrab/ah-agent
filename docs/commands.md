@@ -90,6 +90,7 @@ name in, Enter runs it. Plugins can add commands (`ah docs plugins`).
 | `write_file` | `path`, `content`; creates parent directories |
 | `edit_file` | `path` and either `old_string`/`new_string`/`replace_all` or `edits` (a list of those, applied in order); each `old_string` must match one place unless `replace_all`; nothing is written unless every edit applies |
 | `jobs` | `action` (`list`, `output`, `wait`, `kill`), `id`, optional `from_line`, `tail`, `timeout_ms`; background commands |
+| `plan` | `action` (`set`, `add`, `start`, `done`, `drop`, `update`, `list`), `tasks`, `ids`, `id`, `title`, `parent`, `needs`, `note`; the task list |
 
 `tools.enabled` and `tools.disabled` choose which are offered.
 
@@ -127,6 +128,47 @@ after 12.4s · 340 lines` line, so the model finds out without asking.
 In the TUI, `Down` on an empty input opens the job list; `Enter` on a job
 follows its output live, `k` stops the job, `Esc` closes the view. Jobs are
 children of the ah process: leaving ah stops them.
+
+## The plan
+
+Work that takes several steps gets a task list. The model writes it with
+`plan` and `action: "set"`, giving one object per task:
+
+```json
+{"action": "set", "tasks": [
+  {"title": "parse the config file"},
+  {"title": "read the [tools] table", "parent": 1},
+  {"title": "tests for the parser", "needs": [1]}
+]}
+```
+
+Ids are handed out in the order the tasks are listed, so `parent` and `needs`
+of 1 mean the first task in the call. `parent` makes a task a subtask;
+`needs` lists the tasks that must finish before this one may start. `add`
+appends tasks without disturbing the ids already given out.
+
+`start`, `done` and `drop` take `ids` (or a single `id`) and an optional
+`note`, which is kept beside the task as its outcome or blocker. `update`
+changes one task's `title`, `parent`, `needs` or `note`. `list` shows the plan
+without changing it.
+
+Two moves are refused, because they are the ones that quietly put a plan out
+of order: starting a task whose dependencies are unfinished, and finishing a
+task whose subtasks are still open. Dropping a task drops its subtasks, and a
+dropped task no longer blocks whatever waited for it. Every call returns the
+whole plan:
+
+```
+plan · 1/3 done · doing: 2 read the [tools] table
+  1 [ ] parse the config file
+  2   [>] read the [tools] table
+  3 [ ] tests for the parser · waits for 1
+```
+
+The plan is stored with the session, so `ah -r` resumes it. In the TUI,
+`/plan` opens it, `Ctrl-P` toggles the summary line above the input, and the
+statusline placeholder is `{plan}`. `context.plan_reminder` controls the
+reminder sent when the model leaves an unfinished plan alone.
 
 ## JSONL events (`--json`)
 

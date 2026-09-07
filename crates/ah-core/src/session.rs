@@ -28,6 +28,9 @@ struct Marker {
     _clear: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     _compact: Option<bool>,
+    /// Snapshot of the task list; the last one in the file wins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    _plan: Option<crate::plan::Plan>,
 }
 
 impl Marker {
@@ -37,13 +40,16 @@ impl Marker {
 }
 
 fn marker(line: &str) -> Option<Marker> {
-    if !(line.contains("\"_name\"") || line.contains("\"_clear\"") || line.contains("\"_compact\""))
+    if !(line.contains("\"_name\"")
+        || line.contains("\"_clear\"")
+        || line.contains("\"_compact\"")
+        || line.contains("\"_plan\""))
     {
         return None;
     }
-    serde_json::from_str::<Marker>(line)
-        .ok()
-        .filter(|m| m._name.is_some() || m._clear.is_some() || m._compact.is_some())
+    serde_json::from_str::<Marker>(line).ok().filter(|m| {
+        m._name.is_some() || m._clear.is_some() || m._compact.is_some() || m._plan.is_some()
+    })
 }
 
 pub struct Session {
@@ -52,6 +58,8 @@ pub struct Session {
     path: PathBuf,
     file: Option<File>,
     pub messages: Vec<Message>,
+    /// Task list as it stood when the session was last written.
+    pub plan: crate::plan::Plan,
 }
 
 fn now_ms() -> u128 {
@@ -77,6 +85,7 @@ impl Session {
             path: PathBuf::new(),
             file: None,
             messages: Vec::new(),
+            plan: crate::plan::Plan::default(),
         }
     }
 
@@ -99,6 +108,7 @@ impl Session {
             path,
             file: Some(file),
             messages: Vec::new(),
+            plan: crate::plan::Plan::default(),
         })
     }
 
@@ -107,6 +117,7 @@ impl Session {
         let reader = BufReader::new(File::open(&path)?);
         let mut messages = Vec::new();
         let mut name = None;
+        let mut plan = crate::plan::Plan::default();
         for (i, line) in reader.lines().enumerate() {
             let line = line?;
             if i == 0 || line.trim().is_empty() {
@@ -116,8 +127,14 @@ impl Session {
                 if m.resets() {
                     messages.clear();
                 }
+                if m._clear == Some(true) {
+                    plan = crate::plan::Plan::default();
+                }
                 if let Some(n) = m._name {
                     name = Some(n).filter(|n| !n.is_empty());
+                }
+                if let Some(p) = m._plan {
+                    plan = p;
                 }
                 continue;
             }
@@ -133,6 +150,7 @@ impl Session {
             path,
             file: Some(file),
             messages,
+            plan,
         })
     }
 
@@ -175,8 +193,21 @@ impl Session {
         }
     }
 
+    /// Record the task list, so resuming the session resumes the plan.
+    pub fn save_plan(&mut self, plan: &crate::plan::Plan) {
+        if *plan == self.plan {
+            return;
+        }
+        self.plan = plan.clone();
+        self.write_marker(&Marker {
+            _plan: Some(plan.clone()),
+            ..Default::default()
+        });
+    }
+
     pub fn clear(&mut self) {
         self.messages.clear();
+        self.plan = crate::plan::Plan::default();
         self.write_marker(&Marker {
             _clear: Some(true),
             ..Default::default()

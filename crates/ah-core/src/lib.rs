@@ -10,6 +10,7 @@ pub mod jobs;
 pub mod log;
 pub mod models;
 pub mod paths;
+pub mod plan;
 pub mod plugins;
 pub mod policy;
 pub mod provider;

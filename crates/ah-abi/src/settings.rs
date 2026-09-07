@@ -121,7 +121,11 @@ impl Default for PromptSettings {
                  Working directory: {cwd}. OS: {os}. Shell: {shell}. Date: {date}.\n\
                  Use the provided tools to inspect and change files and run commands. \
                  Prefer reading before editing. Keep replies short; the user sees your \
-                 text in a terminal. When a task is done, summarise what changed.",
+                 text in a terminal. When a task is done, summarise what changed.\n\
+                 Work that takes more than a couple of steps goes in the plan tool first: \
+                 set the tasks, mark one started before you work on it and done as soon as \
+                 it is finished, and give a task `needs` when it cannot start until another \
+                 one is done. Skip it for a single edit or question.",
             ),
             append: String::new(),
             instructions: vec![String::from("AGENTS.md"), String::from("CLAUDE.md")],
@@ -404,10 +408,17 @@ pub struct ToolSettings {
 impl Default for ToolSettings {
     fn default() -> Self {
         Self {
-            enabled: ["bash", "read_file", "write_file", "edit_file", "jobs"]
-                .iter()
-                .map(|s| String::from(*s))
-                .collect(),
+            enabled: [
+                "bash",
+                "read_file",
+                "write_file",
+                "edit_file",
+                "jobs",
+                "plan",
+            ]
+            .iter()
+            .map(|s| String::from(*s))
+            .collect(),
             disabled: Vec::new(),
             max_output_bytes: 32 * 1024,
             bash_timeout_ms: 120_000,
@@ -523,6 +534,12 @@ pub struct ContextSettings {
     /// provider minimum nothing is cached anyway, and a write that is never
     /// read costs more than no cache at all.
     pub cache_min_tokens: u64,
+    /// Remind the model of an unfinished plan it has stopped updating. The
+    /// reminder is one line at the end of the prompt, so it never disturbs a
+    /// cached prefix.
+    pub plan_reminder: bool,
+    /// Requests without a plan change before the reminder is sent again.
+    pub plan_reminder_every: u32,
 }
 
 impl Default for ContextSettings {
@@ -539,6 +556,8 @@ impl Default for ContextSettings {
                 .collect(),
             cache_ttl: String::from("5m"),
             cache_min_tokens: 2048,
+            plan_reminder: true,
+            plan_reminder_every: 4,
         }
     }
 }

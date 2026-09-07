@@ -74,6 +74,7 @@ Default `system`:
 ```
 You are ah, a fast coding agent running in a terminal. Working directory: {cwd}. OS: {os}. Shell: {shell}. Date: {date}.
 Use the provided tools to inspect and change files and run commands. Prefer reading before editing. Keep replies short; the user sees your text in a terminal. When a task is done, summarise what changed.
+Work that takes more than a couple of steps goes in the plan tool first: set the tasks, mark one started before you work on it and done as soon as it is finished, and give a task `needs` when it cannot start until another one is done. Skip it for a single edit or question.
 ```
 
 ## [theme]
@@ -159,7 +160,7 @@ the full default table.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `enabled` | `["bash", "read_file", "write_file", "edit_file", "jobs"]` | built-in tools offered to the model |
+| `enabled` | `["bash", "read_file", "write_file", "edit_file", "jobs", "plan"]` | built-in tools offered to the model |
 | `disabled` | `[]` | tools removed, including plugin tools by name |
 | `max_output_bytes` | `32768` | larger tool output is truncated head and tail |
 | `bash_timeout_ms` | `120000` | `bash` tool time limit |
@@ -254,6 +255,8 @@ ask for any tool call on top of this.
 | `cache_models` | `["anthropic/", "qwen/"]` | model id prefixes that need one; every other model caches on its own |
 | `cache_ttl` | `"5m"` | how long the provider holds the cache: `5m` or `1h` |
 | `cache_min_tokens` | `2048` | skip the cache below this estimated prompt size |
+| `plan_reminder` | `true` | remind the model of a plan it has stopped updating |
+| `plan_reminder_every` | `4` | requests without a plan change before the reminder is sent again |
 
 See `ah docs sessions` for what compaction does to the transcript and the
 session file.
@@ -280,3 +283,13 @@ turn the whole thing off.
 
 `/usage` shows `cached` tokens and what the cache saved, as reported by
 OpenRouter.
+
+### Plan reminders
+
+The `plan` tool holds the task list for work that takes several steps, and
+every call to it returns the whole list, so the model normally sees the plan
+without help. When it stops calling the tool while tasks are still open, ah
+appends one line — the plan summary — after `plan_reminder_every` requests
+without a change. The line goes at the end of the prompt, where it cannot
+disturb a cached prefix, and it stops once every task is done or dropped. See
+`ah docs commands` for the tool itself.
