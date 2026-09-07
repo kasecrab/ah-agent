@@ -10,6 +10,7 @@ mod plan;
 mod theme;
 mod transcript;
 mod usage;
+mod working;
 
 use std::collections::HashSet;
 use std::sync::atomic::Ordering;
@@ -274,7 +275,8 @@ struct App {
     /// Conversation size as of the last response, and the model's window.
     context_tokens: u64,
     context_window: u64,
-    spinner_i: usize,
+    /// When the current turn started, for the working line's clock.
+    busy_start: Option<Instant>,
     plugin_status: Option<String>,
     plugin_commands: Vec<(String, SlashCommandSpec)>,
     plugin_count: u32,
@@ -414,7 +416,7 @@ fn run_inner(
         usage: Usage::default(),
         context_tokens: 0,
         context_window: 0,
-        spinner_i: 0,
+        busy_start: None,
         plugin_status: None,
         plugin_commands: commands,
         plugin_count,
@@ -858,6 +860,7 @@ impl App {
         self.push(Block::User(user_display(&text, images.len())));
         self.follow = true;
         self.busy = true;
+        self.busy_start = Some(Instant::now());
         self.set_state(State::Thinking);
         let _ = self.tx.send(EngineCmd::Submit { text, images });
     }
@@ -931,13 +934,12 @@ impl App {
                 } else if self.job_view.is_some() && !self.busy {
                     Duration::from_millis(250)
                 } else {
-                    Duration::from_millis(self.settings().layout.spinner_ms.max(20))
+                    Duration::from_millis(self.animation_ms().max(20))
                 };
                 match rx.recv_timeout(wait) {
                     Ok(m) => Some(m),
                     Err(RecvTimeoutError::Timeout) => {
                         if self.busy {
-                            self.spinner_i = self.spinner_i.wrapping_add(1);
                             self.dirty = true;
                         }
                         // Keep the clock in the job view moving.
@@ -1962,6 +1964,7 @@ impl App {
             UiEvent::Agent(a) => self.handle_agent(a),
             UiEvent::Busy(b) => {
                 self.busy = b;
+                self.busy_start = b.then(Instant::now);
                 if !b {
                     self.set_state(State::Idle);
                     self.pending_perm = None;
@@ -2313,6 +2316,7 @@ impl App {
             && table.unheard(ah_core::jobs::Audience::Model)
         {
             self.busy = true;
+            self.busy_start = Some(Instant::now());
             self.set_state(State::Thinking);
             let _ = self.tx.send(EngineCmd::Wake);
         }
@@ -2798,6 +2802,7 @@ impl App {
                 } else {
                     self.follow = true;
                     self.busy = true;
+                    self.busy_start = Some(Instant::now());
                     self.set_state(State::Thinking);
                     let _ = self.tx.send(EngineCmd::Compact(args.to_string()));
                 }
@@ -3025,9 +3030,12 @@ impl App {
 
         // Input box.
         let title = if self.busy {
-            format!(" {} ", self.spinner())
+            let mut spans = vec![Span::raw(" ")];
+            spans.extend(self.working_line().spans);
+            spans.push(Span::raw(" "));
+            Line::from(spans)
         } else {
-            String::new()
+            Line::default()
         };
         let placeholder = if self.busy && self.settings().layout.queue_max > 0 {
             "Type the next message; Enter queues it"
@@ -3198,9 +3206,27 @@ impl App {
         f.render_widget(Paragraph::new(lines), inner);
     }
 
-    fn spinner(&self) -> &str {
-        let s = &self.pal.spinner;
-        &s[self.spinner_i % s.len()]
+    /// Redraw period while a turn runs; 0 in the settings means no animation.
+    fn animation_ms(&self) -> u64 {
+        match self.settings().layout.animation_ms {
+            0 => 250,
+            ms => ms,
+        }
+    }
+
+    /// `• Working (3s · esc to interrupt)`, animated unless turned off.
+    fn working_line(&self) -> Line<'static> {
+        let start = self.busy_start.unwrap_or_else(Instant::now);
+        let at = (self.settings().layout.animation_ms > 0).then(|| start.elapsed());
+        working::line(self.header(), start.elapsed().as_secs(), at, &self.pal)
+    }
+
+    /// What the turn is busy with, as one word.
+    fn header(&self) -> &'static str {
+        match self.state {
+            State::Tool => "Running",
+            _ => "Working",
+        }
     }
 
     fn draw_transcript(&mut self, f: &mut Frame, area: Rect, pal: &Palette, max_width: u16) {
@@ -3251,10 +3277,7 @@ impl App {
 
     fn draw_status(&self, f: &mut Frame, area: Rect, pal: &Palette) {
         let ctx = self.status_ctx();
-        let mut text = self.plugin_status.clone().unwrap_or(ctx.rendered);
-        if self.busy {
-            text = format!(" {}{}", self.spinner(), text);
-        }
+        let text = self.plugin_status.clone().unwrap_or(ctx.rendered);
         let style = Style::default().fg(pal.status_fg).bg(pal.status_bg);
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(text, style))).style(style),

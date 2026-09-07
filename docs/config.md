@@ -131,7 +131,6 @@ theme Claude Code uses, so both look the same in the same terminal.
 | `assistant_prefix` | `""` | glyph before assistant messages |
 | `tool_prefix` | `"⚙ "` | glyph before tool calls |
 | `input_prefix` | `"› "` | prompt glyph in the input line |
-| `spinner` | braille frames | frames cycled every `layout.spinner_ms` |
 
 ## [layout]
 
@@ -146,7 +145,7 @@ theme Claude Code uses, so both look the same in the same terminal.
 | `show_reasoning` | `true` | thinking block expanded (Ctrl-R toggles) |
 | `wrap` | `true` | soft-wrap long lines |
 | `stream_redraw_ms` | `33` | redraw throttle while streaming; 0 = every delta |
-| `spinner_ms` | `100` | spinner frame time |
+| `animation_ms` | `32` | redraw period for the working line; `0` leaves it still |
 | `scroll_step` | `3` | rows per wheel or arrow step |
 | `mouse` | `true` | capture the mouse: wheel scrolls, drag selects and copies via OSC 52; `false` leaves it to the terminal |
 | `kitty_keyboard` | `true` | push kitty keyboard flags (needed for Shift-Enter) without querying the terminal |

@@ -44,7 +44,6 @@ pub struct Palette {
     pub assistant_prefix: String,
     pub tool_prefix: String,
     pub input_prefix: String,
-    pub spinner: Vec<String>,
 }
 
 pub fn parse_color(s: &str) -> Color {
@@ -116,11 +115,6 @@ impl Palette {
             assistant_prefix: t.assistant_prefix.clone(),
             tool_prefix: t.tool_prefix.clone(),
             input_prefix: t.input_prefix.clone(),
-            spinner: if t.spinner.is_empty() {
-                vec!["|".into(), "/".into(), "-".into(), "\\".into()]
-            } else {
-                t.spinner.clone()
-            },
         }
     }
 

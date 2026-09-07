@@ -53,7 +53,7 @@ prints the resolved locations.
 
 | Want to | See |
 |---|---|
-| change colours, borders, prefixes, spinner | `[theme]` in config, or the `themes` plugin (`/theme nord`) |
+| change colours, borders, prefixes | `[theme]` in config, or the `themes` plugin (`/theme nord`) |
 | change layout, mouse, markdown, queue size | `[layout]` in config |
 | rebind a key | `[keys]` in config, and the keys page |
 | change model, reasoning effort, favorites | `[model]` in config, `/model`, `/effort`, `/favorite` |

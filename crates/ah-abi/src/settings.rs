@@ -184,7 +184,6 @@ pub struct Theme {
     pub tool_prefix: String,
     /// Prompt glyph at the left of the input line.
     pub input_prefix: String,
-    pub spinner: Vec<String>,
 }
 
 impl Default for Theme {
@@ -229,10 +228,6 @@ impl Default for Theme {
             assistant_prefix: "".into(),
             tool_prefix: "⚙ ".into(),
             input_prefix: "› ".into(),
-            spinner: ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-                .iter()
-                .map(|s| String::from(*s))
-                .collect(),
         }
     }
 }
@@ -267,7 +262,10 @@ pub struct Layout {
     pub wrap: bool,
     /// Redraw throttle while streaming, in milliseconds. 0 = redraw on every delta.
     pub stream_redraw_ms: u64,
-    pub spinner_ms: u64,
+    /// Redraw period for the working line while a turn runs, in
+    /// milliseconds. 0 leaves the word still, for terminals or people that
+    /// would rather have no animation.
+    pub animation_ms: u64,
     /// Rows scrolled per wheel/arrow step.
     pub scroll_step: u16,
     /// Capture the mouse: wheel scrolls, drag selects and copies (OSC 52).
@@ -309,7 +307,7 @@ impl Default for Layout {
             show_reasoning: true,
             wrap: true,
             stream_redraw_ms: 33,
-            spinner_ms: 100,
+            animation_ms: 32,
             scroll_step: 3,
             mouse: true,
             kitty_keyboard: true,
