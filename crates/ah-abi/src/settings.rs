@@ -454,6 +454,18 @@ pub struct ContextSettings {
     pub window: u64,
     /// Max tokens the summary may use.
     pub summary_max_tokens: u32,
+    /// Ask the provider to cache the prompt prefix on models that need an
+    /// explicit cache breakpoint. Models that cache on their own are untouched.
+    pub cache: bool,
+    /// Model id prefixes that need an explicit breakpoint.
+    pub cache_models: Vec<String>,
+    /// How long the provider keeps the cache: `5m` or `1h`. `1h` doubles the
+    /// price of a cache write, so it only pays off across long pauses.
+    pub cache_ttl: String,
+    /// Skip caching when the estimated prompt is smaller than this. Below the
+    /// provider minimum nothing is cached anyway, and a write that is never
+    /// read costs more than no cache at all.
+    pub cache_min_tokens: u64,
 }
 
 impl Default for ContextSettings {
@@ -463,6 +475,13 @@ impl Default for ContextSettings {
             compact_at: 90,
             window: 0,
             summary_max_tokens: 4096,
+            cache: true,
+            cache_models: ["anthropic/", "qwen/"]
+                .iter()
+                .map(|s| String::from(*s))
+                .collect(),
+            cache_ttl: String::from("5m"),
+            cache_min_tokens: 2048,
         }
     }
 }

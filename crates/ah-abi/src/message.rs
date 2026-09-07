@@ -111,6 +111,15 @@ pub struct Usage {
     /// USD cost as reported by OpenRouter when `usage.include` is set.
     #[serde(default)]
     pub cost: f64,
+    /// Prompt tokens served from the provider's cache, billed at a discount.
+    #[serde(default)]
+    pub cached_tokens: u64,
+    /// Prompt tokens written to the cache by this call.
+    #[serde(default)]
+    pub cache_write_tokens: u64,
+    /// USD the cache saved on this call, as reported by OpenRouter.
+    #[serde(default)]
+    pub cache_discount: f64,
 }
 
 impl Usage {
@@ -119,6 +128,9 @@ impl Usage {
         self.completion_tokens += o.completion_tokens;
         self.total_tokens += o.total_tokens;
         self.cost += o.cost;
+        self.cached_tokens += o.cached_tokens;
+        self.cache_write_tokens += o.cache_write_tokens;
+        self.cache_discount += o.cache_discount;
     }
 }
 
@@ -142,4 +154,9 @@ pub struct ChatRequest {
     /// OpenRouter `provider` routing preferences, passed through verbatim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<serde_json::Value>,
+    /// Top-level `cache_control` for providers that need an explicit cache
+    /// breakpoint. The provider keeps the breakpoint at the end of the prompt
+    /// and advances it as the conversation grows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<serde_json::Value>,
 }

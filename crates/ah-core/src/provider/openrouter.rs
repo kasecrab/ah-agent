@@ -139,6 +139,18 @@ struct UsageWire {
     total_tokens: u64,
     #[serde(default)]
     cost: Option<f64>,
+    #[serde(default)]
+    cache_discount: Option<f64>,
+    #[serde(default)]
+    prompt_tokens_details: Option<PromptDetails>,
+}
+
+#[derive(Deserialize, Default)]
+struct PromptDetails {
+    #[serde(default)]
+    cached_tokens: u64,
+    #[serde(default)]
+    cache_write_tokens: u64,
 }
 
 #[derive(Deserialize)]
@@ -200,11 +212,15 @@ pub(crate) fn handle_chunk(payload: &str, on_event: OnEvent<'_>) -> Result<bool>
         }
     }
     if let Some(u) = chunk.usage {
+        let details = u.prompt_tokens_details.unwrap_or_default();
         let usage = Usage {
             prompt_tokens: u.prompt_tokens,
             completion_tokens: u.completion_tokens,
             total_tokens: u.total_tokens,
             cost: u.cost.unwrap_or(0.0),
+            cached_tokens: details.cached_tokens,
+            cache_write_tokens: details.cache_write_tokens,
+            cache_discount: u.cache_discount.unwrap_or(0.0).abs(),
         };
         if !on_event(StreamEvent::Usage(usage)) {
             return Ok(false);
@@ -358,6 +374,24 @@ mod tests {
         assert_eq!(acc.finish_reason.as_deref(), Some("tool_calls"));
         assert_eq!(acc.usage.total_tokens, 15);
         assert!((acc.usage.cost - 0.0001).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cache_usage_fields_are_read() {
+        let payload = r#"{"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":5,
+            "total_tokens":105,"cost":0.002,"cache_discount":-0.0031,
+            "prompt_tokens_details":{"cached_tokens":90,"cache_write_tokens":10}}}"#;
+        let mut usage = Usage::default();
+        handle_chunk(payload, &mut |ev| {
+            if let StreamEvent::Usage(u) = ev {
+                usage = u;
+            }
+            true
+        })
+        .unwrap();
+        assert_eq!(usage.cached_tokens, 90);
+        assert_eq!(usage.cache_write_tokens, 10);
+        assert!((usage.cache_discount - 0.0031).abs() < 1e-9);
     }
 
     #[test]

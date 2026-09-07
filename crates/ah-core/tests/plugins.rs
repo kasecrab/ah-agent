@@ -155,6 +155,7 @@ fn statusline_renders_and_persists_kv() {
             completion_tokens: 3,
             total_tokens: 15,
             cost: 0.0123,
+            ..Usage::default()
         },
         state: "idle".into(),
         git_branch: "main".into(),

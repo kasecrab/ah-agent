@@ -108,12 +108,18 @@ impl AgentIo for PrintIo {
                 }
             }
             AgentEvent::TurnEnd(s) => {
+                let cached = if s.usage.cached_tokens > 0 {
+                    format!(" ({} cached)", s.usage.cached_tokens)
+                } else {
+                    String::new()
+                };
                 let _ = writeln!(
                     err,
-                    "\x1b[90m[{} req, {} tools, ↑{} ↓{} ${:.4}]\x1b[0m",
+                    "\x1b[90m[{} req, {} tools, ↑{}{} ↓{} ${:.4}]\x1b[0m",
                     s.requests,
                     s.tool_calls,
                     s.usage.prompt_tokens,
+                    cached,
                     s.usage.completion_tokens,
                     s.usage.cost
                 );

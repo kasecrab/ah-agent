@@ -225,6 +225,33 @@ ask for any tool call on top of this.
 | `compact_at` | `90` | trigger percentage |
 | `window` | `0` | context window in tokens; 0 = from the model catalogue |
 | `summary_max_tokens` | `4096` | limit for the summary request |
+| `cache` | `true` | ask the provider to cache the prompt prefix on models that need an explicit breakpoint |
+| `cache_models` | `["anthropic/", "qwen/"]` | model id prefixes that need one; every other model caches on its own |
+| `cache_ttl` | `"5m"` | how long the provider holds the cache: `5m` or `1h` |
+| `cache_min_tokens` | `2048` | skip the cache below this estimated prompt size |
 
 See `ah docs sessions` for what compaction does to the transcript and the
 session file.
+
+### Prompt caching
+
+Most of what ah sends is the same on every request of a turn: the system
+prompt, the tool declarations and the conversation so far. Providers can keep
+that prefix in a cache and charge about a tenth of the input price for it.
+
+OpenAI, Grok, Groq, DeepSeek, Z.AI and Gemini 2.5 do this on their own, so ah
+sends nothing extra for them. Anthropic and Qwen need an explicit cache
+breakpoint, and ah adds one as a top-level `cache_control` on the request: the
+provider keeps the breakpoint at the end of the prompt and advances it as the
+conversation grows, so every request after the first reads the whole prefix
+from the cache.
+
+The price of a cache write is 1.25x the input price (2x with `cache_ttl =
+"1h"`), and a read is 0.1x. One re-read pays for the write several times over,
+which a tool call already guarantees, but a prompt that is never re-sent would
+cost 25 percent more. That is what `cache_min_tokens` is for: below it, and
+below the provider's own minimum, nothing is cached. Set `cache = false` to
+turn the whole thing off.
+
+`/usage` shows `cached` tokens and what the cache saved, as reported by
+OpenRouter.

@@ -160,6 +160,16 @@ impl Pane {
                 tokens(usage.completion_tokens)
             ),
         ));
+        if usage.cached_tokens > 0 || usage.cache_write_tokens > 0 {
+            let mut parts = vec![format!("{} read", tokens(usage.cached_tokens))];
+            if usage.cache_write_tokens > 0 {
+                parts.push(format!("{} written", tokens(usage.cache_write_tokens)));
+            }
+            if usage.cache_discount > 0.0 {
+                parts.push(format!("saved ${:.4}", usage.cache_discount));
+            }
+            lines.push(row("cache", parts.join(" · ")));
+        }
         for (m, u) in &s.by_model {
             lines.push(sub(
                 m,

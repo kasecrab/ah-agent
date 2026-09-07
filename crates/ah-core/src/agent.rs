@@ -81,6 +81,34 @@ pub struct TurnSummary {
     pub cancelled: bool,
 }
 
+/// Rough byte size of a request prompt: what the provider bills as input.
+fn prompt_bytes(system: &str, messages: &[Message], tools_bytes: usize) -> usize {
+    let msgs: usize = messages
+        .iter()
+        .map(|m| {
+            m.content.len()
+                + m.reasoning.as_deref().map_or(0, str::len)
+                + m.tool_calls
+                    .iter()
+                    .map(|c| c.function.name.len() + c.function.arguments.len())
+                    .sum::<usize>()
+        })
+        .sum();
+    system.len() + msgs + tools_bytes
+}
+
+/// Byte size of the tool declarations, which sit in the cached prefix too.
+fn tools_bytes(tools: &[ToolSpec]) -> usize {
+    tools
+        .iter()
+        .map(|t| {
+            t.function.name.len()
+                + t.function.description.len()
+                + t.function.parameters.to_string().len()
+        })
+        .sum()
+}
+
 /// Callbacks the loop uses to talk to whoever is driving it.
 pub trait AgentIo {
     fn emit(&self, ev: AgentEvent);
@@ -192,6 +220,7 @@ impl<'a> Agent<'a> {
             ask.push_str(focus.trim());
         }
         all.push(Message::user(ask));
+        let cache_control = self.cache_control(prompt_bytes(&all[0].content, &all[1..], 0));
         let req = ChatRequest {
             model: self.settings.model.id.clone(),
             messages: all,
@@ -201,6 +230,7 @@ impl<'a> Agent<'a> {
             top_p: None,
             reasoning: None,
             provider: self.settings.model.provider.clone(),
+            cache_control,
         };
         let mut acc = Accumulator::default();
         self.provider.stream(&req, self.cancel, &mut |ev| {
@@ -223,6 +253,32 @@ impl<'a> Agent<'a> {
             summary: acc.content,
         });
         Ok(())
+    }
+
+    /// Top-level `cache_control` for a request of this size, or `None` when the
+    /// model caches on its own, caching is off, or the prompt is too small for
+    /// the write to pay for itself. The provider keeps one breakpoint at the end
+    /// of the prompt and advances it as the conversation grows.
+    fn cache_control(&self, prompt_bytes: usize) -> Option<Value> {
+        let c = &self.settings.context;
+        if !c.cache {
+            return None;
+        }
+        let id = self.settings.model.id.to_ascii_lowercase();
+        if !c
+            .cache_models
+            .iter()
+            .any(|p| !p.is_empty() && id.starts_with(&p.to_ascii_lowercase()))
+        {
+            return None;
+        }
+        if estimate_tokens(prompt_bytes) < c.cache_min_tokens {
+            return None;
+        }
+        Some(match c.cache_ttl.trim() {
+            "" | "5m" => serde_json::json!({"type": "ephemeral"}),
+            ttl => serde_json::json!({"type": "ephemeral", "ttl": ttl}),
+        })
     }
 
     pub fn system_prompt(&mut self) -> String {
@@ -275,6 +331,7 @@ impl<'a> Agent<'a> {
         let mut summary = TurnSummary::default();
         let system = self.system_prompt();
         let specs = self.tool_specs();
+        let specs_bytes = tools_bytes(&specs);
         let cwd_str = self.cwd.display().to_string();
 
         loop {
@@ -316,6 +373,7 @@ impl<'a> Agent<'a> {
                 top_p: self.settings.model.top_p,
                 reasoning: self.settings.model.reasoning.clone(),
                 provider: self.settings.model.provider.clone(),
+                cache_control: self.cache_control(prompt_bytes(&system, messages, specs_bytes)),
             };
             let req = self.hooks.before_request(req, turn);
 
@@ -622,6 +680,7 @@ mod tests {
                 completion_tokens: 2,
                 total_tokens: 12,
                 cost: 0.001,
+                ..Usage::default()
             }),
         ]
     }
@@ -633,6 +692,7 @@ mod tests {
             completion_tokens: 2,
             total_tokens: 97,
             cost: 0.0,
+            ..Usage::default()
         };
         let provider = MockProvider::new(vec![
             vec![
@@ -838,6 +898,72 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, AgentEvent::Retry { .. }))
         );
+    }
+
+    fn cache_probe(model: &str, big: bool, tweak: impl FnOnce(&mut Settings)) -> Option<Value> {
+        let provider = MockProvider::new(vec![vec![
+            StreamEvent::Text("ok".into()),
+            StreamEvent::Finish("stop".into()),
+        ]]);
+        let mut settings = Settings::default();
+        settings.model.id = model.into();
+        tweak(&mut settings);
+        let registry = Registry::builtins(&settings.tools);
+        let mut hooks = NoHooks;
+        let cancel = AtomicBool::new(false);
+        let mut agent = Agent::new(
+            &provider,
+            &registry,
+            &mut hooks,
+            &settings,
+            std::env::current_dir().unwrap(),
+            &cancel,
+        );
+        let text = if big { "x".repeat(40_000) } else { "hi".into() };
+        let mut messages = vec![Message::user(text)];
+        agent
+            .run_turn(&mut messages, &RecordingIo::default())
+            .unwrap();
+        let reqs = provider.requests.lock().unwrap();
+        reqs[0].cache_control.clone()
+    }
+
+    #[test]
+    fn cache_breakpoint_only_where_it_pays() {
+        // Models that cache on their own are left alone.
+        assert_eq!(cache_probe("openai/gpt-5", true, |_| {}), None);
+        // Below the minimum a cache write costs more than it saves.
+        assert_eq!(
+            cache_probe("anthropic/claude-sonnet-5", false, |_| {}),
+            None
+        );
+        assert_eq!(
+            cache_probe("anthropic/claude-sonnet-5", true, |_| {}),
+            Some(serde_json::json!({"type": "ephemeral"}))
+        );
+        assert_eq!(
+            cache_probe("anthropic/claude-sonnet-5", true, |s| s.context.cache =
+                false),
+            None
+        );
+        assert_eq!(
+            cache_probe("anthropic/claude-sonnet-5", true, |s| s.context.cache_ttl =
+                "1h".into()),
+            Some(serde_json::json!({"type": "ephemeral", "ttl": "1h"}))
+        );
+    }
+
+    #[test]
+    fn prompt_bytes_counts_tools_and_tool_calls() {
+        let mut m = Message::assistant("hi");
+        m.tool_calls = vec![ToolCall::new("1", "bash", "{\"command\":\"ls\"}")];
+        let specs = vec![ToolSpec::new(
+            "bash",
+            "run a command",
+            serde_json::json!({}),
+        )];
+        let n = prompt_bytes("system", &[m], tools_bytes(&specs));
+        assert_eq!(n, 6 + 2 + 4 + 16 + 4 + 13 + 2);
     }
 
     #[test]

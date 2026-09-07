@@ -62,6 +62,7 @@ prints the resolved locations.
 | approve tool calls by hand | `permissions.mode = "ask"`, `--ask`, `/ask` |
 | block shell commands | `permissions.deny` in config |
 | tune compaction | `[context]` in config |
+| cut input cost on long sessions | `cache` in `[context]`, config page |
 | change the status bar | `statusline.format` in config, or a `statusline` plugin hook |
 | add a tool, slash command, policy or theme | plugins page |
 | install a plugin from a git repository | `ah plugin install URL [DIR]`, plugins page |
