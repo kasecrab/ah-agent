@@ -205,6 +205,8 @@ impl Engine {
             window: None,
         };
         e.rebuild_provider();
+        // The plan belongs to the session, so resuming one resumes its tasks.
+        ah_core::plan::store().load(e.session.plan.clone());
         Ok(e)
     }
 
@@ -346,6 +348,7 @@ impl Engine {
         if let Ok(s) = &res {
             self.total_usage.add(&s.usage);
         }
+        self.session.save_plan(&ah_core::plan::store().snapshot());
         res
     }
 
@@ -444,11 +447,13 @@ impl Engine {
                 }
                 EngineCmd::Clear => {
                     self.session.clear();
+                    ah_core::plan::store().clear();
                     self.context_tokens = 0;
                 }
                 EngineCmd::Resume(id) => match Session::open(&id) {
                     Ok(s) => {
                         self.session = s;
+                        ah_core::plan::store().load(self.session.plan.clone());
                         self.total_usage = Usage::default();
                         self.context_tokens = 0;
                         let _ = tx.send(UiEvent::Resumed {
@@ -521,6 +526,15 @@ pub fn context_label(tokens: u64, window: u64) -> String {
 }
 
 /// Built-in statusline template.
+/// `2/7` while a plan is unfinished, empty otherwise.
+fn plan_label() -> String {
+    let (done, total) = ah_core::plan::store().snapshot().counts();
+    if total == 0 || done == total {
+        return String::new();
+    }
+    format!("{done}/{total}")
+}
+
 pub fn render_status_template(fmt: &str, ctx: &StatusContext) -> String {
     let short_cwd = {
         let home = dirs::home_dir()
@@ -553,6 +567,7 @@ pub fn render_status_template(fmt: &str, ctx: &StatusContext) -> String {
                 format!("({})", ctx.git_branch)
             },
         )
+        .replace("{plan}", &plan_label())
         .replace("{plugins}", &ctx.plugins.to_string())
         .replace("{state}", &ctx.state)
         .replace("{session}", &ctx.session_id);

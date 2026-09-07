@@ -150,6 +150,7 @@ theme Claude Code uses, so both look the same in the same terminal.
 | `image_paste_cmd` | `""` | shell command printing the clipboard image as PNG; empty tries `wl-paste`, `xclip`, `pngpaste` |
 | `markdown` | `true` | render assistant text as markdown |
 | `code_highlight` | `true` | highlight fenced code |
+| `show_plan` | `true` | plan summary above the input while tasks are open |
 
 ## [keys]
 
@@ -210,8 +211,8 @@ caps how many run together. Set `parallel = false` to go back to one at a time.
 
 Placeholders: `{model}`, `{favorite}`, `{effort}`, `{modalities}`,
 `{tokens_in}`, `{tokens_out}`, `{cost}`, `{context}` (`42%`, or `12k ctx`
-when the window is unknown), `{cwd}`, `{git}`, `{plugins}`, `{state}`,
-`{session}`. A plugin with the `statusline` hook receives the rendered text
+when the window is unknown), `{cwd}`, `{git}`, `{plan}` (`2/7` while a plan is
+unfinished), `{plugins}`, `{state}`, `{session}`. A plugin with the `statusline` hook receives the rendered text
 and can replace it.
 
 ## [permissions]

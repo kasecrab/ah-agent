@@ -285,6 +285,8 @@ pub struct Layout {
     pub markdown: bool,
     /// Highlight fenced code blocks.
     pub code_highlight: bool,
+    /// Show the plan summary above the input while tasks are open.
+    pub show_plan: bool,
 }
 
 impl Default for Layout {
@@ -309,6 +311,7 @@ impl Default for Layout {
             image_paste_cmd: String::new(),
             markdown: true,
             code_highlight: true,
+            show_plan: true,
         }
     }
 }
@@ -341,6 +344,8 @@ pub struct Keys {
     pub line_end: Vec<String>,
     /// Attach the image on the clipboard to the next message.
     pub paste_image: Vec<String>,
+    /// Show or hide the plan line above the input.
+    pub toggle_plan: Vec<String>,
 }
 
 impl Default for Keys {
@@ -368,6 +373,7 @@ impl Default for Keys {
             line_start: v(&["ctrl-a", "home"]),
             line_end: v(&["ctrl-e", "end"]),
             paste_image: v(&["ctrl-v"]),
+            toggle_plan: v(&["alt-p"]),
         }
     }
 }

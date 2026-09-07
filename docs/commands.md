@@ -74,6 +74,7 @@ name in, Enter runs it. Plugins can add commands (`ah docs plugins`).
 | `/set KEY VALUE` | override a setting for this run |
 | `/config` | config paths and active layers |
 | `/reload` | re-read config files and reload plugins |
+| `/plan` | show the task list |
 | `/plugins` | active plugins |
 | `/tools` | tools offered to the model |
 | `/keys` | active key bindings |
@@ -165,9 +166,10 @@ plan · 1/3 done · doing: 2 read the [tools] table
   3 [ ] tests for the parser · waits for 1
 ```
 
-The plan is stored with the session, so `ah -r` resumes it. In the TUI,
-`/plan` opens it, `Ctrl-P` toggles the summary line above the input, and the
-statusline placeholder is `{plan}`. `context.plan_reminder` controls the
+The plan is stored with the session, so `ah -r` resumes it. In the TUI, the
+summary sits above the input while tasks are open (`Alt-P` hides it,
+`layout.show_plan` sets the default), `/plan` opens the whole list, and
+`{plan}` is a statusline placeholder. `context.plan_reminder` controls the
 reminder sent when the model leaves an unfinished plan alone.
 
 ## JSONL events (`--json`)

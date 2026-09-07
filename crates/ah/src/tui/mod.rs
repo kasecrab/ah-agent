@@ -6,6 +6,7 @@ mod jobs;
 mod keys;
 mod markdown;
 mod picker;
+mod plan;
 mod theme;
 mod transcript;
 mod usage;
@@ -43,6 +44,8 @@ enum Msg {
     Input(Event),
     /// A background job printed something or ended.
     Jobs,
+    /// The task list changed.
+    Plan,
     Engine(UiEvent),
     Models(Result<Vec<ModelInfo>, String>),
     Usage(Result<usage::Remote, String>),
@@ -72,6 +75,7 @@ const COMMANDS: &[(&str, &str, bool)] = &[
         "pick a model (fuzzy search over OpenRouter catalogue)",
         true,
     ),
+    ("plan", "show the task list", false),
     ("plugins", "list active plugins", false),
     ("quit", "exit", false),
     ("reasoning", "toggle reasoning display", false),
@@ -134,6 +138,7 @@ struct Binds {
     line_start: Vec<Chord>,
     line_end: Vec<Chord>,
     paste_image: Vec<Chord>,
+    toggle_plan: Vec<Chord>,
     /// Plugin-provided `(chord, action)`; action is a Keys field or `/command`.
     extra: Vec<(Chord, String)>,
 }
@@ -163,6 +168,7 @@ impl Binds {
             line_start: p(&k.line_start),
             line_end: p(&k.line_end),
             paste_image: p(&k.paste_image),
+            toggle_plan: p(&k.toggle_plan),
             extra: extra
                 .iter()
                 .filter_map(|(k, a)| keys::parse(k).map(|c| (c, a.clone())))
@@ -220,6 +226,7 @@ struct App {
     completion: Option<Completion>,
     picker: Option<Picker>,
     job_view: Option<jobs::View>,
+    plan_view: Option<plan::View>,
     usage_pane: Option<usage::Pane>,
     stats: Stats,
     /// When the current reply started streaming reasoning.
@@ -353,6 +360,7 @@ fn run_inner(
         completion: None,
         picker: None,
         job_view: None,
+        plan_view: None,
         usage_pane: None,
         stats: Stats::default(),
         think_start: None,
@@ -414,9 +422,13 @@ fn run_inner(
 
     // Background jobs wake the loop when they print or end; nothing polls.
     {
-        let ui_tx = ui_tx.clone();
+        let jobs_tx = ui_tx.clone();
         ah_core::jobs::table().set_waker(Box::new(move || {
-            let _ = ui_tx.send(Msg::Jobs);
+            let _ = jobs_tx.send(Msg::Jobs);
+        }));
+        let plan_tx = ui_tx.clone();
+        ah_core::plan::store().set_waker(Box::new(move || {
+            let _ = plan_tx.send(Msg::Plan);
         }));
     }
 
@@ -871,6 +883,7 @@ impl App {
                 self.update_completion();
             }
             Msg::Jobs => self.jobs_changed(),
+            Msg::Plan => self.dirty = true,
             Msg::Engine(ev) => self.handle_engine(ev),
             Msg::Usage(res) => {
                 if let Some(p) = self.usage_pane.as_mut() {
@@ -2226,6 +2239,37 @@ impl App {
         }
     }
 
+    fn open_plan_view(&mut self) {
+        if ah_core::plan::store().is_empty() {
+            self.push(Block::Notice(
+                "no plan yet; the model writes one with the plan tool".into(),
+            ));
+            return;
+        }
+        self.plan_view = Some(plan::View::default());
+        self.dirty = true;
+    }
+
+    fn plan_view_key(&mut self, k: KeyEvent) {
+        let Some(view) = self.plan_view.as_mut() else {
+            return;
+        };
+        let total = ah_core::plan::store().snapshot().tasks.len();
+        let page = (self.size.1 as usize).saturating_sub(4).max(1);
+        match (k.code, k.modifiers) {
+            (KeyCode::Esc | KeyCode::Char('q'), _)
+            | (KeyCode::Char('c'), KeyModifiers::CONTROL) => self.plan_view = None,
+            (KeyCode::Up, _) => view.scroll(-1, total, page),
+            (KeyCode::Down, _) => view.scroll(1, total, page),
+            (KeyCode::PageUp, _) => view.scroll(-(page as i64), total, page),
+            (KeyCode::PageDown, _) => view.scroll(page as i64, total, page),
+            (KeyCode::Home, _) => view.scroll(-(total as i64), total, page),
+            (KeyCode::End, _) => view.scroll(total as i64, total, page),
+            _ => {}
+        }
+        self.dirty = true;
+    }
+
     fn job_view_key(&mut self, k: KeyEvent) {
         let Some(view) = self.job_view.as_mut() else {
             return;
@@ -2281,6 +2325,10 @@ impl App {
         self.sel = None;
         let b = self.binds.clone();
 
+        if self.plan_view.is_some() {
+            self.plan_view_key(k);
+            return;
+        }
         if self.job_view.is_some() {
             self.job_view_key(k);
             return;
@@ -2396,6 +2444,8 @@ impl App {
             self.follow = true;
         } else if keys::any_match(&b.clear, &k) {
             self.run_action("/clear");
+        } else if keys::any_match(&b.toggle_plan, &k) {
+            self.toggle_plan();
         } else if keys::any_match(&b.toggle_tools, &k) {
             self.toggle_tools();
         } else if keys::any_match(&b.toggle_reasoning, &k) {
@@ -2489,6 +2539,15 @@ impl App {
         );
     }
 
+    /// Show or hide the plan line above the input.
+    fn toggle_plan(&mut self) {
+        let v = !self.settings().layout.show_plan;
+        self.apply_patch(
+            Origin::Runtime("ui".into()),
+            serde_json::json!({"layout": {"show_plan": v}}),
+        );
+    }
+
     fn run_action(&mut self, action: &str) {
         if let Some(cmd) = action.strip_prefix('/') {
             self.slash(cmd);
@@ -2502,6 +2561,7 @@ impl App {
             "quit" => self.quit = true,
             "clear" => self.slash("clear"),
             "toggle_tools" => self.toggle_tools(),
+            "toggle_plan" => self.toggle_plan(),
             "scroll_top" => {
                 self.scroll = 0;
                 self.follow = false;
@@ -2527,7 +2587,7 @@ impl App {
                 for (p, c) in &self.plugin_commands {
                     s.push_str(&format!("\n  /{:<10} {} ({p})", c.name, c.description));
                 }
-                s.push_str("\nkeys: Down (empty input) background jobs · Enter send · Shift/Alt-Enter newline · Esc cancel · Up/Down prompt history · PgUp/PgDn scroll · Shift-Tab next favorite · Ctrl-V paste image · Ctrl-T tool output · Ctrl-R thinking · Ctrl-C quit");
+                s.push_str("\nkeys: Down (empty input) background jobs · Alt-P plan line · Enter send · Shift/Alt-Enter newline · Esc cancel · Up/Down prompt history · PgUp/PgDn scroll · Shift-Tab next favorite · Ctrl-V paste image · Ctrl-T tool output · Ctrl-R thinking · Ctrl-C quit");
                 self.push(Block::Notice(s));
             }
             "model" | "models" => {
@@ -2560,6 +2620,7 @@ impl App {
                 }
             }
             "init" => self.init_instructions(),
+            "plan" => self.open_plan_view(),
             "usage" => {
                 self.usage_pane = Some(usage::Pane::new());
                 self.fetch_usage();
@@ -2757,21 +2818,35 @@ impl App {
         } else {
             self.queue.len() as u16 + border
         };
+        let plan_line = layout.show_plan.then(|| {
+            plan::summary(
+                &ah_core::plan::store().snapshot(),
+                area.width.saturating_sub(1) as usize,
+                &pal,
+            )
+        });
+        let plan_line = plan_line.flatten();
+        let plan_rows: u16 = plan_line.is_some() as u16;
 
         let [
             transcript_area,
             perm_area,
             queue_area,
+            plan_area,
             input_area,
             status_area,
         ] = Layout::vertical([
             Constraint::Min(1),
             Constraint::Length(perm_rows),
             Constraint::Length(queue_rows),
+            Constraint::Length(plan_rows),
             Constraint::Length(input_rows + border),
             Constraint::Length(status_rows),
         ])
         .areas(area);
+        if let Some(line) = plan_line {
+            f.render_widget(Paragraph::new(line), plan_area);
+        }
 
         self.draw_transcript(f, transcript_area, &pal, layout.transcript_max_width);
         if !self.queue.is_empty() {
@@ -2870,6 +2945,9 @@ impl App {
             && let Some(job) = ah_core::jobs::table().get(v.id)
         {
             v.draw(f, area, &pal, &job);
+        }
+        if let Some(v) = self.plan_view.as_mut() {
+            v.draw(f, area, &pal, &ah_core::plan::store().snapshot());
         }
         if let Some(u) = &self.usage_pane {
             let icons = |id: &str| self.icons_for(id);

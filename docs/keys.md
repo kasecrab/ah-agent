@@ -46,6 +46,7 @@ everywhere.
 | `line_start` | `["ctrl-a", "home"]` | |
 | `line_end` | `["ctrl-e", "end"]` | |
 | `paste_image` | `["ctrl-v"]` | attach the clipboard image as an `[Image #1: 120 KB]` chip |
+| `toggle_plan` | `["alt-p"]` | show or hide the plan line above the input |
 
 Example:
 

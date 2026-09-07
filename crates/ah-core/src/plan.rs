@@ -41,7 +41,7 @@ impl Status {
         matches!(self, Status::Done | Status::Dropped)
     }
 
-    fn box_(self) -> &'static str {
+    pub fn box_(self) -> &'static str {
         match self {
             Status::Todo => "[ ]",
             Status::Doing => "[>]",
@@ -353,6 +353,16 @@ impl Plan {
             return "plan · empty; set one with the plan tool".into();
         }
         let mut out = self.summary();
+        for (id, depth) in self.ordered() {
+            out.push('\n');
+            out.push_str(&self.line(id, depth));
+        }
+        out
+    }
+
+    /// Task ids in reading order, each with how deep it sits.
+    pub fn ordered(&self) -> Vec<(u16, usize)> {
+        let mut out = Vec::with_capacity(self.tasks.len());
         let roots: Vec<u16> = self
             .tasks
             .iter()
@@ -360,33 +370,41 @@ impl Plan {
             .map(|t| t.id)
             .collect();
         for id in roots {
-            self.render_into(&mut out, id, 0);
+            self.walk(&mut out, id, 0);
         }
         out
     }
 
-    fn render_into(&self, out: &mut String, id: u16, depth: usize) {
-        let Some(t) = self.get(id) else { return };
-        out.push('\n');
-        out.push_str(&format!(
+    fn walk(&self, out: &mut Vec<(u16, usize)>, id: u16, depth: usize) {
+        if depth > 8 || out.iter().any(|(x, _)| *x == id) {
+            return;
+        }
+        out.push((id, depth));
+        for c in self.children(id) {
+            self.walk(out, c, depth + 1);
+        }
+    }
+
+    /// One task as a line: id, box, title, then what holds it up or how it went.
+    pub fn line(&self, id: u16, depth: usize) -> String {
+        let Some(t) = self.get(id) else {
+            return String::new();
+        };
+        let mut s = format!(
             "{:>3} {}{} {}",
             t.id,
             "  ".repeat(depth),
             t.status.box_(),
             t.title
-        ));
+        );
         let waiting = self.waiting_for(id);
         if !waiting.is_empty() && t.status == Status::Todo {
-            out.push_str(&format!(" · waits for {}", list(&waiting)));
+            s.push_str(&format!(" · waits for {}", list(&waiting)));
         }
         if !t.note.is_empty() {
-            out.push_str(&format!(" · {}", t.note));
+            s.push_str(&format!(" · {}", t.note));
         }
-        if depth < 8 {
-            for c in self.children(id) {
-                self.render_into(out, c, depth + 1);
-            }
-        }
+        s
     }
 }
 
