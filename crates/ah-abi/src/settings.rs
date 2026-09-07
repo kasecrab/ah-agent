@@ -173,6 +173,8 @@ pub struct Theme {
     pub syn_builtin: String,
     /// Keys in JSON, TOML and YAML.
     pub syn_attr: String,
+    /// Background of the running-jobs chip above the input.
+    pub job: String,
     /// Added and removed lines in file diffs.
     pub diff_add: String,
     pub diff_del: String,
@@ -219,6 +221,7 @@ impl Default for Theme {
             syn_function: "yellow".into(),
             syn_builtin: "cyan".into(),
             syn_attr: "cyan".into(),
+            job: "green".into(),
             diff_add: "green".into(),
             diff_del: "red".into(),
             border_style: BorderStyle::Lines,
@@ -409,6 +412,9 @@ pub struct ToolSettings {
     pub job_kill_grace_ms: u64,
     /// Default limit for a `jobs` wait, when the model does not give one.
     pub job_wait_ms: u64,
+    /// When a background job ends while the model is idle, start a turn so it
+    /// can read the output and say what happened.
+    pub job_wake: bool,
 }
 
 impl Default for ToolSettings {
@@ -468,6 +474,7 @@ impl Default for ToolSettings {
             job_buffer_bytes: 256 * 1024,
             job_kill_grace_ms: 2000,
             job_wait_ms: 60_000,
+            job_wake: true,
         }
     }
 }

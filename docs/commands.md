@@ -124,11 +124,16 @@ the job ends or `timeout_ms` passes, and `kill` stops it. Waiting is cheaper
 than polling: it costs no request until something actually happens.
 
 When a job ends, the next request carries one `[background] job 2 exited 0
-after 12.4s · 340 lines` line, so the model finds out without asking.
+after 12.4s · 340 lines` line, so the model finds out without asking. If
+nothing is running at that moment, ah starts a turn of its own so the model
+reads the output and says what happened instead of leaving the news on the
+screen; `tools.job_wake = false` turns that off and the model waits for your
+next message.
 
-In the TUI, `Down` on an empty input opens the job list; `Enter` on a job
-follows its output live, `k` stops the job, `Esc` closes the view. Jobs are
-children of the ah process: leaving ah stops them.
+In the TUI, a green `2 Bash` chip above the input counts the running jobs and
+disappears when the last one ends. `Down` on an empty input opens the job
+list; `Enter` on a job follows its output live, `k` stops the job, `Esc`
+closes the view. Jobs are children of the ah process: leaving ah stops them.
 
 ## The plan
 

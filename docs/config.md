@@ -118,6 +118,7 @@ theme Claude Code uses, so both look the same in the same terminal.
 | `syn_function` | `"yellow"` | function names before `(` |
 | `syn_builtin` | `"cyan"` | built-in functions and primitive types (`str`, `string`, `print`) |
 | `syn_attr` | `"cyan"` | keys in JSON, TOML and YAML |
+| `job` | `"green"` | background of the running-jobs chip above the input |
 | `diff_add` | `"green"` | added lines in file diffs |
 | `diff_del` | `"red"` | removed lines |
 | `border_style` | `"lines"` | `none`, `lines` (rules above and below the input), `plain`, `rounded`, `double`, `thick` |
@@ -174,6 +175,7 @@ the full default table.
 | `job_buffer_bytes` | `262144` | output kept per background job: the first third, then the newest lines |
 | `job_kill_grace_ms` | `2000` | time between the polite stop and the hard kill |
 | `job_wait_ms` | `60000` | default limit for a `jobs` wait |
+| `job_wake` | `true` | when a job ends while the model is idle, start a turn so it can read the output and report |
 
 ### Parallel tool calls
 

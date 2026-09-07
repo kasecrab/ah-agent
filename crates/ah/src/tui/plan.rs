@@ -31,18 +31,38 @@ pub fn lines(plan: &Plan, pal: &Palette) -> Vec<Line<'static>> {
         .collect()
 }
 
-/// The line above the input while tasks are open; `None` when there is
-/// nothing worth a row of the screen.
-pub fn summary(plan: &Plan, width: usize, pal: &Palette) -> Option<Line<'static>> {
+/// The line above the input: how many shell jobs are running, then the plan
+/// while tasks are open. `None` when neither has anything to say.
+pub fn status_line(
+    plan: &Plan,
+    jobs: usize,
+    show_plan: bool,
+    width: usize,
+    pal: &Palette,
+) -> Option<Line<'static>> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut used = 0;
+    if jobs > 0 {
+        let chip = format!(" {jobs} Bash ");
+        used += chip.chars().count() + 1;
+        spans.push(Span::styled(
+            chip,
+            Style::default()
+                .bg(pal.job)
+                .fg(ratatui::style::Color::Black),
+        ));
+        spans.push(Span::raw(" "));
+    }
     let (done, total) = plan.counts();
-    if total == 0 || done == total {
-        return None;
+    if show_plan && total > 0 && done < total {
+        let mut text = plan.summary();
+        let room = width.saturating_sub(used);
+        if room > 4 && text.chars().count() > room {
+            text = text.chars().take(room - 1).collect::<String>() + "…";
+        }
+        spans.push(Span::styled(text, pal.dim()));
     }
-    let mut text = plan.summary();
-    if width > 4 && text.chars().count() > width {
-        text = text.chars().take(width - 1).collect::<String>() + "…";
-    }
-    Some(Line::from(Span::styled(text, pal.dim())))
+    (!spans.is_empty()).then(|| Line::from(spans))
 }
 
 /// Scroll position of the `/plan` overlay.
@@ -120,20 +140,32 @@ mod tests {
     }
 
     #[test]
-    fn the_summary_disappears_when_there_is_nothing_left_to_do() {
+    fn the_line_disappears_when_there_is_nothing_left_to_say() {
         let pal = Palette::from_theme(&Theme::default());
         let mut p = plan();
-        assert!(summary(&p, 80, &pal).is_some());
+        assert!(status_line(&p, 0, true, 80, &pal).is_some());
         p.set_status(&[2], Status::Done, "").unwrap();
         p.set_status(&[1], Status::Done, "").unwrap();
-        assert!(summary(&p, 80, &pal).is_none());
-        assert!(summary(&Plan::default(), 80, &pal).is_none());
+        assert!(status_line(&p, 0, true, 80, &pal).is_none());
+        assert!(status_line(&p, 0, false, 80, &pal).is_none());
+        assert!(status_line(&Plan::default(), 0, true, 80, &pal).is_none());
+    }
+
+    #[test]
+    fn running_jobs_get_a_chip_of_their_own() {
+        let pal = Palette::from_theme(&Theme::default());
+        let line = status_line(&Plan::default(), 2, true, 80, &pal).unwrap();
+        assert_eq!(line.to_string().trim(), "2 Bash");
+        // The plan keeps whatever room the chip leaves.
+        let line = status_line(&plan(), 3, true, 80, &pal).unwrap();
+        assert!(line.to_string().starts_with(" 3 Bash "));
+        assert!(line.to_string().contains("0/2 done"));
     }
 
     #[test]
     fn a_long_summary_is_cut_to_the_width() {
         let pal = Palette::from_theme(&Theme::default());
-        let line = summary(&plan(), 20, &pal).unwrap();
+        let line = status_line(&plan(), 0, true, 20, &pal).unwrap();
         assert_eq!(line.width(), 20);
         assert!(line.to_string().ends_with('…'));
     }

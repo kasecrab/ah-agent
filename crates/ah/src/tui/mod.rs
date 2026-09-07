@@ -2176,6 +2176,16 @@ impl App {
         for n in table.notices(ah_core::jobs::Audience::Ui) {
             self.push(Block::Notice(n));
         }
+        // A job that ended while nothing was running gets the model's
+        // attention now, instead of waiting for the user's next message.
+        if !self.busy
+            && self.settings().tools.job_wake
+            && table.unheard(ah_core::jobs::Audience::Model)
+        {
+            self.busy = true;
+            self.set_state(State::Thinking);
+            let _ = self.tx.send(EngineCmd::Wake);
+        }
         if self.job_view.is_some() {
             self.dirty = true;
         }
@@ -2818,14 +2828,13 @@ impl App {
         } else {
             self.queue.len() as u16 + border
         };
-        let plan_line = layout.show_plan.then(|| {
-            plan::summary(
-                &ah_core::plan::store().snapshot(),
-                area.width.saturating_sub(1) as usize,
-                &pal,
-            )
-        });
-        let plan_line = plan_line.flatten();
+        let plan_line = plan::status_line(
+            &ah_core::plan::store().snapshot(),
+            ah_core::jobs::table().running(),
+            layout.show_plan,
+            area.width.saturating_sub(1) as usize,
+            &pal,
+        );
         let plan_rows: u16 = plan_line.is_some() as u16;
 
         let [
@@ -2858,10 +2867,10 @@ impl App {
             f.render_widget(Clear, perm_area);
             f.render_widget(block, perm_area);
             let lines = vec![
-                Line::from(vec![
-                    Span::styled(format!("{} ", call.function.name), pal.bold(pal.tool)),
-                    Span::raw(crate::cli::compact_args(&call.function.arguments)),
-                ]),
+                Line::from(Span::styled(
+                    crate::cli::describe_call(call),
+                    pal.bold(pal.tool),
+                )),
                 Line::from(Span::styled(
                     if reason.is_empty() {
                         "run this tool?".to_string()

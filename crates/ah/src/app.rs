@@ -118,6 +118,8 @@ pub enum EngineCmd {
     Rename(String),
     /// Summarise the conversation now; the string is optional focus text.
     Compact(String),
+    /// A background job ended; let the model see it and react.
+    Wake,
     Quit,
 }
 
@@ -315,6 +317,21 @@ impl Engine {
         images: Vec<String>,
         io: &dyn AgentIo,
     ) -> Result<TurnSummary, ah_core::Error> {
+        self.turn(Some(Message::user_with_images(text, images)), io)
+    }
+
+    /// Let the model act on something that happened while it was idle — a
+    /// background job that ended. The loop picks the news up on its own; no
+    /// message of ours goes into the conversation.
+    pub fn wake(&mut self, io: &dyn AgentIo) -> Result<TurnSummary, ah_core::Error> {
+        self.turn(None, io)
+    }
+
+    fn turn(
+        &mut self,
+        message: Option<Message>,
+        io: &dyn AgentIo,
+    ) -> Result<TurnSummary, ah_core::Error> {
         let window = self.context_window();
         self.cancel.store(false, Ordering::Relaxed);
         let mut messages = std::mem::take(&mut self.session.messages);
@@ -331,7 +348,7 @@ impl Engine {
             }
         }
         let before = messages.len();
-        messages.push(Message::user_with_images(text, images));
+        messages.extend(message);
         let res = agent.run_turn(&mut messages, io);
         let compacted = agent.compactions > 0;
         let context_tokens = agent.context_tokens;
@@ -408,6 +425,13 @@ impl Engine {
                         let _ = tx.send(UiEvent::PluginLogs(logs));
                     }
                     let _ = tx.send(UiEvent::Busy(false));
+                }
+                EngineCmd::Wake => {
+                    if ah_core::jobs::table().unheard(ah_core::jobs::Audience::Model) {
+                        let _ = tx.send(UiEvent::Busy(true));
+                        let _ = self.wake(&io);
+                        let _ = tx.send(UiEvent::Busy(false));
+                    }
                 }
                 EngineCmd::Slash { name, args, stage } => {
                     let out = match self.slash(&name, &args, stage) {

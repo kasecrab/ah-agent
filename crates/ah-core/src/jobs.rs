@@ -372,6 +372,16 @@ impl Jobs {
             .collect()
     }
 
+    /// True when a job has ended that this audience has not been told about,
+    /// without claiming the news.
+    pub fn unheard(&self, who: Audience) -> bool {
+        self.jobs
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|j| !j.running() && j.reported.load(Ordering::Relaxed) & who.bit() == 0)
+    }
+
     /// Called when a job prints or ends. Whoever is watching gets one wake
     /// until it says it has caught up, so a chatty job cannot flood the UI.
     pub fn set_waker(&self, waker: Waker) {
@@ -518,6 +528,7 @@ mod tests {
         let _guard = notice_lock();
         let j = table().spawn("sh", "true", &cwd(), 65536).unwrap();
         assert!(j.wait(Duration::from_secs(5)));
+        assert!(table().unheard(Audience::Model));
         let mine = format!("job {} exited 0", j.id);
         assert!(
             table()
@@ -531,6 +542,7 @@ mod tests {
                 .iter()
                 .any(|n| n.starts_with(&mine))
         );
+        assert!(!table().unheard(Audience::Model));
         assert!(
             table()
                 .notices(Audience::Ui)

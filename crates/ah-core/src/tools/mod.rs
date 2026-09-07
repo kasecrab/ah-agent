@@ -1,6 +1,7 @@
 //! Built-in tools and the registry that dispatches model tool calls.
 
 pub mod bash;
+pub mod describe;
 pub mod diff;
 pub mod edit;
 pub mod fs;

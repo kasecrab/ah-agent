@@ -209,13 +209,6 @@ fn edit_preview(call: &ToolCall) -> Option<String> {
     )
 }
 
-fn arg_path(call: &ToolCall) -> String {
-    serde_json::from_str::<serde_json::Value>(&call.function.arguments)
-        .ok()
-        .and_then(|v| v.get("path")?.as_str().map(str::to_string))
-        .unwrap_or_default()
-}
-
 /// Colour unified-diff lines, clipped to `width` and at most `max` lines.
 fn diff_lines(diff: &str, width: usize, max: usize, pal: &Palette) -> Vec<Line<'static>> {
     let total = diff.lines().count();
@@ -334,8 +327,20 @@ fn render(block: &Block, width: usize, view: &View, pal: &Palette) -> Vec<Line<'
                 None => edit_preview(call),
             }
             .filter(|d| !d.is_empty());
-            let args = match &diff {
-                // the diff already says what changed; keep the header to the path
+            // a plain-English line for the built-ins, the raw arguments for
+            // anything else (plugin tools)
+            let said = serde_json::from_str(&call.function.arguments)
+                .ok()
+                .and_then(|v| ah_core::tools::describe::describe(&call.function.name, &v))
+                .unwrap_or_else(|| {
+                    format!(
+                        "{}({})",
+                        call.function.name,
+                        crate::cli::compact_args(&call.function.arguments)
+                    )
+                });
+            let head = match &diff {
+                // the diff already says what changed; the header just counts it
                 Some(d) => {
                     let (add, del) =
                         d.lines()
@@ -344,16 +349,16 @@ fn render(block: &Block, width: usize, view: &View, pal: &Palette) -> Vec<Line<'
                                 Some(b'-') => (a, r + 1),
                                 _ => (a, r),
                             });
-                    format!("{} +{add} -{del}", arg_path(call))
+                    format!("{said} +{add} -{del}")
                 }
-                None => crate::cli::compact_args(&call.function.arguments),
+                None => said,
             };
             let status = match result {
                 None => " …".to_string(),
                 Some(r) if r.is_error => format!(" ✗ {duration_ms} ms"),
                 Some(_) => format!(" ✓ {duration_ms} ms"),
             };
-            let header = format!("{}{} {args}{status}", pal.tool_prefix, call.function.name);
+            let header = format!("{}{head}{status}", pal.tool_prefix);
             let hstyle = match result {
                 Some(r) if r.is_error => Style::default().fg(pal.error),
                 _ => Style::default().fg(pal.tool),

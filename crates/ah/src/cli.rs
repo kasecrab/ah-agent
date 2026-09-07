@@ -35,12 +35,7 @@ impl AgentIo for PrintIo {
             }
             AgentEvent::Reasoning(_) => {}
             AgentEvent::ToolStart(c) if self.show_tools => {
-                let _ = writeln!(
-                    err,
-                    "\x1b[33m⚙ {}\x1b[0m {}",
-                    c.function.name,
-                    compact_args(&c.function.arguments)
-                );
+                let _ = writeln!(err, "\x1b[33m⚙\x1b[0m {}", describe_call(&c));
             }
             AgentEvent::ToolEnd {
                 result,
@@ -133,12 +128,7 @@ impl AgentIo for PrintIo {
             return true;
         }
         let mut err = std::io::stderr().lock();
-        let _ = writeln!(
-            err,
-            "\x1b[33m? run {} {}\x1b[0m",
-            call.function.name,
-            compact_args(&call.function.arguments)
-        );
+        let _ = writeln!(err, "\x1b[33m? {}\x1b[0m", describe_call(call));
         if !reason.is_empty() {
             let _ = writeln!(err, "  {reason}");
         }
@@ -150,6 +140,20 @@ impl AgentIo for PrintIo {
         }
         matches!(line.trim(), "y" | "Y" | "yes")
     }
+}
+
+/// What a tool call is doing, in plain English where ah knows the tool.
+pub fn describe_call(call: &ah_core::abi::ToolCall) -> String {
+    serde_json::from_str(&call.function.arguments)
+        .ok()
+        .and_then(|v| ah_core::tools::describe::describe(&call.function.name, &v))
+        .unwrap_or_else(|| {
+            format!(
+                "{}({})",
+                call.function.name,
+                compact_args(&call.function.arguments)
+            )
+        })
 }
 
 pub fn compact_args(args: &str) -> String {
