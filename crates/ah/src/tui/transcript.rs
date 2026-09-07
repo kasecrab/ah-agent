@@ -19,7 +19,9 @@ pub enum Block {
     Tool {
         call: ToolCall,
         result: Option<ToolResult>,
-        duration_ms: u64,
+        /// How long the call took, or `None` for a call replayed from a
+        /// session file, where the timing was never recorded.
+        duration_ms: Option<u64>,
         expanded: Option<bool>,
     },
     Notice(String),
@@ -94,7 +96,7 @@ impl Entry {
                         .map(|r| r.output.len() as u64 + 1)
                         .unwrap_or(0),
                 );
-                mix(&mut k, *duration_ms);
+                mix(&mut k, duration_ms.map_or(0, |d| d + 1));
                 mix(&mut k, expanded.map(|e| e as u64 + 1).unwrap_or(0));
             }
         }
@@ -353,10 +355,15 @@ fn render(block: &Block, width: usize, view: &View, pal: &Palette) -> Vec<Line<'
                 }
                 None => said,
             };
+            let took = match duration_ms {
+                None => String::new(),
+                Some(0) => " <1 ms".into(),
+                Some(d) => format!(" {d} ms"),
+            };
             let status = match result {
                 None => " …".to_string(),
-                Some(r) if r.is_error => format!(" ✗ {duration_ms} ms"),
-                Some(_) => format!(" ✓ {duration_ms} ms"),
+                Some(r) if r.is_error => format!(" ✗{took}"),
+                Some(_) => format!(" ✓{took}"),
             };
             let header = format!("{}{head}{status}", pal.tool_prefix);
             let hstyle = match result {
@@ -427,6 +434,44 @@ fn render(block: &Block, width: usize, view: &View, pal: &Palette) -> Vec<Line<'
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tool_header(duration_ms: Option<u64>) -> String {
+        use ah_core::abi::ToolFunction;
+        let block = Block::Tool {
+            call: ToolCall {
+                id: "1".into(),
+                kind: "function".into(),
+                function: ToolFunction {
+                    name: "read_file".into(),
+                    arguments: r#"{"path": "a.rs"}"#.into(),
+                },
+            },
+            result: Some(ToolResult::ok("one line")),
+            duration_ms,
+            expanded: Some(false),
+        };
+        let pal = Palette::from_theme(&ah_core::abi::Theme::default());
+        let view = View {
+            show_tool_output: false,
+            tool_output_lines: 5,
+            show_reasoning: false,
+            wrap: true,
+            markdown: false,
+            code_highlight: false,
+        };
+        render(&block, 80, &view, &pal)[0].to_string()
+    }
+
+    #[test]
+    fn a_replayed_call_claims_no_timing() {
+        assert!(tool_header(Some(12)).contains("Read(a.rs) ✓ 12 ms"));
+        // Sub-millisecond calls are real; zero is not.
+        assert!(tool_header(Some(0)).contains("✓ <1 ms"));
+        // Session files keep no durations, so replayed calls show none.
+        let replayed = tool_header(None);
+        assert!(replayed.contains("Read(a.rs) ✓"), "{replayed}");
+        assert!(!replayed.contains("ms"), "{replayed}");
+    }
 
     #[test]
     fn wrap_words_and_long_tokens() {

@@ -51,7 +51,12 @@ impl AgentIo for PrintIo {
                     .take(120)
                     .collect::<String>();
                 let color = if result.is_error { "31" } else { "90" };
-                let _ = writeln!(err, "\x1b[{color}m  ↳ {first} ({duration_ms} ms)\x1b[0m");
+                let took = if duration_ms == 0 {
+                    "<1 ms".to_string()
+                } else {
+                    format!("{duration_ms} ms")
+                };
+                let _ = writeln!(err, "\x1b[{color}m  ↳ {first} ({took})\x1b[0m");
                 if let Some(d) = &result.diff {
                     for l in d.lines().take(40) {
                         let c = match l.as_bytes().first() {

@@ -538,7 +538,7 @@ impl App {
                         self.push(Block::Tool {
                             call: c.clone(),
                             result: None,
-                            duration_ms: 0,
+                            duration_ms: None,
                             expanded: None,
                         });
                     }
@@ -2039,7 +2039,7 @@ impl App {
                 self.push(Block::Tool {
                     call,
                     result: None,
-                    duration_ms: 0,
+                    duration_ms: None,
                     expanded: None,
                 });
             }
@@ -2061,7 +2061,7 @@ impl App {
                         && c.id == call.id
                     {
                         *r = Some(result);
-                        *d = duration_ms;
+                        *d = Some(duration_ms);
                         break;
                     }
                 }
