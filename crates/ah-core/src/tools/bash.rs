@@ -59,10 +59,17 @@ impl Tool for Bash {
                 job.id, job.id
             ));
         }
-        if job.wait(timeout) {
+        if job.wait_while(timeout, ctx.cancel) {
             let text = finished_text(&job);
             table.remove(job.id);
             return text;
+        }
+        // Esc during a command stops the command, not just the turn.
+        if ctx.cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            job.kill(Duration::from_millis(ctx.settings.job_kill_grace_ms));
+            job.wait(Duration::from_millis(ctx.settings.job_kill_grace_ms + 500));
+            table.remove(job.id);
+            return ToolResult::err("[cancelled by user]");
         }
         if !ctx.settings.background_on_timeout {
             job.kill(Duration::from_millis(ctx.settings.job_kill_grace_ms));
@@ -128,6 +135,7 @@ mod tests {
         let ctx = ToolCtx {
             cwd: &cwd,
             settings,
+            cancel: crate::tools::never(),
         };
         Bash.run(&args, &ctx)
     }
@@ -197,6 +205,29 @@ mod tests {
         let id = job_id(&r.output, "started job ");
         assert!(jobs::table().get(id).unwrap().running());
         stop(id);
+    }
+
+    #[test]
+    fn cancelling_the_turn_stops_the_command() {
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let settings = settings();
+        let cwd = std::env::current_dir().unwrap();
+        let ctx = ToolCtx {
+            cwd: &cwd,
+            settings: &settings,
+            cancel: &cancel,
+        };
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                std::thread::sleep(Duration::from_millis(100));
+                cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            });
+            let start = std::time::Instant::now();
+            let r = Bash.run(&json!({"command": "sleep 30"}), &ctx);
+            assert!(r.is_error);
+            assert!(r.output.contains("cancelled"), "{}", r.output);
+            assert!(start.elapsed() < Duration::from_secs(5), "cancel was slow");
+        });
     }
 
     #[test]

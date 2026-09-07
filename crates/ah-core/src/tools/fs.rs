@@ -254,6 +254,7 @@ mod tests {
         let ctx = ToolCtx {
             cwd: &dir,
             settings: &settings,
+            cancel: crate::tools::never(),
         };
         WriteFile.run(
             &json!({"path": "f.rs", "content": "fn a() {\n    one();\n    two();\n}\n"}),
@@ -309,6 +310,7 @@ mod tests {
         let ctx = ToolCtx {
             cwd: &dir,
             settings: &settings,
+            cancel: crate::tools::never(),
         };
         let r = EditFile.run(
             &json!({"path": "nope.txt", "old_string": "a", "new_string": "b"}),
@@ -326,6 +328,7 @@ mod tests {
         let ctx = ToolCtx {
             cwd: &dir,
             settings: &settings,
+            cancel: crate::tools::never(),
         };
         let w = WriteFile.run(
             &json!({"path": "sub/f.txt", "content": "one\ntwo\nthree\n"}),

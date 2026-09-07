@@ -667,6 +667,7 @@ impl<'a> Agent<'a> {
         ToolCtx {
             cwd: &self.cwd,
             settings: &self.settings.tools,
+            cancel: self.cancel,
         }
     }
 

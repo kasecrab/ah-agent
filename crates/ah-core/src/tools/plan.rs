@@ -165,6 +165,7 @@ mod tests {
         let ctx = ToolCtx {
             cwd: &cwd,
             settings: &settings,
+            cancel: crate::tools::never(),
         };
         PlanTool.run(&args, &ctx)
     }

@@ -207,6 +207,24 @@ impl Job {
         !r.timed_out()
     }
 
+    /// Wait, but look at `cancel` every 40 ms. Returns `true` if the job
+    /// ended, `false` if the wait ran out or the turn was cancelled.
+    pub fn wait_while(&self, timeout: Duration, cancel: &std::sync::atomic::AtomicBool) -> bool {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if cancel.load(Ordering::Relaxed) {
+                return false;
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            if self.wait(left.min(Duration::from_millis(40))) {
+                return true;
+            }
+        }
+    }
+
     /// Ask the process group to stop, then make sure of it after `grace`.
     pub fn kill(&self, grace: Duration) {
         if !self.running() {

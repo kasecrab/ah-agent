@@ -53,7 +53,10 @@ impl Tool for JobsTool {
             "output" => ToolResult::ok(output(&job, args)),
             "wait" => {
                 let ms = arg_u64(args, "timeout_ms").unwrap_or(ctx.settings.job_wait_ms);
-                job.wait(Duration::from_millis(ms));
+                job.wait_while(Duration::from_millis(ms), ctx.cancel);
+                if ctx.cancel.load(std::sync::atomic::Ordering::Relaxed) && job.running() {
+                    return ToolResult::err("[cancelled by user]");
+                }
                 ToolResult::ok(output(&job, args))
             }
             "kill" => {
@@ -106,6 +109,7 @@ mod tests {
         let ctx = ToolCtx {
             cwd: &cwd,
             settings: &settings,
+            cancel: crate::tools::never(),
         };
         JobsTool.run(&args, &ctx)
     }

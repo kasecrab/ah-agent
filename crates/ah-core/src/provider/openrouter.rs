@@ -1,6 +1,6 @@
 //! OpenRouter (OpenAI-compatible) chat completions over SSE using `ureq`.
 
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -229,24 +229,32 @@ pub(crate) fn handle_chunk(payload: &str, on_event: OnEvent<'_>) -> Result<bool>
     Ok(true)
 }
 
-/// Drive an SSE byte stream to completion.
-pub(crate) fn read_stream<R: Read>(
-    reader: R,
+/// What the line source has for us right now.
+enum Piece {
+    Line(String),
+    /// Nothing yet; a chance to notice a cancel.
+    Idle,
+    End,
+}
+
+/// Feed SSE lines to `on_event` until the stream ends, `next` fails, or the
+/// turn is cancelled. `next` must return `Idle` rather than block for long,
+/// so a cancel is acted on within one tick instead of at the next byte.
+fn drive(
     cancel: &AtomicBool,
     on_event: OnEvent<'_>,
+    mut next: impl FnMut() -> Result<Piece>,
 ) -> Result<()> {
-    let mut br = BufReader::with_capacity(16 * 1024, reader);
     let mut parser = SseParser::new();
-    let mut line = String::with_capacity(1024);
     loop {
         if cancel.load(Ordering::Relaxed) {
             return Err(Error::Cancelled);
         }
-        line.clear();
-        let n = br.read_line(&mut line)?;
-        if n == 0 {
-            return Ok(()); // EOF without [DONE]; treat as complete.
-        }
+        let line = match next()? {
+            Piece::Idle => continue,
+            Piece::End => return Ok(()), // EOF without [DONE]; treat as complete.
+            Piece::Line(l) => l,
+        };
         let trimmed = line.strip_suffix('\n').unwrap_or(&line);
         match parser.push_line(trimmed) {
             Some(SseItem::Done) => return Ok(()),
@@ -255,6 +263,28 @@ pub(crate) fn read_stream<R: Read>(
         }
     }
 }
+
+/// Drive an SSE byte stream to completion. Reads block, so this is for
+/// sources that cannot stall: fixtures and tests.
+#[cfg(test)]
+fn read_stream<R: std::io::Read>(
+    reader: R,
+    cancel: &AtomicBool,
+    on_event: OnEvent<'_>,
+) -> Result<()> {
+    let mut br = BufReader::with_capacity(16 * 1024, reader);
+    let mut line = String::with_capacity(1024);
+    drive(cancel, on_event, move || {
+        line.clear();
+        Ok(match br.read_line(&mut line)? {
+            0 => Piece::End,
+            _ => Piece::Line(line.clone()),
+        })
+    })
+}
+
+/// How long a read waits before the cancel flag is looked at again.
+const TICK: Duration = Duration::from_millis(40);
 
 impl Provider for OpenRouter {
     fn name(&self) -> &str {
@@ -273,24 +303,74 @@ impl Provider for OpenRouter {
             req.tools.len()
         );
 
-        let mut resp = self
-            .agent
-            .post(self.url("/chat/completions"))
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("HTTP-Referer", &self.referer)
-            .header("X-Title", &self.app_title)
-            .header("Accept", "text/event-stream")
-            .send_json(&body)?;
-        let status = resp.status().as_u16();
-        if !(200..300).contains(&status) {
-            let text = resp.body_mut().read_to_string().unwrap_or_default();
-            return Err(Error::Api {
-                status,
-                message: excerpt(&text),
-            });
+        // The request and every read happen on their own thread: a socket read
+        // blocks until bytes arrive, and Esc must not wait for a slow model.
+        // This side only ever waits `TICK` for the next line.
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Piece>>(64);
+        let agent = self.agent.clone();
+        let url = self.url("/chat/completions");
+        let key = self.api_key.clone();
+        let referer = self.referer.clone();
+        let title = self.app_title.clone();
+        let worker = std::thread::Builder::new()
+            .name("ah-stream".into())
+            .spawn(move || {
+                let send = |v| tx.send(v).is_ok();
+                let mut resp = match agent
+                    .post(url)
+                    .header("Authorization", format!("Bearer {key}"))
+                    .header("HTTP-Referer", referer)
+                    .header("X-Title", title)
+                    .header("Accept", "text/event-stream")
+                    .send_json(&body)
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        send(Err(e.into()));
+                        return;
+                    }
+                };
+                let status = resp.status().as_u16();
+                if !(200..300).contains(&status) {
+                    let text = resp.body_mut().read_to_string().unwrap_or_default();
+                    send(Err(Error::Api {
+                        status,
+                        message: excerpt(&text),
+                    }));
+                    return;
+                }
+                let reader = resp.body_mut().with_config().limit(u64::MAX).reader();
+                let mut br = BufReader::with_capacity(16 * 1024, reader);
+                let mut line = String::with_capacity(1024);
+                loop {
+                    line.clear();
+                    let chunk = match br.read_line(&mut line) {
+                        Ok(0) => Ok(Piece::End),
+                        Ok(_) => Ok(Piece::Line(line.clone())),
+                        Err(e) => Err(e.into()),
+                    };
+                    let end = !matches!(chunk, Ok(Piece::Line(_)));
+                    // A receiver that has gone away means the turn was
+                    // cancelled; dropping the response closes the socket.
+                    if !send(chunk) || end {
+                        return;
+                    }
+                }
+            })?;
+        let out = drive(cancel, on_event, || {
+            match rx.recv_timeout(TICK) {
+                Ok(chunk) => chunk,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Ok(Piece::Idle),
+                // the worker is done and said all it had to say
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Ok(Piece::End),
+            }
+        });
+        // Cancelled turns leave the worker to unwind on its own; it exits as
+        // soon as its next send fails.
+        if out.is_ok() {
+            let _ = worker.join();
         }
-        let reader = resp.body_mut().with_config().limit(u64::MAX).reader();
-        read_stream(reader, cancel, on_event)
+        out
     }
 }
 
@@ -401,6 +481,22 @@ mod tests {
         let err = read_stream(s.as_bytes(), &cancel, &mut |_| true).unwrap_err();
         assert!(matches!(err, Error::Api { .. }), "{err}");
         assert!(err.to_string().contains("rate limited"));
+    }
+
+    #[test]
+    fn a_stalled_stream_still_notices_a_cancel() {
+        let cancel = AtomicBool::new(false);
+        let start = std::time::Instant::now();
+        let err = drive(&cancel, &mut |_| true, || {
+            // A model that has sent nothing yet: every read comes back empty.
+            if start.elapsed() > Duration::from_millis(60) {
+                cancel.store(true, Ordering::Relaxed);
+            }
+            Ok(Piece::Idle)
+        })
+        .unwrap_err();
+        assert!(matches!(err, Error::Cancelled));
+        assert!(start.elapsed() < Duration::from_secs(1), "cancel was slow");
     }
 
     #[test]

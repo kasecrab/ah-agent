@@ -18,6 +18,15 @@ use serde_json::Value;
 pub struct ToolCtx<'a> {
     pub cwd: &'a PathBuf,
     pub settings: &'a ToolSettings,
+    /// Set when the user cancels the turn. A tool that waits for anything
+    /// watches this and gives up at once.
+    pub cancel: &'a std::sync::atomic::AtomicBool,
+}
+
+/// A cancel flag for callers with nothing to cancel (one-off tool runs, tests).
+pub fn never() -> &'static std::sync::atomic::AtomicBool {
+    static NEVER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    &NEVER
 }
 
 pub trait Tool: Send + Sync {
