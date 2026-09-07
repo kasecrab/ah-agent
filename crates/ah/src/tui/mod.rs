@@ -102,11 +102,48 @@ fn alias_of(name: &str) -> Option<&'static str> {
 }
 
 /// Mouse selection in screen cells.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct Selection {
     anchor: (u16, u16),
     cur: (u16, u16),
     dragging: bool,
+    /// What one click covers: the cells dragged over, the word under the
+    /// pointer (double click) or the whole row (triple click).
+    grain: Grain,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Grain {
+    Cells,
+    Word,
+    Row,
+}
+
+/// Two clicks count as a double click within this long, in the same place.
+const DOUBLE_CLICK_MS: u128 = 400;
+
+/// How many clicks have stacked up in the same spot, counting this one.
+fn click_repeat(
+    last: Option<(std::time::Instant, (u16, u16), u8)>,
+    at: (u16, u16),
+    now: std::time::Instant,
+) -> u8 {
+    last.filter(|(t, p, _)| *p == at && now.duration_since(*t).as_millis() <= DOUBLE_CLICK_MS)
+        .map_or(1, |(_, _, n)| n % 3 + 1)
+}
+
+fn grain_of(clicks: u8) -> Grain {
+    match clicks {
+        2 => Grain::Word,
+        3 => Grain::Row,
+        _ => Grain::Cells,
+    }
+}
+
+/// Characters a double click keeps together: words, and paths like
+/// `crates/ah/src/tui/mod.rs:106`.
+fn word_char(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':' | '~')
 }
 
 struct Completion {
@@ -232,6 +269,9 @@ struct App {
     /// When the current reply started streaming reasoning.
     think_start: Option<Instant>,
     sel: Option<Selection>,
+    /// When and where the last left click landed, and how many have stacked
+    /// up there, for double and triple clicks.
+    last_click: Option<(std::time::Instant, (u16, u16), u8)>,
     copy_pending: bool,
     mouse_on: bool,
     /// Model catalogue, loaded lazily for the picker and reasoning checks.
@@ -365,6 +405,7 @@ fn run_inner(
         stats: Stats::default(),
         think_start: None,
         sel: None,
+        last_click: None,
         copy_pending: false,
         mouse_on: settings.layout.mouse,
         catalogue: None,
@@ -2137,10 +2178,12 @@ impl App {
                     MouseEventKind::ScrollUp => self.scroll_by(-(step as isize)),
                     MouseEventKind::ScrollDown => self.scroll_by(step as isize),
                     MouseEventKind::Down(MouseButton::Left) => {
+                        let grain = self.click_grain(at);
                         self.sel = Some(Selection {
                             anchor: at,
                             cur: at,
                             dragging: true,
+                            grain,
                         });
                         self.dirty = true;
                     }
@@ -2154,7 +2197,8 @@ impl App {
                         if let Some(sel) = self.sel.as_mut() {
                             sel.cur = at;
                             sel.dragging = false;
-                            if sel.anchor == sel.cur {
+                            // A double or triple click selects without moving.
+                            if sel.anchor == sel.cur && sel.grain == Grain::Cells {
                                 self.sel = None;
                             } else {
                                 self.copy_pending = true;
@@ -2167,6 +2211,15 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// How much of the screen this click takes: one more click in the same
+    /// spot, soon enough, goes from cells to word to row and back.
+    fn click_grain(&mut self, at: (u16, u16)) -> Grain {
+        let now = std::time::Instant::now();
+        let repeat = click_repeat(self.last_click, at, now);
+        self.last_click = Some((now, at, repeat));
+        grain_of(repeat)
     }
 
     /// A job printed something or ended: tell the user, refresh what is open.
@@ -2967,52 +3020,19 @@ impl App {
             u.draw(f, area, &pal, &self.usage, &self.stats, &models);
         }
         if let Some(sel) = self.sel {
-            let text = self.highlight_selection(f, area, sel.anchor, sel.cur);
+            let text = highlight_selection(f, area, sel);
             if self.copy_pending {
                 self.copy_pending = false;
-                copy_to_clipboard(&text);
-                let n = text.chars().count();
-                self.push(Block::Notice(format!("copied {n} chars")));
-            }
-        }
-    }
-
-    /// Reverse the cells between `a` and `b` in reading order and return
-    /// their text, rows trimmed and joined with newlines.
-    fn highlight_selection(
-        &self,
-        f: &mut Frame,
-        area: Rect,
-        a: (u16, u16),
-        b: (u16, u16),
-    ) -> String {
-        let (start, end) = if (a.1, a.0) <= (b.1, b.0) {
-            (a, b)
-        } else {
-            (b, a)
-        };
-        let buf = f.buffer_mut();
-        let mut out = String::new();
-        for y in start.1..=end.1.min(area.height.saturating_sub(1)) {
-            let x0 = if y == start.1 { start.0 } else { 0 };
-            let x1 = if y == end.1 {
-                end.0.min(area.width.saturating_sub(1))
-            } else {
-                area.width.saturating_sub(1)
-            };
-            let mut row = String::new();
-            for x in x0..=x1 {
-                if let Some(cell) = buf.cell_mut((x, y)) {
-                    row.push_str(cell.symbol());
-                    cell.set_style(cell.style().add_modifier(Modifier::REVERSED));
+                if text.trim().is_empty() {
+                    // nothing under the pointer; no clipboard, no notice
+                    self.sel = None;
+                } else {
+                    copy_to_clipboard(&text);
+                    let n = text.chars().count();
+                    self.push(Block::Notice(format!("copied {n} chars")));
                 }
             }
-            if y > start.1 {
-                out.push('\n');
-            }
-            out.push_str(row.trim_end());
         }
-        out
     }
 
     fn draw_completion(&self, f: &mut Frame, c: &Completion, input_area: Rect, pal: &Palette) {
@@ -3164,9 +3184,143 @@ impl App {
     }
 }
 
+/// Reverse the cells the selection covers, in reading order, and return their
+/// text, rows trimmed and joined with newlines. A word or row selection is
+/// widened here, where the drawn buffer says what is actually on screen.
+fn highlight_selection(f: &mut Frame, area: Rect, sel: Selection) -> String {
+    let (a, b) = (sel.anchor, sel.cur);
+    let (mut start, mut end) = if (a.1, a.0) <= (b.1, b.0) {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    let buf = f.buffer_mut();
+    match sel.grain {
+        Grain::Cells => {}
+        Grain::Word => {
+            let at = |x: u16, y: u16| {
+                buf.cell((x, y))
+                    .and_then(|c| c.symbol().chars().next())
+                    .unwrap_or(' ')
+            };
+            // A word grows over word characters, a gap over blanks, and
+            // anything else (a bracket, a comma) stays the one cell.
+            let here = at(start.0, start.1);
+            let keep: fn(char) -> bool = if word_char(here) {
+                word_char
+            } else if here.is_whitespace() {
+                char::is_whitespace
+            } else {
+                |_| false
+            };
+            while start.0 > 0 && keep(at(start.0 - 1, start.1)) {
+                start.0 -= 1;
+            }
+            let last = area.width.saturating_sub(1);
+            while end.0 < last && keep(at(end.0 + 1, end.1)) {
+                end.0 += 1;
+            }
+        }
+        Grain::Row => {
+            start.0 = 0;
+            end.0 = area.width.saturating_sub(1);
+        }
+    }
+    let mut out = String::new();
+    for y in start.1..=end.1.min(area.height.saturating_sub(1)) {
+        let x0 = if y == start.1 { start.0 } else { 0 };
+        let x1 = if y == end.1 {
+            end.0.min(area.width.saturating_sub(1))
+        } else {
+            area.width.saturating_sub(1)
+        };
+        let mut row = String::new();
+        for x in x0..=x1 {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                row.push_str(cell.symbol());
+                cell.set_style(cell.style().add_modifier(Modifier::REVERSED));
+            }
+        }
+        if y > start.1 {
+            out.push('\n');
+        }
+        out.push_str(row.trim_end());
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clicks_stack_into_word_and_row_selections() {
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let at = (10, 4);
+        assert_eq!(click_repeat(None, at, t0), 1);
+        let one = Some((t0, at, 1));
+        assert_eq!(click_repeat(one, at, t0 + Duration::from_millis(120)), 2);
+        // Somewhere else, or too late, and the count starts over.
+        assert_eq!(
+            click_repeat(one, (11, 4), t0 + Duration::from_millis(120)),
+            1
+        );
+        assert_eq!(click_repeat(one, at, t0 + Duration::from_millis(600)), 1);
+        let two = Some((t0, at, 2));
+        assert_eq!(click_repeat(two, at, t0 + Duration::from_millis(120)), 3);
+        // A fourth click goes back to plain cells.
+        let three = Some((t0, at, 3));
+        assert_eq!(click_repeat(three, at, t0 + Duration::from_millis(120)), 1);
+        assert!(grain_of(1) == Grain::Cells);
+        assert!(grain_of(2) == Grain::Word);
+        assert!(grain_of(3) == Grain::Row);
+    }
+
+    /// Draw `text` into a buffer, then select at `at` with `grain`.
+    fn select(text: &str, at: (u16, u16), grain: Grain) -> String {
+        let backend = ratatui::backend::TestBackend::new(40, 3);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        let mut got = String::new();
+        term.draw(|f| {
+            let area = f.area();
+            f.render_widget(ratatui::widgets::Paragraph::new(text), area);
+            got = highlight_selection(
+                f,
+                area,
+                Selection {
+                    anchor: at,
+                    cur: at,
+                    dragging: false,
+                    grain,
+                },
+            );
+        })
+        .unwrap();
+        got
+    }
+
+    #[test]
+    fn a_double_click_takes_the_word_and_a_triple_click_the_row() {
+        let line = "edit crates/ah/src/tui/mod.rs:106 now";
+        assert_eq!(
+            select(line, (7, 0), Grain::Word),
+            "crates/ah/src/tui/mod.rs:106"
+        );
+        assert_eq!(select(line, (1, 0), Grain::Word), "edit");
+        // Blank space has nothing worth copying.
+        assert_eq!(select(line, (4, 0), Grain::Word), "");
+        assert_eq!(select(line, (7, 0), Grain::Row), line);
+        assert_eq!(select(line, (7, 0), Grain::Cells), "a");
+    }
+
+    #[test]
+    fn a_word_keeps_a_path_together() {
+        assert!("crates/ah/src/tui/mod.rs:106".chars().all(word_char));
+        assert!(!word_char(' '));
+        assert!(!word_char(','));
+        assert!(!word_char('"'));
+    }
 
     #[test]
     fn commands_page_lists_every_slash_command() {

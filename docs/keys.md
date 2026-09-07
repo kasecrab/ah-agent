@@ -65,7 +65,10 @@ quit = ["ctrl-q"]
 - Backspace on a `[Pasted #1: N lines]` or `[Image #1: …]` chip removes the
   whole chip.
 - Mouse wheel scrolls; drag selects and copies through OSC 52 when
-  `layout.mouse` is on. Shift-drag keeps the terminal's own selection.
+  `layout.mouse` is on. A double click takes the word under the pointer
+  (paths like `crates/ah/src/tui/mod.rs:106` count as one word), a triple
+  click the whole row, and a fourth goes back to dragging cells. Shift-drag
+  keeps the terminal's own selection.
 - Pickers (`/model`, `/resume`, `/favorite`, `/skills`): type to filter,
   Up/Down or Tab/Shift-Tab move, PgUp/PgDn page, Enter accepts, Esc closes,
   Ctrl-U clears the query, Ctrl-R refreshes the model list. `/favorite` uses
