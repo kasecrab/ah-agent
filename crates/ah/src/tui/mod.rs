@@ -525,6 +525,12 @@ fn run_inner(
     Ok(app.resume_hint())
 }
 
+/// A call of the plan tool, whose block is worth keeping only until the next
+/// one.
+fn is_plan(b: &Block) -> bool {
+    matches!(b, Block::Tool { call, .. } if call.function.name == "plan")
+}
+
 /// OSC 52: hand the text to the terminal's clipboard. Works in WezTerm,
 /// kitty, foot, alacritty, iTerm2 and over ssh; terminals that ignore it
 /// still offer Shift-drag for native selection.
@@ -601,6 +607,14 @@ impl App {
     }
 
     fn push(&mut self, b: Block) {
+        // Runs of plan updates say the same thing over and over; only the last
+        // one is still true, so it takes the place of the one before it.
+        if is_plan(&b)
+            && let Some(last) = self.entries.last()
+            && is_plan(&last.block)
+        {
+            self.entries.pop();
+        }
         self.entries.push(Entry::new(b));
         self.dirty = true;
     }
@@ -2965,33 +2979,40 @@ impl App {
         } else {
             self.queue.len() as u16 + border
         };
-        let plan_line = plan::status_line(
+        let dock_line = plan::dock(
+            if self.busy {
+                self.working_line().spans
+            } else {
+                Vec::new()
+            },
             &ah_core::plan::store().snapshot(),
             ah_core::jobs::table().running(),
             layout.show_plan,
             area.width.saturating_sub(1) as usize,
             &pal,
         );
-        let plan_rows: u16 = plan_line.is_some() as u16;
+        let dock_rows: u16 = dock_line.is_some() as u16;
 
         let [
             transcript_area,
             perm_area,
             queue_area,
-            plan_area,
+            _gap_area,
+            dock_area,
             input_area,
             status_area,
         ] = Layout::vertical([
             Constraint::Min(1),
             Constraint::Length(perm_rows),
             Constraint::Length(queue_rows),
-            Constraint::Length(plan_rows),
+            Constraint::Length(1),
+            Constraint::Length(dock_rows),
             Constraint::Length(input_rows + border),
             Constraint::Length(status_rows),
         ])
         .areas(area);
-        if let Some(line) = plan_line {
-            f.render_widget(Paragraph::new(line), plan_area);
+        if let Some(line) = dock_line {
+            f.render_widget(Paragraph::new(line), dock_area);
         }
 
         self.draw_transcript(f, transcript_area, &pal, layout.transcript_max_width);
@@ -3029,14 +3050,6 @@ impl App {
         }
 
         // Input box.
-        let title = if self.busy {
-            let mut spans = vec![Span::raw(" ")];
-            spans.extend(self.working_line().spans);
-            spans.push(Span::raw(" "));
-            Line::from(spans)
-        } else {
-            Line::default()
-        };
         let placeholder = if self.busy && self.settings().layout.queue_max > 0 {
             "Type the next message; Enter queues it"
         } else {
@@ -3044,7 +3057,6 @@ impl App {
         };
         let block = pal
             .input_block(!self.busy)
-            .title(title)
             .style(Style::default().fg(pal.input_fg).bg(pal.input_bg));
         let inner = block.inner(input_area);
         f.render_widget(block, input_area);

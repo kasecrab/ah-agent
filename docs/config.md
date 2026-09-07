@@ -123,7 +123,7 @@ theme Claude Code uses, so both look the same in the same terminal.
 | `syn_function` | `"yellow"` | function names before `(` |
 | `syn_builtin` | `"cyan"` | built-in functions and primitive types (`str`, `string`, `print`) |
 | `syn_attr` | `"cyan"` | keys in JSON, TOML and YAML |
-| `job` | `"green"` | background of the running-jobs chip above the input |
+| `job` | `"green"` | background of the running-jobs chip on the row above the input |
 | `diff_add` | `"green"` | added lines in file diffs |
 | `diff_del` | `"red"` | removed lines |
 | `border_style` | `"lines"` | `none`, `lines` (rules above and below the input), `plain`, `rounded`, `double`, `thick` |
@@ -155,7 +155,7 @@ theme Claude Code uses, so both look the same in the same terminal.
 | `image_paste_cmd` | `""` | shell command printing the clipboard image as PNG; empty tries `wl-paste`, `xclip`, `pngpaste` |
 | `markdown` | `true` | render assistant text as markdown |
 | `code_highlight` | `true` | highlight fenced code |
-| `show_plan` | `true` | plan summary above the input while tasks are open |
+| `show_plan` | `true` | plan summary on the row above the input while tasks are open |
 | `window_title` | `"{task} · ah"` | terminal window title; `{task}`, `{cwd}`, `{model}`, `{session}`; empty leaves the title alone |
 
 ## [keys]

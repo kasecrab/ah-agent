@@ -9,7 +9,7 @@ use super::{arg_str, arg_u64};
 pub fn describe(name: &str, args: &Value) -> Option<String> {
     match name {
         "bash" => {
-            let cmd = one_line(arg_str(args, "command")?);
+            let cmd = one_line(unwrap_shell(arg_str(args, "command")?));
             Some(
                 if args.get("background").and_then(Value::as_bool) == Some(true) {
                     format!("Bash({cmd}, background)")
@@ -104,6 +104,26 @@ fn plan(args: &Value) -> String {
     }
 }
 
+/// `bash -c 'cd x && make'` is the shell repeating itself; show the command.
+fn unwrap_shell(cmd: &str) -> &str {
+    let cmd = cmd.trim();
+    for prefix in ["bash -c ", "sh -c ", "zsh -c "] {
+        let Some(rest) = cmd.strip_prefix(prefix) else {
+            continue;
+        };
+        let rest = rest.trim();
+        for quote in ['\'', '"'] {
+            if let Some(inner) = rest.strip_prefix(quote).and_then(|r| r.strip_suffix(quote))
+                && !inner.contains(quote)
+            {
+                return inner;
+            }
+        }
+        return rest;
+    }
+    cmd
+}
+
 fn plural(n: usize) -> &'static str {
     if n == 1 { "" } else { "s" }
 }
@@ -136,6 +156,10 @@ mod tests {
     #[test]
     fn every_built_in_call_is_a_short_header() {
         assert_eq!(d("bash", json!({"command": "ls -la"})), "Bash(ls -la)");
+        assert_eq!(
+            d("bash", json!({"command": "bash -c 'cd ~/x && make'"})),
+            "Bash(cd ~/x && make)"
+        );
         assert_eq!(
             d(
                 "bash",

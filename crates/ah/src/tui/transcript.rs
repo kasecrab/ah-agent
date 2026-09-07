@@ -120,6 +120,61 @@ impl Entry {
     }
 }
 
+/// Calls quicker than this are not worth a number in the header.
+const SLOW_MS: u64 = 1000;
+
+/// `1.4s`, `2m 05s`.
+fn took(ms: u64) -> String {
+    let secs = ms as f64 / 1000.0;
+    if secs < 60.0 {
+        return format!("{secs:.1}s");
+    }
+    let secs = ms / 1000;
+    format!("{}m {:02}s", secs / 60, secs % 60)
+}
+
+/// How a line of the plan tool's answer should look, or `None` when the line
+/// is not a task at all.
+fn task_style(line: &str, pal: &Palette) -> Option<Style> {
+    if !line.trim_start().starts_with(|c: char| c.is_ascii_digit()) {
+        return None;
+    }
+    let (_, rest) = line.split_once('[')?;
+    if rest.get(1..2) != Some("]") {
+        return None;
+    }
+    Some(match rest.as_bytes().first()? {
+        b' ' => Style::default().fg(pal.tool_output),
+        b'>' => Style::default().fg(pal.accent),
+        _ => pal.dim(),
+    })
+}
+
+/// The plan tool answers with the whole plan; the transcript keeps the tasks
+/// and drops the prose, which the row above the input already carries.
+fn plan_lines(
+    name: &str,
+    result: Option<&ToolResult>,
+    pal: &Palette,
+) -> Option<Vec<Line<'static>>> {
+    if name != "plan" {
+        return None;
+    }
+    let r = result?;
+    if r.is_error {
+        return None;
+    }
+    Some(
+        r.output
+            .lines()
+            .filter_map(|l| {
+                let style = task_style(l, pal)?;
+                Some(Line::from(Span::styled(format!("  {l}"), style)))
+            })
+            .collect(),
+    )
+}
+
 /// Word-wrap to `width` columns. Never returns an empty vector.
 pub fn wrap(text: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
@@ -356,9 +411,8 @@ fn render(block: &Block, width: usize, view: &View, pal: &Palette) -> Vec<Line<'
                 None => said,
             };
             let took = match duration_ms {
-                None => String::new(),
-                Some(0) => " <1 ms".into(),
-                Some(d) => format!(" {d} ms"),
+                Some(d) if *d >= SLOW_MS => format!(" {}", took(*d)),
+                _ => String::new(),
             };
             let status = match result {
                 None => " …".to_string(),
@@ -378,6 +432,8 @@ fn render(block: &Block, width: usize, view: &View, pal: &Palette) -> Vec<Line<'
                     if full { usize::MAX } else { max },
                     pal,
                 ));
+            } else if let Some(lines) = plan_lines(&call.function.name, result.as_ref(), pal) {
+                out.extend(lines);
             } else if let Some(r) = result {
                 let show = expanded.unwrap_or(view.show_tool_output || r.is_error);
                 let total = r.output.lines().count();
@@ -418,8 +474,13 @@ fn render(block: &Block, width: usize, view: &View, pal: &Palette) -> Vec<Line<'
                     )));
                 }
             }
+            // Every call is its own paragraph.
+            out.push(Line::default());
         }
-        Block::Notice(s) => out.extend(styled(wrap(s, width), pal.dim())),
+        Block::Notice(s) => {
+            out.extend(styled(wrap(s, width), pal.dim()));
+            out.push(Line::default());
+        }
         Block::Error(s) => out.extend(with_prefix(
             s,
             width,
@@ -463,14 +524,16 @@ mod tests {
     }
 
     #[test]
-    fn a_replayed_call_claims_no_timing() {
-        assert!(tool_header(Some(12)).contains("Read(a.rs) ✓ 12 ms"));
-        // Sub-millisecond calls are real; zero is not.
-        assert!(tool_header(Some(0)).contains("✓ <1 ms"));
+    fn only_a_slow_call_is_timed() {
+        // A quick call is quick; the number would only be noise.
+        let quick = tool_header(Some(12));
+        assert!(quick.contains("Read(a.rs) ✓"), "{quick}");
+        assert!(!quick.contains("12"), "{quick}");
+        assert!(tool_header(Some(1400)).contains("Read(a.rs) ✓ 1.4s"));
+        assert_eq!(took(95_000), "1m 35s");
         // Session files keep no durations, so replayed calls show none.
         let replayed = tool_header(None);
         assert!(replayed.contains("Read(a.rs) ✓"), "{replayed}");
-        assert!(!replayed.contains("ms"), "{replayed}");
     }
 
     #[test]

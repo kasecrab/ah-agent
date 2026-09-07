@@ -1,4 +1,4 @@
-//! The task list: one line above the input, and the whole plan behind `/plan`.
+//! The task list: the row above the input, and the whole plan behind `/plan`.
 
 use ah_core::plan::{Plan, Status};
 use ratatui::Frame;
@@ -31,38 +31,86 @@ pub fn lines(plan: &Plan, pal: &Palette) -> Vec<Line<'static>> {
         .collect()
 }
 
-/// The line above the input: how many shell jobs are running, then the plan
-/// while tasks are open. `None` when neither has anything to say.
-pub fn status_line(
+/// The plan in a few cells: how far it has got, and the task in hand.
+fn brief(plan: &Plan, room: usize) -> Option<String> {
+    let (done, total) = plan.counts();
+    if total == 0 || done == total {
+        return None;
+    }
+    let mut s = format!("plan {done}/{total}");
+    let task = plan.doing().first().copied().or_else(|| plan.next_ready());
+    if let Some(t) = task {
+        let room = room.saturating_sub(s.chars().count() + 3);
+        if room >= 8 {
+            s.push_str(" \u{b7} ");
+            s.push_str(&cut(&t.title, room));
+        }
+    }
+    Some(s)
+}
+
+/// `title` shortened to `room` cells, with an ellipsis when it does not fit.
+fn cut(title: &str, room: usize) -> String {
+    if title.chars().count() <= room {
+        return title.to_string();
+    }
+    title
+        .chars()
+        .take(room.saturating_sub(1))
+        .collect::<String>()
+        + "\u{2026}"
+}
+
+fn width(spans: &[Span<'_>]) -> usize {
+    spans.iter().map(|s| s.width()).sum()
+}
+
+/// The row above the input: what the turn is doing on the left, the running
+/// shell jobs and the plan on the right. `None` when neither side has
+/// anything to say.
+pub fn dock(
+    left: Vec<Span<'static>>,
     plan: &Plan,
     jobs: usize,
     show_plan: bool,
-    width: usize,
+    width_cells: usize,
     pal: &Palette,
 ) -> Option<Line<'static>> {
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    let mut used = 0;
-    if jobs > 0 {
-        let chip = format!(" {jobs} Bash ");
-        used += chip.chars().count() + 1;
-        spans.push(Span::styled(
-            chip,
-            Style::default()
-                .bg(pal.job)
-                .fg(ratatui::style::Color::Black),
-        ));
-        spans.push(Span::raw(" "));
+    let chip: Vec<Span<'static>> = if jobs > 0 {
+        vec![
+            Span::styled(
+                format!(" {jobs} Bash "),
+                Style::default()
+                    .bg(pal.job)
+                    .fg(ratatui::style::Color::Black),
+            ),
+            Span::raw(" "),
+        ]
+    } else {
+        Vec::new()
+    };
+    let room = width_cells.saturating_sub(width(&left) + width(&chip) + 2);
+    let text = (show_plan && room >= 8)
+        .then(|| brief(plan, room))
+        .flatten();
+    let mut right = chip;
+    if let Some(text) = text {
+        right.push(Span::styled(text, pal.dim()));
+    } else if let Some(last) = right.last()
+        && last.content == " "
+    {
+        right.pop();
     }
-    let (done, total) = plan.counts();
-    if show_plan && total > 0 && done < total {
-        let mut text = plan.summary();
-        let room = width.saturating_sub(used);
-        if room > 4 && text.chars().count() > room {
-            text = text.chars().take(room - 1).collect::<String>() + "…";
-        }
-        spans.push(Span::styled(text, pal.dim()));
+    if left.is_empty() && right.is_empty() {
+        return None;
     }
-    (!spans.is_empty()).then(|| Line::from(spans))
+    let gap = width_cells
+        .saturating_sub(width(&left) + width(&right))
+        .max(usize::from(!left.is_empty() && !right.is_empty()));
+    let mut spans = left;
+    spans.push(Span::raw(" ".repeat(gap)));
+    spans.extend(right);
+    Some(Line::from(spans))
 }
 
 /// Scroll position of the `/plan` overlay.
@@ -140,34 +188,43 @@ mod tests {
     }
 
     #[test]
-    fn the_line_disappears_when_there_is_nothing_left_to_say() {
+    fn the_row_disappears_when_there_is_nothing_left_to_say() {
         let pal = Palette::from_theme(&Theme::default());
         let mut p = plan();
-        assert!(status_line(&p, 0, true, 80, &pal).is_some());
+        assert!(dock(vec![], &p, 0, true, 80, &pal).is_some());
         p.set_status(&[2], Status::Done, "").unwrap();
         p.set_status(&[1], Status::Done, "").unwrap();
-        assert!(status_line(&p, 0, true, 80, &pal).is_none());
-        assert!(status_line(&p, 0, false, 80, &pal).is_none());
-        assert!(status_line(&Plan::default(), 0, true, 80, &pal).is_none());
+        assert!(dock(vec![], &p, 0, true, 80, &pal).is_none());
+        assert!(dock(vec![], &p, 0, false, 80, &pal).is_none());
+        assert!(dock(vec![], &Plan::default(), 0, true, 80, &pal).is_none());
+    }
+
+    #[test]
+    fn the_turn_takes_the_left_and_the_rest_the_right_edge() {
+        let pal = Palette::from_theme(&Theme::default());
+        let left = vec![Span::raw("Working")];
+        let line = dock(left, &plan(), 2, true, 60, &pal).unwrap();
+        assert_eq!(line.width(), 60);
+        let text = line.to_string();
+        assert!(text.starts_with("Working "), "{text}");
+        assert!(text.ends_with(" 2 Bash  plan 0/2 \u{b7} api"), "{text}");
     }
 
     #[test]
     fn running_jobs_get_a_chip_of_their_own() {
         let pal = Palette::from_theme(&Theme::default());
-        let line = status_line(&Plan::default(), 2, true, 80, &pal).unwrap();
+        let line = dock(vec![], &Plan::default(), 2, true, 80, &pal).unwrap();
         assert_eq!(line.to_string().trim(), "2 Bash");
-        // The plan keeps whatever room the chip leaves.
-        let line = status_line(&plan(), 3, true, 80, &pal).unwrap();
-        assert!(line.to_string().starts_with(" 3 Bash "));
-        assert!(line.to_string().contains("0/2 done"));
     }
 
     #[test]
-    fn a_long_summary_is_cut_to_the_width() {
+    fn a_narrow_row_keeps_the_jobs_and_drops_the_plan() {
         let pal = Palette::from_theme(&Theme::default());
-        let line = status_line(&plan(), 0, true, 20, &pal).unwrap();
-        assert_eq!(line.width(), 20);
-        assert!(line.to_string().ends_with('…'));
+        let line = dock(vec![Span::raw("Working")], &plan(), 1, true, 24, &pal).unwrap();
+        assert_eq!(line.to_string().trim_end(), "Working          1 Bash");
+        // With a little more room the plan comes back, without the task name.
+        let line = dock(vec![Span::raw("Working")], &plan(), 1, true, 34, &pal).unwrap();
+        assert!(line.to_string().ends_with("1 Bash  plan 0/2"), "{line}");
     }
 
     #[test]

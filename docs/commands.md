@@ -130,8 +130,8 @@ reads the output and says what happened instead of leaving the news on the
 screen; `tools.job_wake = false` turns that off and the model waits for your
 next message.
 
-In the TUI, a green `2 Bash` chip above the input counts the running jobs and
-disappears when the last one ends. `Down` on an empty input opens the job
+In the TUI, a green `2 Bash` chip on the row above the input counts the running
+jobs and disappears when the last one ends. `Down` on an empty input opens the job
 list; `Enter` on a job follows its output live, `k` stops the job, `Esc`
 closes the view. Jobs are children of the ah process: leaving ah stops them.
 
@@ -172,7 +172,9 @@ plan · 1/3 done · doing: 2 read the [tools] table
 ```
 
 The plan is stored with the session, so `ah -r` resumes it. In the TUI, the
-summary sits above the input while tasks are open (`Alt-P` hides it,
+summary sits at the right of the row above the input while tasks are open, and
+each update prints the task list in the transcript in place of the one before
+it (`Alt-P` hides the summary,
 `layout.show_plan` sets the default), `/plan` opens the whole list, and
 `{plan}` is a statusline placeholder. `context.plan_reminder` controls the
 reminder sent when the model leaves an unfinished plan alone.
