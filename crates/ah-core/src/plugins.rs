@@ -411,16 +411,22 @@ impl PluginHost {
         out
     }
 
-    pub fn statusline(&mut self, ctx: &StatusContext) -> Option<String> {
-        let mut text: Option<String> = None;
+    /// The last plugin to answer wins; each one sees what the one before it
+    /// made in `rendered`, so a plugin can decorate rather than replace. A
+    /// row given as coloured spans also carries their joined text.
+    pub fn statusline(&mut self, ctx: &StatusContext) -> Option<StatuslineOut> {
+        let mut out: Option<StatuslineOut> = None;
         let mut ctx = ctx.clone();
         for p in &mut self.plugins {
-            if let Some(r) = p.call_typed::<_, StatuslineOut>(Hook::Statusline, &ctx) {
+            if let Some(mut r) = p.call_typed::<_, StatuslineOut>(Hook::Statusline, &ctx) {
+                if !r.spans.is_empty() {
+                    r.text = r.spans.iter().map(|s| s.text.as_str()).collect();
+                }
                 ctx.rendered = r.text.clone();
-                text = Some(r.text);
+                out = Some(r);
             }
         }
-        text
+        out
     }
 
     pub fn keybinds(&mut self) -> Vec<(String, String)> {

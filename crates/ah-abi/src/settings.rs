@@ -544,7 +544,7 @@ impl Default for StatusLine {
                 "git",
             ]
             .iter()
-            .map(|s| s.to_string())
+            .map(|s| String::from(*s))
             .collect(),
             format: String::new(),
             colors: true,

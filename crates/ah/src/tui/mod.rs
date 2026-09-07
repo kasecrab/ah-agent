@@ -282,7 +282,7 @@ struct App {
     context_window: u64,
     /// When the current turn started, for the working line's clock.
     busy_start: Option<Instant>,
-    plugin_status: Option<String>,
+    plugin_status: Option<StatuslineOut>,
     plugin_commands: Vec<(String, SlashCommandSpec)>,
     plugin_count: u32,
     pending_perm: Option<(ToolCall, String)>,
@@ -2098,7 +2098,7 @@ impl App {
                 }
             }
             UiEvent::Statusline(s) => {
-                self.plugin_status = Some(s);
+                self.plugin_status = Some(*s);
                 self.dirty = true;
             }
             UiEvent::Slash(out, name, stage) => self.slash_result(&name, *out, stage),
@@ -3364,28 +3364,44 @@ impl App {
 
     fn draw_status(&self, f: &mut Frame, area: Rect, pal: &Palette) {
         let ctx = self.status_ctx();
-        let plain = Style::default().fg(pal.status_fg).bg(pal.status_bg);
+        let cfg = &self.settings().statusline;
+        // A template says nothing about which item is which, so it stays one
+        // colour whatever `colors` says.
+        let mut colors = cfg.colors && cfg.format.is_empty();
+        let flat = Style::default().fg(pal.status_fg).bg(pal.status_bg);
         let spans = match &self.plugin_status {
-            // A plugin hands back one string; it says nothing about colour.
-            Some(text) => vec![Span::styled(format!(" {}", text.trim_start()), plain)],
-            None => {
-                let cfg = &self.settings().statusline;
-                // A template says nothing about which item is which, so it
-                // stays one colour whatever `colors` says.
-                let colors = cfg.colors && cfg.format.is_empty();
-                app::status_segments(cfg, &ctx)
-                    .into_iter()
-                    .map(|s| {
-                        let style = match colors {
-                            true => status_style(s.item, &ctx, pal).bg(pal.status_bg),
-                            false => plain,
-                        };
-                        Span::styled(s.text, style)
-                    })
+            Some(out) if !out.spans.is_empty() => {
+                // The plugin names the colours; the bar keeps out of their way.
+                colors = true;
+                out.spans
+                    .iter()
+                    .map(|s| Span::styled(s.text.clone(), pal.style_spec(&s.style).bg(pal.bg)))
                     .collect()
             }
+            // A plugin that hands back one string says nothing about colour.
+            Some(out) => {
+                colors = false;
+                vec![Span::styled(format!(" {}", out.text.trim_start()), flat)]
+            }
+            None => app::status_segments(cfg, &ctx)
+                .into_iter()
+                .map(|s| {
+                    let style = match colors {
+                        true => status_style(s.item, &ctx, pal).bg(pal.bg),
+                        false => flat,
+                    };
+                    Span::styled(s.text, style)
+                })
+                .collect(),
         };
-        f.render_widget(Paragraph::new(Line::from(spans)).style(plain), area);
+        // `status_bg` paints a bar behind one flat colour. Coloured pieces
+        // want the terminal's own background instead, or a theme's bar colour
+        // swallows them.
+        let base = match colors {
+            true => Style::default().fg(pal.fg).bg(pal.bg),
+            false => flat,
+        };
+        f.render_widget(Paragraph::new(Line::from(spans)).style(base), area);
     }
 }
 
@@ -3432,7 +3448,7 @@ fn status_style(item: &str, ctx: &StatusContext, pal: &Palette) -> Style {
         "plan" => pal.accent,
         // The dots between items, which nobody should read.
         "" => pal.dim,
-        _ => pal.status_fg,
+        _ => pal.fg,
     };
     Style::default().fg(color)
 }

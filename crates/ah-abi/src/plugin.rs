@@ -224,9 +224,25 @@ pub struct StatusContext {
     pub rendered: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct StatuslineOut {
+/// One piece of a plugin's status line, drawn in a colour of its own.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct StatusSpan {
     pub text: String,
+    /// A theme role (`accent`, `error`, `dim`, ...), a colour name, a hex
+    /// colour or a 0-255 index, then any of `dim`, `bold`, `italic` and
+    /// `underline`: `"accent bold"`. Empty leaves the status line's colour.
+    pub style: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct StatuslineOut {
+    /// The whole row in the status line's own colour. When `spans` is set it
+    /// is filled in from them, so it always holds the text that was drawn.
+    pub text: String,
+    /// The row as coloured pieces, left to right, in place of `text`.
+    pub spans: Vec<StatusSpan>,
 }
 
 /// Why a `slash_command` call is made.

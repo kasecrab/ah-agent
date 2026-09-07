@@ -57,11 +57,8 @@ pub fn parse_color(s: &str) -> Color {
     t.parse::<Color>().unwrap_or(Color::Reset)
 }
 
-/// A colour optionally followed by `dim`, `bold`, `italic` or `underline`:
-/// `"cyan dim"`.
-pub fn parse_style(s: &str) -> Style {
-    let mut words = s.split_whitespace();
-    let mut st = Style::default().fg(parse_color(words.next().unwrap_or("")));
+/// `dim`, `bold`, `italic` and `underline` from `words`, added to `st`.
+fn with_modifiers<'a>(mut st: Style, words: impl Iterator<Item = &'a str>) -> Style {
     for w in words {
         st = match w {
             "dim" => st.add_modifier(Modifier::DIM),
@@ -72,6 +69,14 @@ pub fn parse_style(s: &str) -> Style {
         };
     }
     st
+}
+
+/// A colour optionally followed by `dim`, `bold`, `italic` or `underline`:
+/// `"cyan dim"`.
+pub fn parse_style(s: &str) -> Style {
+    let mut words = s.split_whitespace();
+    let st = Style::default().fg(parse_color(words.next().unwrap_or("")));
+    with_modifiers(st, words)
 }
 
 impl Palette {
@@ -174,6 +179,54 @@ impl Palette {
         }
     }
 
+    /// A colour named by its part in the theme, so a plugin can paint with
+    /// the theme rather than against it.
+    pub fn role(&self, name: &str) -> Option<Color> {
+        Some(match name {
+            "fg" => self.fg,
+            "bg" => self.bg,
+            "accent" => self.accent,
+            "user" => self.user,
+            "assistant" => self.assistant,
+            "reasoning" => self.reasoning,
+            "tool" => self.tool,
+            "tool_output" => self.tool_output,
+            "error" => self.error,
+            "dim" => self.dim,
+            "border" => self.border,
+            "border_focus" => self.border_focus,
+            "status_fg" => self.status_fg,
+            "status_bg" => self.status_bg,
+            "input_fg" => self.input_fg,
+            "input_bg" => self.input_bg,
+            "heading" => self.heading,
+            "link" => self.link,
+            "quote" => self.quote,
+            "code" => self.code,
+            "code_bg" => self.code_bg,
+            "rule" => self.rule,
+            "job" => self.job,
+            "diff_add" => self.diff_add,
+            "diff_del" => self.diff_del,
+            _ => return None,
+        })
+    }
+
+    /// A style written as a theme role or a colour, then modifiers:
+    /// `"accent bold"`, `"#8be9fd"`, `"cyan dim"`. An empty spec leaves the
+    /// colour to the caller.
+    pub fn style_spec(&self, spec: &str) -> Style {
+        let mut words = spec.split_whitespace();
+        let st = match words.next() {
+            None => Style::default(),
+            Some(first) => Style::default().fg(match self.role(first) {
+                Some(c) => c,
+                None => parse_color(first),
+            }),
+        };
+        with_modifiers(st, words)
+    }
+
     pub fn dim(&self) -> Style {
         Style::default().fg(self.dim)
     }
@@ -186,6 +239,30 @@ impl Palette {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_style_spec_takes_a_theme_role_or_a_colour() {
+        let pal = Palette::from_theme(&Theme {
+            accent: "#bd93f9".into(),
+            ..Theme::default()
+        });
+        assert_eq!(
+            pal.style_spec("accent").fg,
+            Some(Color::Rgb(0xbd, 0x93, 0xf9))
+        );
+        assert!(
+            pal.style_spec("accent bold")
+                .add_modifier
+                .contains(Modifier::BOLD)
+        );
+        assert_eq!(pal.style_spec("cyan").fg, Some(Color::Cyan));
+        assert_eq!(
+            pal.style_spec("#012345").fg,
+            Some(Color::Rgb(1, 0x23, 0x45))
+        );
+        // Nothing said leaves the colour to whoever draws the span.
+        assert_eq!(pal.style_spec("").fg, None);
+    }
 
     #[test]
     fn colors_parse() {

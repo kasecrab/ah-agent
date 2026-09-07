@@ -134,7 +134,7 @@ pub enum UiEvent {
         commands: Vec<(String, SlashCommandSpec)>,
     },
     PluginLogs(Vec<(String, LogLevel, String)>),
-    Statusline(String),
+    Statusline(Box<StatuslineOut>),
     /// Result of a plugin slash command: output, command name, stage.
     Slash(Box<SlashCommandOut>, String, SlashStage),
     AskPermission {
@@ -398,7 +398,7 @@ impl Engine {
         res
     }
 
-    pub fn statusline(&mut self, ctx: &StatusContext) -> Option<String> {
+    pub fn statusline(&mut self, ctx: &StatusContext) -> Option<StatuslineOut> {
         self.host.as_mut().and_then(|h| h.statusline(ctx))
     }
 
@@ -448,7 +448,7 @@ impl Engine {
                 }
                 EngineCmd::Statusline(ctx) => {
                     if let Some(s) = self.statusline(&ctx) {
-                        let _ = tx.send(UiEvent::Statusline(s));
+                        let _ = tx.send(UiEvent::Statusline(Box::new(s)));
                     }
                 }
                 EngineCmd::Settings(s, v) => self.apply_settings(*s, v),

@@ -193,7 +193,7 @@ in an output is merged into the live settings (and shown as a
 | `before_tool` | before a tool runs | `call`, `cwd` | `decision` (below) plus `settings_patch` |
 | `after_tool` | after a tool ran | `call`, `result`, `duration_ms` | `result` (replacement, optional), `settings_patch` |
 | `tool_call` | the model called a tool this plugin declared | `call`, `cwd` | `result` (`output`, `is_error`, optional `diff`) |
-| `statusline` | every status bar redraw | `StatusContext` (below) | `text` |
+| `statusline` | every status bar redraw | `StatusContext` (below) | `text`, or `spans` (below) |
 | `slash_command` | user ran a command from `commands`, or used a picker it opened | `name`, `args`, `cwd`, `stage` (`run`, `preview`, `pick`) | `message` (notice), `send_to_model` (submitted as a user message), `settings_patch`, `picker` (below) |
 | `on_turn_end` | after the assistant's final message | `message`, `usage`, `total_usage`, `tool_calls` | `message` (notice), `settings_patch` |
 | `keybinds` | reserved | none | `binds`: `[[key, action]]`, action = a `[keys]` field name or a slash command. Declared in the ABI; the TUI does not apply plugin binds yet |
@@ -241,6 +241,22 @@ means "no change" and is never an error.
 `favorite`, `effort`, `context_tokens`, `context_window`, `modalities`
 (`TI→T`), and `rendered`, the text the built-in `statusline.items` produced,
 so a plugin can decorate instead of replace.
+
+A `text` answer is drawn in the status bar's own colour (`status_fg` and
+`status_bg`). To colour the row piece by piece, answer with `spans` instead:
+
+```json
+{"spans": [{"text": " gpt-5", "style": "heading bold"},
+           {"text": " · ", "style": "dim"},
+           {"text": "89%", "style": "error"}]}
+```
+
+`style` is a `[theme]` key (`accent`, `heading`, `tool`, `dim`, `link`,
+`user`, `error`, `fg`, ...), a colour name, a `#rrggbb` colour or a 0-255
+index, followed by any of `dim`, `bold`, `italic` and `underline`. Naming a
+theme key keeps the row in step with whatever theme is on. An empty `style`
+leaves the piece in the row's colour. A row given as spans is drawn over the
+terminal's background rather than `status_bg`, so the colours stay readable.
 
 ## Host calls
 

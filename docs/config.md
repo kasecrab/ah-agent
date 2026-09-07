@@ -104,8 +104,8 @@ theme Claude Code uses, so both look the same in the same terminal.
 | `dim` | `"dark_gray"` | notices, hints |
 | `border` | `"gray"` | input box border |
 | `border_focus` | `"gray"` | border while focused |
-| `status_fg` | `"gray"` | status bar text |
-| `status_bg` | `"reset"` | status bar background |
+| `status_fg` | `"gray"` | status bar text, when the row is one colour |
+| `status_bg` | `"reset"` | status bar background, when the row is one colour |
 | `input_fg` | `"reset"` | input text |
 | `input_bg` | `"reset"` | input background |
 | `selection` | `"blue"` | mouse selection |
@@ -229,8 +229,14 @@ ticks them off a list for the session; this key keeps a choice for good.
 `{tokens_out}`, `{cost}`, `{context}`, `{cwd}`, `{git}`, `{plan}`,
 `{plugins}`, `{state}`, `{session}`.
 
+`status_fg` and `status_bg` in `[theme]` paint the whole row in one colour,
+which is only what `colors = false` wants; with `colors = true` each item
+brings its own colour and the row keeps the terminal's background, so a theme's
+bar colour cannot swallow them.
+
 A plugin with the `statusline` hook receives the rendered text and can replace
-it; what it returns is drawn in one colour.
+it, either with one string drawn in the bar's colour or with coloured pieces of
+its own (`ah docs plugins`).
 
 ## [permissions]
 

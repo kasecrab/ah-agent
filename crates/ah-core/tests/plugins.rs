@@ -162,11 +162,18 @@ fn statusline_renders_and_persists_kv() {
         plugins: 1,
         ..Default::default()
     };
-    let text = host.statusline(&ctx).expect("rendered");
+    let out = host.statusline(&ctx).expect("rendered");
     assert!(
-        text.contains("claude-sonnet-4.5") && text.contains("↑12") && text.contains("main"),
-        "{text}"
+        out.text.contains("claude-sonnet-4.5")
+            && out.text.contains("↑12")
+            && out.text.contains("main"),
+        "{}",
+        out.text
     );
+    // Coloured pieces, and `text` is what they say together.
+    assert!(out.spans.iter().any(|s| s.style == "heading bold"));
+    let joined: String = out.spans.iter().map(|s| s.text.as_str()).collect();
+    assert_eq!(joined, out.text);
     let kv = std::fs::read_to_string(ah_core::paths::plugin_state_dir().join("statusline.json"))
         .unwrap();
     assert!(kv.contains("peak_cost"), "{kv}");
