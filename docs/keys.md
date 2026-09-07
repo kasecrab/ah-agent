@@ -41,8 +41,9 @@ everywhere.
 | `cycle_model` | `["shift-tab"]` | switch to the next favorite model |
 | `history_prev` | `["up", "ctrl-p"]` | earlier prompt; inside a multi-line draft moves the cursor first; with an empty input pulls back the last queued message |
 | `history_next` | `["down", "ctrl-n"]` | later prompt; with an empty input opens the background job list |
-| `delete_word` | `["ctrl-w"]` | delete the word before the cursor |
-| `delete_line` | `["ctrl-u"]` | delete to the start of the line |
+| `delete_word` | `["ctrl-w", "ctrl-backspace", "ctrl-h", "alt-backspace"]` | delete the word before the cursor, or a whole chip |
+| `delete_line` | `["ctrl-u"]` | clear the input |
+| `yank` | `["ctrl-y"]` | put back what the last delete took |
 | `line_start` | `["ctrl-a", "home"]` | |
 | `line_end` | `["ctrl-e", "end"]` | |
 | `paste_image` | `["ctrl-v"]` | attach the clipboard image as an `[Image #1: 120 KB]` chip |

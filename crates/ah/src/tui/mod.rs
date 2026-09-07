@@ -197,6 +197,7 @@ struct Binds {
     history_next: Vec<Chord>,
     delete_word: Vec<Chord>,
     delete_line: Vec<Chord>,
+    yank: Vec<Chord>,
     line_start: Vec<Chord>,
     line_end: Vec<Chord>,
     paste_image: Vec<Chord>,
@@ -227,6 +228,7 @@ impl Binds {
             history_next: p(&k.history_next),
             delete_word: p(&k.delete_word),
             delete_line: p(&k.delete_line),
+            yank: p(&k.yank),
             line_start: p(&k.line_start),
             line_end: p(&k.line_end),
             paste_image: p(&k.paste_image),
@@ -2617,7 +2619,9 @@ impl App {
         } else if keys::any_match(&b.delete_word, &k) {
             self.editor.delete_word();
         } else if keys::any_match(&b.delete_line, &k) {
-            self.editor.delete_to_line_start();
+            self.editor.delete_all();
+        } else if keys::any_match(&b.yank, &k) {
+            self.editor.yank();
         } else if keys::any_match(&b.line_start, &k) {
             self.editor.home();
         } else if keys::any_match(&b.line_end, &k) {

@@ -346,7 +346,10 @@ pub struct Keys {
     pub history_prev: Vec<String>,
     pub history_next: Vec<String>,
     pub delete_word: Vec<String>,
+    /// Clear the input; `yank` brings it back.
     pub delete_line: Vec<String>,
+    /// Put back what the last delete took.
+    pub yank: Vec<String>,
     pub line_start: Vec<String>,
     pub line_end: Vec<String>,
     /// Attach the image on the clipboard to the next message.
@@ -375,8 +378,9 @@ impl Default for Keys {
             cycle_model: v(&["shift-tab"]),
             history_prev: v(&["up", "ctrl-p"]),
             history_next: v(&["down", "ctrl-n"]),
-            delete_word: v(&["ctrl-w"]),
+            delete_word: v(&["ctrl-w", "ctrl-backspace", "ctrl-h", "alt-backspace"]),
             delete_line: v(&["ctrl-u"]),
+            yank: v(&["ctrl-y"]),
             line_start: v(&["ctrl-a", "home"]),
             line_end: v(&["ctrl-e", "end"]),
             paste_image: v(&["ctrl-v"]),

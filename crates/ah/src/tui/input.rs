@@ -16,6 +16,8 @@ pub struct Editor {
     images: Vec<String>,
     /// Entry added by the last `take`, not yet written to disk.
     added: Option<String>,
+    /// What the last kill removed, for `yank`.
+    killed: String,
 }
 
 /// Entries kept in memory and in the history file after compaction.
@@ -148,7 +150,11 @@ impl Editor {
             .unwrap_or(self.char_len());
     }
 
+    /// The word before the cursor, or a whole paste or image chip.
     pub fn delete_word(&mut self) {
+        if self.backspace_chip() {
+            return;
+        }
         let chars: Vec<char> = self.text.chars().collect();
         let mut i = self.cursor;
         while i > 0 && chars[i - 1].is_whitespace() {
@@ -157,19 +163,33 @@ impl Editor {
         while i > 0 && !chars[i - 1].is_whitespace() {
             i -= 1;
         }
-        let start_b = self.byte_at(i);
-        let end_b = self.byte_at(self.cursor);
-        self.text.replace_range(start_b..end_b, "");
-        self.cursor = i;
+        self.kill(i, self.cursor);
     }
 
-    pub fn delete_to_line_start(&mut self) {
-        let (line, _) = self.line_col();
-        let start = self.line_starts()[line];
-        let start_b = self.byte_at(start);
-        let end_b = self.byte_at(self.cursor);
-        self.text.replace_range(start_b..end_b, "");
-        self.cursor = start;
+    /// Everything typed so far, kept for `yank`.
+    pub fn delete_all(&mut self) {
+        self.kill(0, self.char_len());
+    }
+
+    /// Put back what the last kill took, at the cursor.
+    pub fn yank(&mut self) {
+        if self.killed.is_empty() {
+            return;
+        }
+        let text = std::mem::take(&mut self.killed);
+        self.insert_str(&text);
+        self.killed = text;
+    }
+
+    /// Cut `from..to` out of the text and remember it.
+    fn kill(&mut self, from: usize, to: usize) {
+        if from >= to {
+            return;
+        }
+        let (from_b, to_b) = (self.byte_at(from), self.byte_at(to));
+        self.killed = self.text[from_b..to_b].to_string();
+        self.text.replace_range(from_b..to_b, "");
+        self.cursor = from;
     }
 
     pub fn clear(&mut self) {
@@ -372,6 +392,39 @@ mod tests {
         assert_eq!(e.text, "\nworl");
         assert!(e.history_next());
         assert!(e.is_empty());
+    }
+
+    #[test]
+    fn a_kill_can_be_put_back() {
+        let mut e = Editor::default();
+        e.insert_str("write the parser");
+        e.delete_word();
+        assert_eq!(e.text, "write the ");
+        e.yank();
+        assert_eq!(e.text, "write the parser");
+        assert_eq!(e.cursor, 16);
+        // Ctrl-U takes the lot, wherever the cursor is, and Ctrl-Y brings it
+        // back; yanking twice pastes it twice.
+        e.cursor = 5;
+        e.delete_all();
+        assert!(e.is_empty());
+        assert_eq!(e.cursor, 0);
+        e.yank();
+        e.yank();
+        assert_eq!(e.text, "write the parserwrite the parser");
+        // Nothing killed, nothing to put back.
+        let mut e = Editor::default();
+        e.yank();
+        assert!(e.is_empty());
+    }
+
+    #[test]
+    fn a_word_delete_takes_a_whole_chip() {
+        let mut e = Editor::default();
+        e.insert_paste("a\nb\nc\nd\n", 2);
+        assert!(e.text.starts_with("[Pasted #1:"), "{}", e.text);
+        e.delete_word();
+        assert!(e.is_empty(), "{}", e.text);
     }
 
     #[test]
