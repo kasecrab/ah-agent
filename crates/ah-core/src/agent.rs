@@ -48,6 +48,13 @@ pub enum AgentEvent {
     Compacting {
         auto: bool,
     },
+    /// How far the summary has got: `done` tokens written of the `budget` it is
+    /// allowed. Only what the model streams back can be measured, so the count
+    /// stands still while the request is still being read.
+    CompactProgress {
+        done: u64,
+        budget: u64,
+    },
     /// The conversation was replaced by a summary. `before` is the token
     /// count that triggered it, `after` a rough size of the summary.
     Compacted {
@@ -66,6 +73,9 @@ commands touched, with paths; the current state of the work, what is done and wh
 left; open questions. Be dense and specific; headings and lists are fine. No preamble.";
 
 /// The two halves of the wrapper [`summary_message`] puts around a summary.
+/// How often the summary's size goes out while it streams.
+const PROGRESS_EVERY: Duration = Duration::from_millis(120);
+
 const SUMMARY_OPEN: &str = "[The conversation so far was compacted. Summary:]";
 const SUMMARY_CLOSE: &str = "[End of summary. Continue from here.]";
 
@@ -116,6 +126,13 @@ fn prompt_bytes(system: &str, messages: &[Message], tools_bytes: usize) -> usize
         })
         .sum();
     system.len() + msgs + tools_bytes
+}
+
+/// Rough size of a conversation on its own, for a session resumed from disk:
+/// there is no usage figure until the model answers, but the gauge and
+/// `/compact` both need to know how full the window is.
+pub fn messages_tokens(messages: &[Message]) -> u64 {
+    estimate_tokens(prompt_bytes("", messages, 0))
 }
 
 /// Byte size of the tool declarations, which sit in the cached prefix too.
@@ -286,16 +303,33 @@ impl<'a> Agent<'a> {
             provider: self.settings.model.provider.clone(),
             cache_control,
         };
+        let budget = self.settings.context.summary_max_tokens as u64;
         let mut acc = Accumulator::default();
+        // Every delta would flood the UI channel, so the count goes out on a
+        // tick instead.
+        let mut ticked = Instant::now();
+        io.emit(AgentEvent::CompactProgress { done: 0, budget });
         self.provider.stream(&req, self.cancel, &mut |ev| {
             acc.apply(&ev);
+            if ticked.elapsed() >= PROGRESS_EVERY {
+                ticked = Instant::now();
+                io.emit(AgentEvent::CompactProgress {
+                    done: estimate_tokens(acc.content.len()),
+                    budget,
+                });
+            }
             !self.cancel.load(Ordering::Relaxed)
         })?;
         let acc = acc.finish();
         if acc.content.trim().is_empty() {
             return Err(Error::Http("empty summary".into()));
         }
-        let before = self.context_tokens;
+        // A conversation resumed from disk has no usage figure behind it until
+        // the model answers, so fall back to its size rather than report zero.
+        let before = match self.context_tokens {
+            0 => messages_tokens(messages),
+            n => n,
+        };
         let msg = summary_message(&acc.content);
         let after = estimate_tokens(msg.content.len());
         *messages = vec![msg];
@@ -947,6 +981,47 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, AgentEvent::Compacted { before: 97, .. }))
         );
+    }
+
+    /// A session resumed from disk has messages but no usage figure yet, so
+    /// the compaction has to size the conversation itself.
+    #[test]
+    fn a_resumed_conversation_is_sized_before_it_is_compacted() {
+        let provider = MockProvider::new(vec![vec![
+            StreamEvent::Text("SUMMARY".into()),
+            StreamEvent::Finish("stop".into()),
+        ]]);
+        let settings = Settings::default();
+        let registry = Registry::builtins(&settings.tools);
+        let mut hooks = NoHooks;
+        let cancel = AtomicBool::new(false);
+        let mut agent = Agent::new(
+            &provider,
+            &registry,
+            &mut hooks,
+            &settings,
+            std::env::current_dir().unwrap(),
+            &cancel,
+        );
+        agent.notices = false;
+        let mut messages = vec![
+            Message::user("x".repeat(400)),
+            Message::assistant("y".repeat(400)),
+        ];
+        let io = RecordingIo::default();
+        assert_eq!(agent.context_tokens, 0);
+        agent.compact(&mut messages, "", &io).unwrap();
+        let before = io
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|e| match e {
+                AgentEvent::Compacted { before, .. } => Some(*before),
+                _ => None,
+            })
+            .expect("no compacted event");
+        assert_eq!(before, 200);
     }
 
     #[test]

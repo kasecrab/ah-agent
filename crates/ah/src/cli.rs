@@ -97,6 +97,9 @@ impl AgentIo for PrintIo {
                 let why = if auto { " (context full)" } else { "" };
                 let _ = writeln!(err, "\x1b[90mcompacting context{why}…\x1b[0m");
             }
+            // A tick's worth of summary; a scrolling printer has nowhere to
+            // put it, so only the TUI and the JSONL stream carry it.
+            AgentEvent::CompactProgress { .. } => {}
             AgentEvent::Compacted { before, after, .. } => {
                 let _ = writeln!(
                     err,
@@ -219,6 +222,9 @@ fn event_json(ev: &AgentEvent) -> serde_json::Value {
         } => json!({"type": "retry", "attempt": attempt, "wait_ms": wait_ms, "error": error}),
         AgentEvent::Error(e) => json!({"type": "error", "error": e}),
         AgentEvent::Compacting { auto } => json!({"type": "compacting", "auto": auto}),
+        AgentEvent::CompactProgress { done, budget } => {
+            json!({"type": "compact_progress", "done": done, "budget": budget})
+        }
         AgentEvent::Compacted {
             before,
             after,

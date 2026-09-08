@@ -199,6 +199,7 @@ One JSON object per line on stdout. `type` is one of:
 | `settings_patch` | `patch` (from a plugin) |
 | `retry` | `attempt`, `wait_ms`, `error` |
 | `compacting` | `auto` (true when the window filled up, false for `/compact`) |
+| `compact_progress` | `done`, `budget` (summary tokens written, of the budget allowed) |
 | `compacted` | `before`, `after`, `summary` |
 | `error` | `error` |
 | `turn_end` | `requests`, `tool_calls`, `usage`, `cancelled` |

@@ -82,10 +82,75 @@ pub fn elapsed(secs: u64) -> String {
     )
 }
 
-/// `• Working (3s · esc to interrupt)`. `at` is `None` when animation is off,
-/// which leaves the word plain.
-pub fn line(header: &str, secs: u64, at: Option<Duration>, pal: &Palette) -> Line<'static> {
-    let mut spans = Vec::with_capacity(8);
+/// A summary being written: `done` tokens of the `budget` it may use, and how
+/// long the request has been going. Only the tokens streamed back can be
+/// measured — the model spends the first stretch reading the conversation and
+/// says nothing — so the clock carries the bar until they arrive.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Progress {
+    pub done: u64,
+    pub budget: u64,
+    pub elapsed: Duration,
+}
+
+/// The bar in cells, `[` and `]` not counted.
+const BAR: usize = 16;
+/// Where the clock alone takes the bar, in percent, given long enough.
+const CREEP_CEIL: f32 = 95.0;
+/// Seconds the clock takes to carry the bar half that far. It eases off from
+/// there rather than stopping, so a long wait still moves.
+const CREEP_HALF: f32 = 25.0;
+
+/// How full the bar is, 0 to 99.
+///
+/// Two things move it, and it takes whichever is further along. The clock
+/// eases towards [`CREEP_CEIL`] and never stops, so a long silence while the
+/// model reads the conversation never looks like a stall; the summary coming
+/// back overtakes it when the model gets to the point quickly. It stops at 99
+/// either way: a model stops when the summary is done, not when it runs out of
+/// budget, so the last step belongs to the end of the request.
+pub fn percent(p: Progress) -> u8 {
+    let secs = p.elapsed.as_secs_f32();
+    let creep = CREEP_CEIL * secs / (secs + CREEP_HALF);
+    let written = 100.0 * (p.done as f32 / p.budget.max(1) as f32);
+    creep.max(written).min(99.0) as u8
+}
+
+/// `[███░░░░░░░░░░░░░] 21%`, with the empty cells lit by the sweeping band
+/// while nothing has come back yet.
+fn bar(p: Progress, at: Option<Duration>, pal: &Palette) -> Vec<Span<'static>> {
+    let pct = percent(p);
+    let full = ((pct as f32 / 100.0 * BAR as f32).round() as usize).min(BAR);
+    let mut spans = Vec::with_capacity(BAR + 4);
+    spans.push(Span::styled("[", pal.dim()));
+    if full > 0 {
+        spans.push(Span::styled(
+            "\u{2588}".repeat(full),
+            Style::default().fg(pal.accent),
+        ));
+    }
+    let rest = "\u{2591}".repeat(BAR - full);
+    match at.filter(|_| p.done == 0) {
+        Some(at) => spans.extend(shimmer(&rest, at, pal)),
+        None if !rest.is_empty() => spans.push(Span::styled(rest, pal.dim())),
+        None => {}
+    }
+    spans.push(Span::styled("]", pal.dim()));
+    spans.push(Span::styled(format!(" {pct}%"), pal.dim()));
+    spans
+}
+
+/// `• Working (3s · esc to interrupt)`, with a bar after the word when the
+/// work has a measurable size. `at` is `None` when animation is off, which
+/// leaves the word plain.
+pub fn line(
+    header: &str,
+    secs: u64,
+    at: Option<Duration>,
+    progress: Option<Progress>,
+    pal: &Palette,
+) -> Line<'static> {
+    let mut spans = Vec::with_capacity(8 + BAR);
     match at {
         Some(at) => {
             spans.extend(shimmer("•", at, pal));
@@ -100,6 +165,10 @@ pub fn line(header: &str, secs: u64, at: Option<Duration>, pal: &Palette) -> Lin
                 Style::default().add_modifier(Modifier::BOLD),
             ));
         }
+    }
+    if let Some(p) = progress {
+        spans.push(Span::raw(" "));
+        spans.extend(bar(p, at, pal));
     }
     spans.push(Span::styled(format!(" ({} · ", elapsed(secs)), pal.dim()));
     spans.push(Span::styled("esc", Style::default().fg(pal.fg)));
@@ -169,18 +238,87 @@ mod tests {
 
     #[test]
     fn the_line_says_what_it_is_doing_and_how_to_stop() {
-        let text = line("Working", 3, Some(Duration::from_secs_f32(1.0)), &pal()).to_string();
+        let text = line(
+            "Working",
+            3,
+            Some(Duration::from_secs_f32(1.0)),
+            None,
+            &pal(),
+        )
+        .to_string();
         assert_eq!(text, "• Working (3s · esc to interrupt)");
-        let still = line("Working", 75, None, &pal()).to_string();
+        let still = line("Working", 75, None, None, &pal()).to_string();
         assert_eq!(still, "• Working (1m 15s · esc to interrupt)");
     }
 
     #[test]
-    fn elapsed_reads_as_time() {
-        assert_eq!(elapsed(0), "0s");
-        assert_eq!(elapsed(59), "59s");
-        assert_eq!(elapsed(60), "1m 00s");
-        assert_eq!(elapsed(3599), "59m 59s");
-        assert_eq!(elapsed(7389), "2h 03m 09s");
+    fn the_clock_keeps_the_bar_moving_while_the_model_reads() {
+        let waiting = |secs: f32| Progress {
+            done: 0,
+            budget: 4096,
+            elapsed: Duration::from_secs_f32(secs),
+        };
+        assert_eq!(percent(waiting(0.0)), 0);
+        // Nothing has come back yet, but the bar never sits still: the worst
+        // gap over a two minute wait is still only seconds long.
+        let mut worst = 0.0;
+        let mut since = 0.0;
+        let mut last = 0;
+        for step in 1..=900 {
+            let t = step as f32 / 10.0;
+            let now = percent(waiting(t));
+            assert!(now >= last, "went backwards at {t}s");
+            since += 0.1;
+            if now > last {
+                worst = f32::max(worst, since);
+                since = 0.0;
+            }
+            last = now;
+        }
+        assert!(worst < 8.0, "stuck for {worst}s");
+        assert!(last > 65, "a minute and a half in and only at {last}%");
+        // It slows down after that rather than stopping, and never turns back.
+        let mut last = percent(waiting(90.0));
+        for step in 90..=600 {
+            let now = percent(waiting(step as f32));
+            assert!(now >= last, "went backwards at {step}s");
+            last = now;
+        }
+        assert!(last < CREEP_CEIL as u8);
+    }
+
+    #[test]
+    fn a_summary_that_arrives_fast_overtakes_the_clock() {
+        let p = |done, secs| Progress {
+            done,
+            budget: 4096,
+            elapsed: Duration::from_secs(secs),
+        };
+        // Two seconds in the clock has barely moved, but half the budget is
+        // written, so the bar shows the writing.
+        assert_eq!(percent(p(2048, 2)), 50);
+        // It stops short of 100 however much comes back.
+        assert_eq!(percent(p(4096, 20)), 99);
+        assert_eq!(percent(p(9000, 20)), 99);
+    }
+
+    #[test]
+    fn a_percentage_is_all_the_line_says_about_size() {
+        let text = line(
+            "Compacting",
+            2,
+            Some(Duration::from_secs_f32(1.0)),
+            Some(Progress {
+                done: 0,
+                budget: 4096,
+                elapsed: Duration::from_secs(2),
+            }),
+            &pal(),
+        )
+        .to_string();
+        assert_eq!(
+            text,
+            "• Compacting [█░░░░░░░░░░░░░░░] 7% (2s · esc to interrupt)"
+        );
     }
 }

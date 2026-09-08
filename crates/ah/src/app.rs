@@ -208,6 +208,9 @@ impl Engine {
             window: None,
         };
         e.rebuild_provider();
+        // A resumed conversation is already using the window, but no reply has
+        // reported its size yet, so estimate it rather than start from zero.
+        e.context_tokens = ah_core::agent::messages_tokens(&e.session.messages);
         // The plan belongs to the session, so resuming one resumes its tasks.
         ah_core::plan::store().load(e.session.plan.clone());
         Ok(e)

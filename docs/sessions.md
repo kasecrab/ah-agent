@@ -56,12 +56,23 @@ new message is sent or between tool calls inside a turn, never in the middle
 of a request. `/compact [focus]` does it on demand; a focus is appended to the
 summary request.
 
-While the summary is being written the working line reads `Compacting`, and an
-automatic one is announced with `context full; compacting`. The summary itself
+While the summary is being written the working line reads `Compacting` and
+carries a bar: `[█████████░░░░░░░] 56%`. Two things move it and it takes
+whichever is further along. The model spends the first stretch reading the
+conversation and says nothing during it — on a long one that is a minute with
+no signal at all — so the clock carries the bar there, quickly at first and
+easing off, and the empty cells stay lit by the same sweeping band as the word.
+The summary coming back moves it too, against `context.summary_max_tokens`, and
+overtakes the clock when the model gets to the point quickly. It stops at 99: a
+model stops when the summary is done, not when it runs out of room, so the last
+step belongs to the end of the request. An automatic compaction is announced
+with `context full; compacting`.
+The summary itself
 folds into one line in the transcript — `≡ context compacted: 48.0k → ~3.2k
 tokens` — which Ctrl-T opens and closes, the same key as tool output; a session
 replayed with `ah -r` folds its summary the same way. The event stream carries
-both `compacting` (with `auto`) and `compacted` (with the whole summary).
+`compacting` (with `auto`), `compact_progress` (`done` and `budget`, every
+120 ms while the summary streams) and `compacted` (with the whole summary).
 
 ## Related files
 

@@ -283,6 +283,9 @@ struct App {
     context_window: u64,
     /// When the current turn started, for the working line's clock.
     busy_start: Option<Instant>,
+    /// How much of a summary has been written, and when it was asked for,
+    /// while one is being written.
+    compact_progress: Option<(working::Progress, Instant)>,
     plugin_status: Option<StatuslineOut>,
     plugin_commands: Vec<(String, SlashCommandSpec)>,
     plugin_count: u32,
@@ -423,6 +426,7 @@ fn run_inner(
         context_tokens: 0,
         context_window: 0,
         busy_start: None,
+        compact_progress: None,
         plugin_status: None,
         plugin_commands: commands,
         plugin_count,
@@ -680,6 +684,8 @@ impl App {
             }
         }
         if !msgs.is_empty() {
+            // The gauge would otherwise read empty until the first reply.
+            self.context_tokens = ah_core::agent::messages_tokens(msgs);
             let what = match &self.session_name {
                 Some(n) => format!("\u{201c}{n}\u{201d}"),
                 None => format!("session {}", self.session_id),
@@ -834,6 +840,9 @@ impl App {
 
     fn set_state(&mut self, s: State) {
         if self.state != s {
+            if s != State::Compacting {
+                self.compact_progress = None;
+            }
             self.state = s;
             self.dirty = true;
         }
@@ -2285,11 +2294,22 @@ impl App {
                 self.follow = true;
                 self.set_state(State::Compacting);
             }
+            AgentEvent::CompactProgress { done, budget } => {
+                let started = self.compact_progress.map_or_else(Instant::now, |(_, t)| t);
+                let p = working::Progress {
+                    done,
+                    budget,
+                    elapsed: started.elapsed(),
+                };
+                self.compact_progress = Some((p, started));
+                self.dirty = true;
+            }
             AgentEvent::Compacted {
                 before,
                 after,
                 summary,
             } => {
+                self.compact_progress = None;
                 self.context_tokens = after;
                 self.push(Block::Summary {
                     text: summary,
@@ -3329,7 +3349,16 @@ impl App {
     fn working_line(&self) -> Line<'static> {
         let start = self.busy_start.unwrap_or_else(Instant::now);
         let at = (self.settings().layout.animation_ms > 0).then(|| start.elapsed());
-        working::line(self.header(), start.elapsed().as_secs(), at, &self.pal)
+        working::line(
+            self.header(),
+            start.elapsed().as_secs(),
+            at,
+            self.compact_progress.map(|(p, started)| working::Progress {
+                elapsed: started.elapsed(),
+                ..p
+            }),
+            &self.pal,
+        )
     }
 
     /// What the turn is busy with, as one word.
