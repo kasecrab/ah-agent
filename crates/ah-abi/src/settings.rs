@@ -125,7 +125,11 @@ impl Default for PromptSettings {
                  Work that takes more than a couple of steps goes in the plan tool first: \
                  set the tasks, mark one started before you work on it and done as soon as \
                  it is finished, and give a task `needs` when it cannot start until another \
-                 one is done. Skip it for a single edit or question.",
+                 one is done. Skip it for a single edit or question.\n\
+                 When the request leaves a choice open that would send the work one way \
+                 or the other, ask with the ask_user tool before doing it, once, with the \
+                 options you would otherwise pick between. Anything you can settle from \
+                 the code or a sensible default, settle yourself and say what you assumed.",
             ),
             append: String::new(),
             instructions: vec![String::from("AGENTS.md"), String::from("CLAUDE.md")],
@@ -429,6 +433,7 @@ impl Default for ToolSettings {
     fn default() -> Self {
         Self {
             enabled: [
+                "ask_user",
                 "bash",
                 "read_file",
                 "write_file",

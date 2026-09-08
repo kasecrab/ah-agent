@@ -1,5 +1,6 @@
 //! Built-in tools and the registry that dispatches model tool calls.
 
+pub mod ask;
 pub mod bash;
 pub mod describe;
 pub mod diff;
@@ -11,7 +12,7 @@ pub mod plan;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use ah_abi::{ToolCall, ToolResult, ToolSettings, ToolSpec};
+use ah_abi::{Ask, Reply, ToolCall, ToolResult, ToolSettings, ToolSpec};
 use serde_json::Value;
 
 /// Execution context handed to every tool call.
@@ -21,6 +22,29 @@ pub struct ToolCtx<'a> {
     /// Set when the user cancels the turn. A tool that waits for anything
     /// watches this and gives up at once.
     pub cancel: &'a std::sync::atomic::AtomicBool,
+    /// The way to the person at the keyboard, for the one tool that asks them
+    /// something. Read-only calls run side by side on scoped threads, so this
+    /// is shared between threads even though only one tool ever uses it.
+    pub ask: &'a (dyn AskUser + Sync),
+}
+
+/// How a tool reaches the user. The call blocks until they answer.
+pub trait AskUser {
+    fn ask(&self, ask: &Ask) -> Reply;
+}
+
+/// The asker for callers with nobody behind them: one-off tool runs and tests.
+pub struct NoUser;
+
+impl AskUser for NoUser {
+    fn ask(&self, _ask: &Ask) -> Reply {
+        Reply::Unavailable
+    }
+}
+
+/// A borrow of [`NoUser`], to fill in [`ToolCtx::ask`].
+pub fn no_user() -> &'static NoUser {
+    &NoUser
 }
 
 /// A cancel flag for callers with nothing to cancel (one-off tool runs, tests).
@@ -63,6 +87,7 @@ impl Registry {
     pub fn builtins(settings: &ToolSettings) -> Self {
         let mut r = Self::new();
         let all: Vec<Box<dyn Tool>> = vec![
+            Box::new(ask::AskTool),
             Box::new(bash::Bash),
             Box::new(fs::ReadFile),
             Box::new(fs::WriteFile),

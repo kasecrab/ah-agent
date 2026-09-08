@@ -136,6 +136,7 @@ mod tests {
             cwd: &cwd,
             settings,
             cancel: crate::tools::never(),
+            ask: crate::tools::no_user(),
         };
         Bash.run(&args, &ctx)
     }
@@ -216,6 +217,7 @@ mod tests {
             cwd: &cwd,
             settings: &settings,
             cancel: &cancel,
+            ask: crate::tools::no_user(),
         };
         std::thread::scope(|s| {
             s.spawn(|| {

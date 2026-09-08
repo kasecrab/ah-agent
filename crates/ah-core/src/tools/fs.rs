@@ -255,6 +255,7 @@ mod tests {
             cwd: &dir,
             settings: &settings,
             cancel: crate::tools::never(),
+            ask: crate::tools::no_user(),
         };
         WriteFile.run(
             &json!({"path": "f.rs", "content": "fn a() {\n    one();\n    two();\n}\n"}),
@@ -311,6 +312,7 @@ mod tests {
             cwd: &dir,
             settings: &settings,
             cancel: crate::tools::never(),
+            ask: crate::tools::no_user(),
         };
         let r = EditFile.run(
             &json!({"path": "nope.txt", "old_string": "a", "new_string": "b"}),
@@ -329,6 +331,7 @@ mod tests {
             cwd: &dir,
             settings: &settings,
             cancel: crate::tools::never(),
+            ask: crate::tools::no_user(),
         };
         let w = WriteFile.run(
             &json!({"path": "sub/f.txt", "content": "one\ntwo\nthree\n"}),

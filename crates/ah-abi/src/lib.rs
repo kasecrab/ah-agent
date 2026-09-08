@@ -4,11 +4,13 @@
 
 extern crate alloc;
 
+pub mod ask;
 pub mod message;
 pub mod plugin;
 pub mod settings;
 pub mod tool;
 
+pub use ask::*;
 pub use message::*;
 pub use plugin::*;
 pub use settings::*;

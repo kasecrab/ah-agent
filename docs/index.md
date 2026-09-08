@@ -1,8 +1,8 @@
 # ah documentation
 
 ah is a minimal coding agent for the terminal: one static binary, OpenRouter
-as the model provider, four built-in tools (`bash`, `read_file`, `write_file`,
-`edit_file`) and wasm plugins for everything else. These pages are embedded in
+as the model provider, built-in tools (`bash`, `read_file`, `write_file`,
+`edit_file`, `jobs`, `plan`, `ask_user`) and wasm plugins for everything else. These pages are embedded in
 the binary. `ah docs` lists them and `ah docs <topic>` prints one in full.
 
 ## Topics

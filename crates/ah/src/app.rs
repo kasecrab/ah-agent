@@ -1,9 +1,9 @@
 //! Shared runtime: settings, plugins, provider, and the engine owning the conversation.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
+use std::sync::{Arc, Mutex};
 
 use ah_core::abi::*;
 use ah_core::agent::{Agent, AgentEvent, AgentIo, Hooks, NoHooks, TurnSummary};
@@ -141,6 +141,9 @@ pub enum UiEvent {
         call: ToolCall,
         reason: String,
     },
+    /// The `ask_user` tool wants an answer. The turn is stopped until one is
+    /// sent back down the answer channel.
+    AskUser(Box<Ask>),
     Busy(bool),
     Resumed {
         id: String,
@@ -418,12 +421,15 @@ impl Engine {
     }
 
     /// Engine thread main loop for the TUI.
-    pub fn serve(mut self, rx: Receiver<EngineCmd>, tx: Sender<UiEvent>, perm_rx: Receiver<bool>) {
-        let io = ChannelIo {
-            tx: tx.clone(),
-            perm_rx,
-            cancel: self.cancel.clone(),
-        };
+    pub fn serve(
+        mut self,
+        rx: Receiver<EngineCmd>,
+        tx: Sender<UiEvent>,
+        perm_rx: Receiver<bool>,
+        ask_rx: Receiver<Reply>,
+    ) {
+        let cancel = self.cancel.clone();
+        let io = ChannelIo::new(tx.clone(), perm_rx, ask_rx, cancel);
         while let Ok(cmd) = rx.recv() {
             match cmd {
                 EngineCmd::Submit { text, images } => {
@@ -512,10 +518,31 @@ impl Engine {
 }
 
 /// `AgentIo` over channels, used when the engine runs on its own thread.
+///
+/// The answer channels sit behind locks because the loop shares the driver
+/// with tool calls that may run side by side; only one of them ever waits
+/// here, and only while a prompt is on screen.
 pub struct ChannelIo {
     pub tx: Sender<UiEvent>,
-    pub perm_rx: Receiver<bool>,
+    perm_rx: Mutex<Receiver<bool>>,
+    ask_rx: Mutex<Receiver<Reply>>,
     pub cancel: Arc<AtomicBool>,
+}
+
+impl ChannelIo {
+    pub fn new(
+        tx: Sender<UiEvent>,
+        perm_rx: Receiver<bool>,
+        ask_rx: Receiver<Reply>,
+        cancel: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            tx,
+            perm_rx: Mutex::new(perm_rx),
+            ask_rx: Mutex::new(ask_rx),
+            cancel,
+        }
+    }
 }
 
 impl AgentIo for ChannelIo {
@@ -523,6 +550,10 @@ impl AgentIo for ChannelIo {
         let _ = self.tx.send(UiEvent::Agent(ev));
     }
     fn ask_permission(&self, call: &ToolCall, reason: &str) -> bool {
+        let rx = lock(&self.perm_rx);
+        // Anything left from an earlier prompt goes before this one is asked;
+        // draining afterwards would race the answer to this one and eat it.
+        while rx.try_recv().is_ok() {}
         if self
             .tx
             .send(UiEvent::AskPermission {
@@ -533,13 +564,33 @@ impl AgentIo for ChannelIo {
         {
             return false;
         }
-        // drop stale answers first
-        while self.perm_rx.try_recv().is_ok() {}
-        match self.perm_rx.recv() {
+        match rx.recv() {
             Ok(v) => v && !self.cancel.load(Ordering::Relaxed),
             Err(_) => false,
         }
     }
+    fn ask_user(&self, ask: &Ask) -> Reply {
+        let rx = lock(&self.ask_rx);
+        while rx.try_recv().is_ok() {}
+        if self
+            .tx
+            .send(UiEvent::AskUser(Box::new(ask.clone())))
+            .is_err()
+        {
+            return Reply::Unavailable;
+        }
+        match rx.recv() {
+            Ok(_) if self.cancel.load(Ordering::Relaxed) => Reply::Dismissed,
+            Ok(r) => r,
+            Err(_) => Reply::Unavailable,
+        }
+    }
+}
+
+/// A poisoned answer channel still holds a working receiver: the panic that
+/// poisoned it was not in the queue.
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 fn no_key(io: &dyn AgentIo) -> ah_core::Error {

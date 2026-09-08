@@ -166,6 +166,7 @@ mod tests {
             cwd: &cwd,
             settings: &settings,
             cancel: crate::tools::never(),
+            ask: crate::tools::no_user(),
         };
         PlanTool.run(&args, &ctx)
     }

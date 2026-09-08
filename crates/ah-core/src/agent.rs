@@ -147,11 +147,28 @@ fn tools_bytes(tools: &[ToolSpec]) -> usize {
         .sum()
 }
 
-/// Callbacks the loop uses to talk to whoever is driving it.
-pub trait AgentIo {
+/// Callbacks the loop uses to talk to whoever is driving it. Read-only tool
+/// calls run side by side, so the driver is shared between threads.
+pub trait AgentIo: Sync {
     fn emit(&self, ev: AgentEvent);
     /// Blocking permission prompt. Return `false` to deny.
     fn ask_permission(&self, call: &ToolCall, reason: &str) -> bool;
+    /// Put the `ask_user` tool's questions to the user and block until they
+    /// answer. A driver with nobody at a keyboard leaves this alone.
+    fn ask_user(&self, _ask: &Ask) -> Reply {
+        Reply::Unavailable
+    }
+}
+
+/// [`AgentIo::ask_user`] as the asker a tool sees. The loop hands the driver to
+/// tools through this rather than as itself: one tool asks questions, and the
+/// rest have no business with the rest of the driver.
+struct IoAsker<'a>(&'a dyn AgentIo);
+
+impl crate::tools::AskUser for IoAsker<'_> {
+    fn ask(&self, ask: &Ask) -> Reply {
+        self.0.ask_user(ask)
+    }
 }
 
 /// Plugin hook surface used by the loop. `NoHooks` is the empty impl.
@@ -688,12 +705,13 @@ impl<'a> Agent<'a> {
             // Plugin tools share one interpreter, so they never join a batch.
             let r = match self.hooks.plugin_tool(call, cwd) {
                 Some(r) => r,
-                None => self.registry.run(call, &self.tool_ctx()),
+                None => self.registry.run(call, &self.tool_ctx(&IoAsker(io))),
             };
             results[i] = Some((r, start.elapsed().as_millis() as u64));
         } else if !pending.is_empty() {
             let registry = self.registry;
-            let ctx = self.tool_ctx();
+            let asker = IoAsker(io);
+            let ctx = self.tool_ctx(&asker);
             let done: Vec<(usize, ToolResult, u64)> = std::thread::scope(|scope| {
                 let handles: Vec<_> = pending
                     .iter()
@@ -734,11 +752,12 @@ impl<'a> Agent<'a> {
         out
     }
 
-    fn tool_ctx(&self) -> ToolCtx<'_> {
+    fn tool_ctx<'c>(&'c self, ask: &'c IoAsker<'c>) -> ToolCtx<'c> {
         ToolCtx {
             cwd: &self.cwd,
             settings: &self.settings.tools,
             cancel: self.cancel,
+            ask,
         }
     }
 
@@ -868,6 +887,10 @@ pub mod test_support {
     pub struct RecordingIo {
         pub events: Mutex<Vec<AgentEvent>>,
         pub allow: bool,
+        /// What a question is answered with; nothing means nobody to ask.
+        pub answer: Option<Reply>,
+        /// The questions that were put.
+        pub asked: Mutex<Vec<Ask>>,
     }
 
     impl AgentIo for RecordingIo {
@@ -876,6 +899,10 @@ pub mod test_support {
         }
         fn ask_permission(&self, _call: &ToolCall, _reason: &str) -> bool {
             self.allow
+        }
+        fn ask_user(&self, ask: &Ask) -> Reply {
+            self.asked.lock().unwrap().push(ask.clone());
+            self.answer.clone().unwrap_or(Reply::Unavailable)
         }
     }
 }
@@ -1086,6 +1113,78 @@ mod tests {
         assert_eq!(reqs[1].messages[0].role, Role::System);
         assert!(reqs[1].messages[0].content.contains("Working directory"));
         assert!(reqs[0].tools.iter().any(|t| t.function.name == "edit_file"));
+    }
+
+    #[test]
+    fn a_question_reaches_the_user_and_the_answer_reaches_the_model() {
+        let provider = MockProvider::new(vec![
+            tool_call_script(
+                "ask_user",
+                r#"{"questions":[{"question":"Which store?","options":["sqlite","postgres"]}]}"#,
+            ),
+            vec![StreamEvent::Text("sqlite it is".into())],
+        ]);
+        let settings = Settings::default();
+        let registry = Registry::builtins(&settings.tools);
+        let mut hooks = NoHooks;
+        let cancel = AtomicBool::new(false);
+        let mut agent = Agent::new(
+            &provider,
+            &registry,
+            &mut hooks,
+            &settings,
+            std::env::current_dir().unwrap(),
+            &cancel,
+        );
+        agent.notices = false;
+        let mut messages = vec![Message::user("pick a store")];
+        let io = RecordingIo {
+            answer: Some(Reply::Answered {
+                answers: vec![Answer {
+                    picked: vec!["sqlite".into()],
+                    note: "one writer".into(),
+                }],
+            }),
+            ..Default::default()
+        };
+        agent.run_turn(&mut messages, &io).unwrap();
+        let asked = io.asked.lock().unwrap();
+        assert_eq!(asked.len(), 1);
+        assert_eq!(asked[0].questions[0].question, "Which store?");
+        assert_eq!(asked[0].questions[0].options.len(), 2);
+        assert_eq!(
+            messages[2].content,
+            "Which store?\nanswer: sqlite\nnote: one writer\n"
+        );
+    }
+
+    #[test]
+    fn a_run_with_nobody_at_the_keyboard_tells_the_model_to_decide() {
+        let provider = MockProvider::new(vec![
+            tool_call_script("ask_user", r#"{"questions":["Which store?"]}"#),
+            vec![StreamEvent::Text("going with sqlite".into())],
+        ]);
+        let settings = Settings::default();
+        let registry = Registry::builtins(&settings.tools);
+        let mut hooks = NoHooks;
+        let cancel = AtomicBool::new(false);
+        let mut agent = Agent::new(
+            &provider,
+            &registry,
+            &mut hooks,
+            &settings,
+            std::env::current_dir().unwrap(),
+            &cancel,
+        );
+        agent.notices = false;
+        let mut messages = vec![Message::user("pick a store")];
+        let io = RecordingIo::default();
+        agent.run_turn(&mut messages, &io).unwrap();
+        assert!(
+            messages[2].content.contains("nobody to ask"),
+            "{:?}",
+            messages[2].content
+        );
     }
 
     #[test]

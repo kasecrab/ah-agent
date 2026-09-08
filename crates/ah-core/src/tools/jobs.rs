@@ -110,6 +110,7 @@ mod tests {
             cwd: &cwd,
             settings: &settings,
             cancel: crate::tools::never(),
+            ask: crate::tools::no_user(),
         };
         JobsTool.run(&args, &ctx)
     }

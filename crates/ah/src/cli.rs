@@ -135,6 +135,44 @@ impl AgentIo for PrintIo {
         }
     }
 
+    fn ask_user(&self, ask: &Ask) -> Reply {
+        // A piped or scripted run has nobody to type an answer, and a question
+        // nobody can see would stop the turn for good.
+        if self.json || !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+            return Reply::Unavailable;
+        }
+        let mut err = std::io::stderr().lock();
+        let mut answers = Vec::with_capacity(ask.questions.len());
+        for q in &ask.questions {
+            let _ = writeln!(err, "\x1b[33m? {}\x1b[0m", q.question.trim());
+            for (i, o) in q.options.iter().enumerate() {
+                let tail = if o.description.is_empty() {
+                    String::new()
+                } else {
+                    format!("  \x1b[90m{}\x1b[0m", o.description)
+                };
+                let _ = writeln!(err, "  {}) {}{tail}", i + 1, o.label);
+            }
+            let how = match (q.options.is_empty(), q.multi) {
+                (true, _) => "answer",
+                (false, false) => "number or answer",
+                (false, true) => "numbers or answer",
+            };
+            let _ = write!(err, "  [{how}] ");
+            let _ = err.flush();
+            let mut line = String::new();
+            if std::io::stdin().read_line(&mut line).is_err() {
+                return Reply::Dismissed;
+            }
+            let line = line.trim();
+            if line.is_empty() {
+                return Reply::Dismissed;
+            }
+            answers.push(answer(q, line));
+        }
+        Reply::Answered { answers }
+    }
+
     fn ask_permission(&self, call: &ToolCall, reason: &str) -> bool {
         if !self.ask {
             return true;
@@ -151,6 +189,41 @@ impl AgentIo for PrintIo {
             return false;
         }
         matches!(line.trim(), "y" | "Y" | "yes")
+    }
+}
+
+/// One typed line as an answer: the numbers of the options it names, or, when
+/// it names none of them, the line itself.
+fn answer(q: &Question, line: &str) -> Answer {
+    let picked: Vec<String> = line
+        .split([',', ' '])
+        .filter(|t| !t.is_empty())
+        .filter_map(|t| t.parse::<usize>().ok())
+        .filter(|n| (1..=q.options.len()).contains(n))
+        .map(|n| q.options[n - 1].label.clone())
+        .take(if q.multi { q.options.len() } else { 1 })
+        .fold(Vec::new(), |mut v, l| {
+            if !v.contains(&l) {
+                v.push(l);
+            }
+            v
+        });
+    // Every word a number means the line picked options; anything else is an
+    // answer of the user's own, even where it happens to contain a number.
+    let numbers = line
+        .split([',', ' '])
+        .filter(|t| !t.is_empty())
+        .all(|t| t.parse::<usize>().is_ok());
+    if picked.is_empty() || !numbers {
+        Answer {
+            picked: Vec::new(),
+            note: line.to_string(),
+        }
+    } else {
+        Answer {
+            picked,
+            note: String::new(),
+        }
     }
 }
 
@@ -715,5 +788,43 @@ fn config(o: &Overrides, cmd: ConfigCmd) -> Result<(), AnyError> {
             println!("wrote {}", path.display());
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ah_core::abi::Choice;
+
+    fn question(multi: bool) -> Question {
+        Question {
+            header: String::new(),
+            question: "Which?".into(),
+            options: ["a", "b", "c"]
+                .iter()
+                .map(|l| Choice {
+                    label: (*l).into(),
+                    description: String::new(),
+                })
+                .collect(),
+            multi,
+        }
+    }
+
+    #[test]
+    fn a_typed_line_is_read_as_numbers_or_as_an_answer() {
+        let one = question(false);
+        assert_eq!(answer(&one, "2").picked, ["b"]);
+        assert_eq!(answer(&one, "2 3").picked, ["b"], "one choice, the first");
+        // Out of range, or words: the line stands as the answer itself.
+        assert_eq!(answer(&one, "9").note, "9");
+        assert_eq!(
+            answer(&one, "b, but only for now").note,
+            "b, but only for now"
+        );
+        assert!(answer(&one, "b, but only for now").picked.is_empty());
+        let many = question(true);
+        assert_eq!(answer(&many, "1, 3").picked, ["a", "c"]);
+        assert_eq!(answer(&many, "1 1 3").picked, ["a", "c"], "no repeats");
     }
 }

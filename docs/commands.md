@@ -93,8 +93,21 @@ name in, Enter runs it. Plugins can add commands (`ah docs plugins`).
 | `edit_file` | `path` and either `old_string`/`new_string`/`replace_all` or `edits` (a list of those, applied in order); each `old_string` must match one place unless `replace_all`; nothing is written unless every edit applies |
 | `jobs` | `action` (`list`, `output`, `wait`, `kill`), `id`, optional `from_line`, `tail`, `timeout_ms`; background commands |
 | `plan` | `action` (`set`, `add`, `start`, `done`, `drop`, `update`, `list`), `tasks`, `ids`, `id`, `title`, `parent`, `needs`, `note`; the task list |
+| `ask_user` | `questions`: up to four, each with a `question`, an optional `header`, up to eight `options` (`label`, `description`) and `multi`; puts them to the user one at a time and returns what they said |
 
 `tools.enabled` and `tools.disabled` choose which are offered.
+
+### Asking the user
+
+`ask_user` stops the turn and puts a box on screen: the question, its options
+numbered, and a row for an answer of the user's own. A number picks an option,
+`space` ticks one when the question takes several, typing anywhere starts a
+written answer (which can stand alone or qualify a pick), Enter accepts and
+Esc dismisses. Questions are asked one after another. The model gets the
+question and the answer back as text; a dismissed question and a run with
+nobody at the keyboard both come back as errors telling it to decide for
+itself. One-shot runs ask on the terminal instead; `--json` and piped runs
+never ask.
 
 ### Matching in edit_file
 

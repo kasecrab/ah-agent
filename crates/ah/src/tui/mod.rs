@@ -1,5 +1,6 @@
 //! Terminal UI. Threads: render loop, input reader, engine. Idle = blocked on a channel.
 
+mod ask;
 mod highlight;
 mod input;
 mod jobs;
@@ -251,6 +252,8 @@ enum State {
     Streaming,
     Tool,
     Compacting,
+    /// A question is on screen; nothing moves until it is answered.
+    Asking,
 }
 
 struct App {
@@ -293,6 +296,8 @@ struct App {
     plugin_commands: Vec<(String, SlashCommandSpec)>,
     plugin_count: u32,
     pending_perm: Option<(ToolCall, String)>,
+    /// The question the `ask_user` tool put on screen, while it is unanswered.
+    ask: Option<ask::View>,
     always_allow: HashSet<String>,
     git_branch: String,
     cwd: String,
@@ -320,6 +325,7 @@ struct App {
     self_tx: Sender<Msg>,
     tx: Sender<EngineCmd>,
     perm_tx: Sender<bool>,
+    ask_tx: Sender<Reply>,
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     last_draw: Instant,
     dirty: bool,
@@ -372,6 +378,7 @@ fn run_inner(
     let (ui_tx, ui_rx) = mpsc::channel::<Msg>();
     let (eng_tx, eng_rx) = mpsc::channel::<EngineCmd>();
     let (perm_tx, perm_rx) = mpsc::channel::<bool>();
+    let (ask_tx, ask_rx) = mpsc::channel::<Reply>();
     let cancel = engine.cancel.clone();
     let session_id = engine.session.id.clone();
     let session_name = engine.session.name.clone();
@@ -383,7 +390,7 @@ fn run_inner(
         let (fwd_tx, fwd_rx) = mpsc::channel::<UiEvent>();
         std::thread::Builder::new()
             .name("ah-engine".into())
-            .spawn(move || engine.serve(eng_rx, fwd_tx, perm_rx))
+            .spawn(move || engine.serve(eng_rx, fwd_tx, perm_rx, ask_rx))
             .expect("spawn engine");
         std::thread::Builder::new()
             .name("ah-engine-fwd".into())
@@ -435,6 +442,7 @@ fn run_inner(
         plugin_commands: commands,
         plugin_count,
         pending_perm: None,
+        ask: None,
         always_allow: HashSet::new(),
         git_branch: ah_core::plugins::git_branch(&cwd),
         cwd: cwd.display().to_string(),
@@ -457,6 +465,7 @@ fn run_inner(
         self_tx: ui_tx.clone(),
         tx: eng_tx,
         perm_tx,
+        ask_tx,
         cancel,
         last_draw: Instant::now() - Duration::from_secs(1),
         dirty: true,
@@ -803,6 +812,7 @@ impl App {
             State::Streaming => "streaming".into(),
             State::Tool => format!("tool:{}", self.tool_name),
             State::Compacting => "compacting".into(),
+            State::Asking => "asking".into(),
         };
         let m = &self.settings().model;
         let favorite = self
@@ -957,9 +967,13 @@ impl App {
         rx: &Receiver<Msg>,
     ) -> Result<(), AnyError> {
         loop {
+            // A question stops the turn: nothing is moving behind the box, so
+            // the frame is not throttled to the stream rate and the loop goes
+            // back to waiting on the channel instead of animating.
+            let running = self.busy && self.ask.is_none();
             if self.dirty {
                 let throttle = Duration::from_millis(self.settings().layout.stream_redraw_ms);
-                let stream = self.busy || self.job_view.is_some();
+                let stream = running || self.job_view.is_some();
                 if !stream || self.last_draw.elapsed() >= throttle {
                     self.render(terminal)?;
                     self.last_draw = Instant::now();
@@ -969,10 +983,10 @@ impl App {
             if self.quit {
                 return Ok(());
             }
-            let msg = if self.busy || self.dirty || self.job_view.is_some() {
+            let msg = if running || self.dirty || self.job_view.is_some() {
                 let wait = if self.dirty {
                     Duration::from_millis(self.settings().layout.stream_redraw_ms.max(1))
-                } else if self.job_view.is_some() && !self.busy {
+                } else if self.job_view.is_some() && !running {
                     Duration::from_millis(250)
                 } else {
                     Duration::from_millis(self.animation_ms().max(20))
@@ -980,7 +994,7 @@ impl App {
                 match rx.recv_timeout(wait) {
                     Ok(m) => Some(m),
                     Err(RecvTimeoutError::Timeout) => {
-                        if self.busy {
+                        if running {
                             self.dirty = true;
                         }
                         // Keep the clock in the job view moving.
@@ -2105,6 +2119,7 @@ impl App {
                 if !b {
                     self.set_state(State::Idle);
                     self.pending_perm = None;
+                    self.close_ask();
                     self.git_branch = ah_core::plugins::git_branch(std::path::Path::new(&self.cwd));
                     self.request_status();
                     self.drain_queue();
@@ -2153,6 +2168,16 @@ impl App {
                 self.dirty = true;
             }
             UiEvent::Slash(out, name, stage) => self.slash_result(&name, *out, stage),
+            UiEvent::AskUser(a) => match ask::View::new(*a) {
+                Some(v) => {
+                    self.ask = Some(v);
+                    self.set_state(State::Asking);
+                    self.dirty = true;
+                }
+                None => {
+                    let _ = self.ask_tx.send(Reply::Dismissed);
+                }
+            },
             UiEvent::AskPermission { call, reason } => {
                 if self.always_allow.contains(&call.function.name) {
                     let _ = self.perm_tx.send(true);
@@ -2365,7 +2390,9 @@ impl App {
         match ev {
             Event::Key(k) => self.handle_key(k),
             Event::Paste(s) => {
-                if let Some(p) = self.picker.as_mut() {
+                if let Some(v) = self.ask.as_mut() {
+                    v.paste(&s);
+                } else if let Some(p) = self.picker.as_mut() {
                     p.query.push_str(s.trim());
                     p.refilter();
                 } else {
@@ -2610,7 +2637,16 @@ impl App {
         if self.pending_perm.take().is_some() {
             let _ = self.perm_tx.send(false);
         }
+        self.close_ask();
         self.dirty = true;
+    }
+
+    /// Take back an unanswered question, telling the turn waiting on it that
+    /// nothing was said.
+    fn close_ask(&mut self) {
+        if self.ask.take().is_some() {
+            let _ = self.ask_tx.send(Reply::Dismissed);
+        }
     }
 
     fn handle_key(&mut self, k: KeyEvent) {
@@ -2620,6 +2656,24 @@ impl App {
         self.dirty = true;
         self.sel = None;
         let b = self.binds.clone();
+
+        // A question stops the turn, so it takes every key until it is
+        // answered; only the interrupt goes past it.
+        if self.ask.is_some() {
+            if keys::any_match(&b.quit, &k) {
+                self.cancel_turn();
+                return;
+            }
+            match self.ask.as_mut().map(|v| v.key(k)) {
+                Some(ask::Action::Done(answers)) => {
+                    self.ask = None;
+                    let _ = self.ask_tx.send(Reply::Answered { answers });
+                }
+                Some(ask::Action::Dismiss) => self.close_ask(),
+                _ => {}
+            }
+            return;
+        }
 
         if self.plan_view.is_some() {
             self.plan_view_key(k);
@@ -3241,6 +3295,7 @@ impl App {
         // Only when the input is what the keys go to: a pane over it takes
         // them, and a cursor left blinking underneath belongs to nothing.
         self.cursor = (self.pending_perm.is_none()
+            && self.ask.is_none()
             && self.picker.is_none()
             && self.usage_pane.is_none()
             && self.job_view.is_none()
@@ -3276,6 +3331,9 @@ impl App {
                 icons: &icons,
             };
             u.draw(f, area, &pal, &self.usage, &self.stats, &models);
+        }
+        if let Some(v) = self.ask.as_mut() {
+            self.cursor = v.draw(f, area, &pal);
         }
         if let Some(sel) = self.sel {
             let text = highlight_selection(f, area, sel);
@@ -3388,7 +3446,10 @@ impl App {
     /// `• Working (3s · esc to interrupt)`, animated unless turned off.
     fn working_line(&self) -> Line<'static> {
         let start = self.busy_start.unwrap_or_else(Instant::now);
-        let at = (self.settings().layout.animation_ms > 0).then(|| start.elapsed());
+        // The band would stand still while a question is up, which reads as a
+        // hang; the line goes plain until the turn is moving again.
+        let at = (self.settings().layout.animation_ms > 0 && self.ask.is_none())
+            .then(|| start.elapsed());
         working::line(
             self.header(),
             start.elapsed().as_secs(),
@@ -3406,6 +3467,7 @@ impl App {
         match self.state {
             State::Tool => "Running",
             State::Compacting => "Compacting",
+            State::Asking => "Waiting for you",
             _ => "Working",
         }
     }

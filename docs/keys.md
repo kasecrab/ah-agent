@@ -70,6 +70,10 @@ quit = ["ctrl-q"]
   (paths like `crates/ah/src/tui/mod.rs:106` count as one word), a triple
   click the whole row, and a fourth goes back to dragging cells. Shift-drag
   keeps the terminal's own selection.
+- The question box (`ask_user`): `1`-`9` picks the option it numbers, Up/Down
+  or Tab/Shift-Tab move, `space` ticks one when the question takes several,
+  typing anything else starts an answer of your own, Enter accepts, Esc
+  dismisses and Ctrl-C interrupts the turn.
 - Pickers (`/model`, `/resume`, `/favorite`, `/skills`): type to filter,
   Up/Down or Tab/Shift-Tab move, PgUp/PgDn page, Enter accepts, Esc closes,
   Ctrl-U clears the query, Ctrl-R refreshes the model list. `/favorite` uses

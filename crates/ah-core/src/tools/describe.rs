@@ -49,6 +49,7 @@ pub fn describe(name: &str, args: &Value) -> Option<String> {
             })
         }
         "plan" => Some(format!("Plan({})", plan(args))),
+        "ask_user" => Some(format!("Ask({})", asked(args)?)),
         _ => None,
     }
 }
@@ -129,6 +130,22 @@ fn plural(n: usize) -> &'static str {
 }
 
 /// Newlines out, long text cut; the header is one line.
+/// The first question, by its header where the model wrote one: the whole
+/// question is on screen in the box anyway.
+fn asked(args: &Value) -> Option<String> {
+    let first = match args.get("questions") {
+        Some(Value::Array(a)) => a.first()?,
+        _ => args,
+    };
+    if let Some(s) = first.as_str() {
+        return Some(one_line(s));
+    }
+    let text = ["header", "question", "prompt", "text"]
+        .iter()
+        .find_map(|k| first.get(*k).and_then(Value::as_str))?;
+    Some(one_line(text))
+}
+
 fn one_line(s: &str) -> String {
     let flat: String = s
         .split_whitespace()
@@ -170,6 +187,17 @@ mod tests {
         assert_eq!(
             d("read_file", json!({"path": "hello.md"})),
             "Read(hello.md)"
+        );
+        assert_eq!(
+            d(
+                "ask_user",
+                json!({"questions": [{"header": "Auth method", "question": "Which one?"}]})
+            ),
+            "Ask(Auth method)"
+        );
+        assert_eq!(
+            d("ask_user", json!({"question": "Which one?"})),
+            "Ask(Which one?)"
         );
         assert_eq!(
             d(
