@@ -64,7 +64,7 @@ name in, Enter runs it. Plugins can add commands (`ah docs plugins`).
 | `/effort [LEVEL]` | reasoning effort: `off`, `minimal`, `low`, `medium`, `high`, `xhigh` |
 | `/favorite [NAME]`, `/fav` | favorites picker; a name switches to it or creates it |
 | `/usage` | session cost per model, wall and API time, tool calls, lines changed, plus OpenRouter balance, limits and 30-day top models (`r` refreshes) |
-| `/compact [FOCUS]` | summarise the conversation now, optionally around a focus |
+| `/compact [FOCUS]` | summarise the conversation now, optionally around a focus; the summary folds behind a one-line header (Ctrl-T shows it) |
 | `/clear` | start an empty conversation in the same session file |
 | `/resume [ID\|NAME]` | switch to another session in place |
 | `/rename [NAME]` | name the session; empty removes the name |
@@ -198,6 +198,7 @@ One JSON object per line on stdout. `type` is one of:
 | `notice` | `text` |
 | `settings_patch` | `patch` (from a plugin) |
 | `retry` | `attempt`, `wait_ms`, `error` |
+| `compacting` | `auto` (true when the window filled up, false for `/compact`) |
 | `compacted` | `before`, `after`, `summary` |
 | `error` | `error` |
 | `turn_end` | `requests`, `tool_calls`, `usage`, `cancelled` |

@@ -93,6 +93,10 @@ impl AgentIo for PrintIo {
             AgentEvent::Error(e) => {
                 let _ = writeln!(err, "\x1b[31merror: {e}\x1b[0m");
             }
+            AgentEvent::Compacting { auto } => {
+                let why = if auto { " (context full)" } else { "" };
+                let _ = writeln!(err, "\x1b[90mcompacting context{why}…\x1b[0m");
+            }
             AgentEvent::Compacted { before, after, .. } => {
                 let _ = writeln!(
                     err,
@@ -214,6 +218,7 @@ fn event_json(ev: &AgentEvent) -> serde_json::Value {
             error,
         } => json!({"type": "retry", "attempt": attempt, "wait_ms": wait_ms, "error": error}),
         AgentEvent::Error(e) => json!({"type": "error", "error": e}),
+        AgentEvent::Compacting { auto } => json!({"type": "compacting", "auto": auto}),
         AgentEvent::Compacted {
             before,
             after,

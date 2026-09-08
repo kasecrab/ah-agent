@@ -342,11 +342,10 @@ impl Engine {
             return Err(no_key(io));
         };
         // Compact before the new message so it survives verbatim.
-        if agent.over_threshold() {
-            io.emit(AgentEvent::Notice("compacting context…".into()));
-            if let Err(e) = agent.compact(&mut messages, "", io) {
-                io.emit(AgentEvent::Notice(format!("compaction failed: {e}")));
-            }
+        if agent.over_threshold()
+            && let Err(e) = agent.auto_compact(&mut messages, io)
+        {
+            io.emit(AgentEvent::Notice(format!("compaction failed: {e}")));
         }
         let before = messages.len();
         messages.extend(message);
@@ -392,8 +391,14 @@ impl Engine {
         } else {
             self.session.messages = messages;
         }
-        if let Err(e) = &res {
-            io.emit(AgentEvent::Error(format!("compaction failed: {e}")));
+        match &res {
+            // Esc during a compaction leaves the conversation alone; say so
+            // quietly instead of as a failure.
+            Err(ah_core::Error::Cancelled) => {
+                io.emit(AgentEvent::Notice("compaction cancelled".into()))
+            }
+            Err(e) => io.emit(AgentEvent::Error(format!("compaction failed: {e}"))),
+            Ok(()) => {}
         }
         res
     }

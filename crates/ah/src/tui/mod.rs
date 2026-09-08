@@ -250,6 +250,7 @@ enum State {
     Thinking,
     Streaming,
     Tool,
+    Compacting,
 }
 
 struct App {
@@ -627,7 +628,14 @@ impl App {
     fn load_history(&mut self, msgs: &[Message]) {
         for m in msgs {
             match m.role {
-                Role::User => self.push(Block::User(user_display(&m.content, m.images.len()))),
+                Role::User => match ah_core::agent::summary_text(&m.content) {
+                    Some(summary) => self.push(Block::Summary {
+                        text: summary.to_string(),
+                        tokens: None,
+                        expanded: None,
+                    }),
+                    None => self.push(Block::User(user_display(&m.content, m.images.len()))),
+                },
                 Role::Assistant => {
                     if !m.content.is_empty() || m.tool_calls.is_empty() {
                         self.push(Block::Assistant {
@@ -784,6 +792,7 @@ impl App {
             State::Thinking => "thinking".into(),
             State::Streaming => "streaming".into(),
             State::Tool => format!("tool:{}", self.tool_name),
+            State::Compacting => "compacting".into(),
         };
         let m = &self.settings().model;
         let favorite = self
@@ -2269,20 +2278,24 @@ impl App {
                 self.stats.request_end();
                 self.push(Block::Error(e));
             }
+            AgentEvent::Compacting { auto } => {
+                if auto {
+                    self.push(Block::Notice("context full; compacting".into()));
+                }
+                self.follow = true;
+                self.set_state(State::Compacting);
+            }
             AgentEvent::Compacted {
                 before,
                 after,
                 summary,
             } => {
                 self.context_tokens = after;
-                self.push(Block::User(
-                    ah_core::agent::summary_message(&summary).content,
-                ));
-                self.push(Block::Notice(format!(
-                    "context compacted: {} → ~{} tokens",
-                    usage::tokens(before),
-                    usage::tokens(after)
-                )));
+                self.push(Block::Summary {
+                    text: summary,
+                    tokens: Some((before, after)),
+                    expanded: None,
+                });
             }
             AgentEvent::TurnEnd(s) => {
                 self.stats.request_end();
@@ -2756,13 +2769,17 @@ impl App {
                 Block::Tool {
                     expanded: Some(true),
                     ..
+                } | Block::Summary {
+                    expanded: Some(true),
+                    ..
                 }
             )
         }) || self.view.show_tool_output;
         let v = !any_expanded;
         for e in &mut self.entries {
-            if let Block::Tool { expanded, .. } = &mut e.block {
-                *expanded = None;
+            match &mut e.block {
+                Block::Tool { expanded, .. } | Block::Summary { expanded, .. } => *expanded = None,
+                _ => {}
             }
         }
         self.apply_patch(
@@ -2819,7 +2836,7 @@ impl App {
                 for (p, c) in &self.plugin_commands {
                     s.push_str(&format!("\n  /{:<10} {} ({p})", c.name, c.description));
                 }
-                s.push_str("\nkeys: Down (empty input) background jobs · Alt-P plan line · Enter send · Shift/Alt-Enter newline · Esc cancel · Up/Down prompt history · PgUp/PgDn scroll · Shift-Tab next favorite · Ctrl-V paste image · Ctrl-T tool output · Ctrl-R thinking · Ctrl-C quit");
+                s.push_str("\nkeys: Down (empty input) background jobs · Alt-P plan line · Enter send · Shift/Alt-Enter newline · Esc cancel · Up/Down prompt history · PgUp/PgDn scroll · Shift-Tab next favorite · Ctrl-V paste image · Ctrl-T tool output and compaction summaries · Ctrl-R thinking · Ctrl-C quit");
                 self.push(Block::Notice(s));
             }
             "model" | "models" => {
@@ -2889,10 +2906,17 @@ impl App {
                 if self.busy {
                     self.push(Block::Notice("busy; wait or press Esc to cancel".into()));
                 } else {
+                    // Echo it like any other message, so the transcript says
+                    // what was asked for and the working line has a reason.
+                    self.push(Block::User(if args.is_empty() {
+                        "/compact".to_string()
+                    } else {
+                        format!("/compact {args}")
+                    }));
                     self.follow = true;
                     self.busy = true;
                     self.busy_start = Some(Instant::now());
-                    self.set_state(State::Thinking);
+                    self.set_state(State::Compacting);
                     let _ = self.tx.send(EngineCmd::Compact(args.to_string()));
                 }
             }
@@ -3312,6 +3336,7 @@ impl App {
     fn header(&self) -> &'static str {
         match self.state {
             State::Tool => "Running",
+            State::Compacting => "Compacting",
             _ => "Working",
         }
     }

@@ -43,6 +43,11 @@ pub enum AgentEvent {
         error: String,
     },
     Error(String),
+    /// A summary request went out; the conversation is being compacted. `auto`
+    /// is true when the window filled up, false for `/compact`.
+    Compacting {
+        auto: bool,
+    },
     /// The conversation was replaced by a summary. `before` is the token
     /// count that triggered it, `after` a rough size of the summary.
     Compacted {
@@ -60,12 +65,28 @@ exact wording of constraints they set; decisions made and why; files, functions 
 commands touched, with paths; the current state of the work, what is done and what is \
 left; open questions. Be dense and specific; headings and lists are fine. No preamble.";
 
+/// The two halves of the wrapper [`summary_message`] puts around a summary.
+const SUMMARY_OPEN: &str = "[The conversation so far was compacted. Summary:]";
+const SUMMARY_CLOSE: &str = "[End of summary. Continue from here.]";
+
 /// Wrap a summary as the single user message a compacted conversation starts with.
 pub fn summary_message(summary: &str) -> Message {
     Message::user(format!(
-        "[The conversation so far was compacted. Summary:]\n\n{}\n\n[End of summary. Continue from here.]",
+        "{SUMMARY_OPEN}\n\n{}\n\n{SUMMARY_CLOSE}",
         summary.trim()
     ))
+}
+
+/// The summary inside such a message, or `None` when `content` is an ordinary
+/// message. Lets a UI replaying a session file tell the two apart.
+pub fn summary_text(content: &str) -> Option<&str> {
+    let rest = content.trim().strip_prefix(SUMMARY_OPEN)?;
+    Some(
+        rest.trim_end()
+            .strip_suffix(SUMMARY_CLOSE)
+            .unwrap_or(rest)
+            .trim(),
+    )
 }
 
 /// Rough token count for text of `bytes` bytes.
@@ -223,9 +244,26 @@ impl<'a> Agent<'a> {
         focus: &str,
         io: &dyn AgentIo,
     ) -> Result<()> {
+        self.compact_inner(messages, focus, false, io)
+    }
+
+    /// [`Agent::compact`], announced as automatic: the window filled up rather
+    /// than someone asking for it.
+    pub fn auto_compact(&mut self, messages: &mut Vec<Message>, io: &dyn AgentIo) -> Result<()> {
+        self.compact_inner(messages, "", true, io)
+    }
+
+    fn compact_inner(
+        &mut self,
+        messages: &mut Vec<Message>,
+        focus: &str,
+        auto: bool,
+        io: &dyn AgentIo,
+    ) -> Result<()> {
         if messages.is_empty() {
             return Ok(());
         }
+        io.emit(AgentEvent::Compacting { auto });
         let system = self.system_prompt();
         let mut all = Vec::with_capacity(messages.len() + 2);
         all.push(Message::system(system));
@@ -366,8 +404,7 @@ impl<'a> Agent<'a> {
             let turn = summary.requests;
 
             if self.over_threshold() {
-                io.emit(AgentEvent::Notice("compacting context…".into()));
-                match self.compact(messages, "", io) {
+                match self.auto_compact(messages, io) {
                     Ok(()) => {}
                     Err(Error::Cancelled) => {
                         summary.cancelled = true;
@@ -832,6 +869,14 @@ mod tests {
                 ..Usage::default()
             }),
         ]
+    }
+
+    #[test]
+    fn a_summary_message_says_it_is_one() {
+        let m = summary_message("  did things  ");
+        assert_eq!(summary_text(&m.content), Some("did things"));
+        // An ordinary message is not mistaken for a summary.
+        assert_eq!(summary_text("hello"), None);
     }
 
     #[test]

@@ -24,6 +24,16 @@ pub enum Block {
         duration_ms: Option<u64>,
         expanded: Option<bool>,
     },
+    /// A compaction: the model's summary, folded away behind a one-line header
+    /// so a long conversation does not turn into a wall of text.
+    Summary {
+        text: String,
+        /// Tokens before and after, or `None` for a summary replayed from a
+        /// session file, where the counts were never recorded.
+        tokens: Option<(u64, u64)>,
+        /// Per-block override of `show_tool_output`.
+        expanded: Option<bool>,
+    },
     Notice(String),
     Error(String),
 }
@@ -71,6 +81,15 @@ impl Entry {
         mix(&mut k, view.tool_output_lines as u64);
         match &self.block {
             Block::User(s) | Block::Notice(s) | Block::Error(s) => mix(&mut k, s.len() as u64),
+            Block::Summary {
+                text,
+                tokens,
+                expanded,
+            } => {
+                mix(&mut k, text.len() as u64);
+                mix(&mut k, tokens.map_or(0, |(b, a)| b ^ (a << 1)));
+                mix(&mut k, expanded.map(|e| e as u64 + 1).unwrap_or(0));
+            }
             Block::Assistant {
                 text,
                 reasoning,
@@ -477,6 +496,37 @@ fn render(block: &Block, width: usize, view: &View, pal: &Palette) -> Vec<Line<'
             // Every call is its own paragraph.
             out.push(Line::default());
         }
+        Block::Summary {
+            text,
+            tokens,
+            expanded,
+        } => {
+            let full = expanded.unwrap_or(view.show_tool_output);
+            let head = match tokens {
+                Some((before, after)) => format!(
+                    "≡ context compacted: {} → ~{} tokens",
+                    super::usage::tokens(*before),
+                    super::usage::tokens(*after)
+                ),
+                None => "≡ context compacted earlier in this session".to_string(),
+            };
+            let hint = if full {
+                " · Ctrl-T hides it"
+            } else {
+                " · Ctrl-T shows the summary"
+            };
+            out.extend(styled(wrap(&format!("{head}{hint}"), width), pal.dim()));
+            if full {
+                out.extend(with_prefix(
+                    text.trim(),
+                    width,
+                    "  ",
+                    pal.dim(),
+                    Style::default().fg(pal.tool_output),
+                ));
+            }
+            out.push(Line::default());
+        }
         Block::Notice(s) => {
             out.extend(styled(wrap(s, width), pal.dim()));
             out.push(Line::default());
@@ -534,6 +584,43 @@ mod tests {
         // Session files keep no durations, so replayed calls show none.
         let replayed = tool_header(None);
         assert!(replayed.contains("Read(a.rs) ✓"), "{replayed}");
+    }
+
+    /// The rendered summary block, one string per line.
+    fn summary_lines(show: bool) -> Vec<String> {
+        let block = Block::Summary {
+            text: "did a thing\nthen another".into(),
+            tokens: Some((48_000, 3_200)),
+            expanded: None,
+        };
+        let pal = Palette::from_theme(&ah_core::abi::Theme::default());
+        let view = View {
+            show_tool_output: show,
+            tool_output_lines: 5,
+            show_reasoning: false,
+            wrap: true,
+            markdown: false,
+            code_highlight: false,
+        };
+        render(&block, 80, &view, &pal)
+            .iter()
+            .map(|l| l.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn a_compaction_folds_to_one_line_until_asked() {
+        let folded = summary_lines(false);
+        assert_eq!(
+            folded[0],
+            "≡ context compacted: 48.0k → ~3.2k tokens · Ctrl-T shows the summary"
+        );
+        // Nothing of the summary itself, only the header and the blank line.
+        assert_eq!(folded.len(), 2, "{folded:?}");
+        let open = summary_lines(true);
+        assert!(open[0].ends_with("Ctrl-T hides it"), "{open:?}");
+        assert!(open.iter().any(|l| l.contains("did a thing")), "{open:?}");
+        assert!(open.iter().any(|l| l.contains("then another")), "{open:?}");
     }
 
     #[test]

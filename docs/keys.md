@@ -36,7 +36,7 @@ everywhere.
 | `scroll_top` | `["ctrl-home"]` | jump to the start |
 | `scroll_bottom` | `["ctrl-end"]` | jump to the end |
 | `clear` | `["ctrl-l"]` | clear the conversation (same as `/clear`) |
-| `toggle_tools` | `["ctrl-t"]` | expand or collapse tool output |
+| `toggle_tools` | `["ctrl-t"]` | expand or collapse tool output and compaction summaries |
 | `toggle_reasoning` | `["ctrl-r"]` | expand or collapse thinking blocks |
 | `cycle_model` | `["shift-tab"]` | switch to the next favorite model |
 | `history_prev` | `["up", "ctrl-p"]` | earlier prompt; inside a multi-line draft moves the cursor first; with an empty input pulls back the last queued message |

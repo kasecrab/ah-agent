@@ -54,8 +54,14 @@ tokens, no tools), replaces the messages with one user message containing it,
 and writes a `_compact` marker to the session file. This happens before a
 new message is sent or between tool calls inside a turn, never in the middle
 of a request. `/compact [focus]` does it on demand; a focus is appended to the
-summary request. The summary appears in the transcript and the event stream
-(`compacted`).
+summary request.
+
+While the summary is being written the working line reads `Compacting`, and an
+automatic one is announced with `context full; compacting`. The summary itself
+folds into one line in the transcript — `≡ context compacted: 48.0k → ~3.2k
+tokens` — which Ctrl-T opens and closes, the same key as tool output; a session
+replayed with `ah -r` folds its summary the same way. The event stream carries
+both `compacting` (with `auto`) and `compacted` (with the whole summary).
 
 ## Related files
 
