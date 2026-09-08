@@ -137,6 +137,11 @@ impl Entry {
         }
         &self.lines
     }
+
+    /// What the last [`Entry::lines`] call produced, without re-wrapping.
+    pub fn cached(&self) -> &[Line<'static>] {
+        &self.lines
+    }
 }
 
 /// Calls quicker than this are not worth a number in the header.

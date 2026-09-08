@@ -57,11 +57,13 @@ of a request. `/compact [focus]` does it on demand; a focus is appended to the
 summary request.
 
 While the summary is being written the working line reads `Compacting` and
-carries a bar: `[█████████░░░░░░░] 56%`. Two things move it and it takes
+carries a bar: `[━━━━━━━━━───────] 56%`. Two things move it and it takes
 whichever is further along. The model spends the first stretch reading the
 conversation and says nothing during it — on a long one that is a minute with
 no signal at all — so the clock carries the bar there, quickly at first and
-easing off, and the empty cells stay lit by the same sweeping band as the word.
+easing off. The same band that sweeps the word sweeps the bar throughout, and
+the fill grows in eighths of a cell, so it creeps rather than jumping a whole
+cell at a time.
 The summary coming back moves it too, against `context.summary_max_tokens`, and
 overtakes the clock when the model gets to the point quickly. It stops at 99: a
 model stops when the summary is done, not when it runs out of room, so the last

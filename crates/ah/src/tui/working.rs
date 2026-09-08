@@ -25,7 +25,77 @@ const HIGHLIGHT: (u8, u8, u8) = (255, 255, 255);
 fn rgb(c: Color, fallback: (u8, u8, u8)) -> (u8, u8, u8) {
     match c {
         Color::Rgb(r, g, b) => (r, g, b),
-        _ => fallback,
+        Color::Black => (0, 0, 0),
+        Color::Red => (170, 0, 0),
+        Color::Green => (0, 170, 0),
+        Color::Yellow => (170, 85, 0),
+        Color::Blue => (0, 0, 170),
+        Color::Magenta => (170, 0, 170),
+        Color::Cyan => (0, 170, 170),
+        Color::Gray => (170, 170, 170),
+        Color::DarkGray => (85, 85, 85),
+        Color::LightRed => (255, 85, 85),
+        Color::LightGreen => (85, 255, 85),
+        Color::LightYellow => (255, 255, 85),
+        Color::LightBlue => (85, 85, 255),
+        Color::LightMagenta => (255, 85, 255),
+        Color::LightCyan => (85, 255, 255),
+        Color::White => (255, 255, 255),
+        Color::Indexed(i) => indexed(i, fallback),
+        Color::Reset => fallback,
+    }
+}
+
+/// An xterm palette index as a colour: the sixteen names, then the 6×6×6 cube,
+/// then the greys.
+fn indexed(i: u8, fallback: (u8, u8, u8)) -> (u8, u8, u8) {
+    match i {
+        0..=15 => {
+            let names = [
+                Color::Black,
+                Color::Red,
+                Color::Green,
+                Color::Yellow,
+                Color::Blue,
+                Color::Magenta,
+                Color::Cyan,
+                Color::Gray,
+                Color::DarkGray,
+                Color::LightRed,
+                Color::LightGreen,
+                Color::LightYellow,
+                Color::LightBlue,
+                Color::LightMagenta,
+                Color::LightCyan,
+                Color::White,
+            ];
+            rgb(names[i as usize], fallback)
+        }
+        16..=231 => {
+            let n = i - 16;
+            let step = |v: u8| if v == 0 { 0 } else { 55 + v * 40 };
+            (step(n / 36), step((n / 6) % 6), step(n % 6))
+        }
+        232.. => {
+            let v = 8 + (i - 232) * 10;
+            (v, v, v)
+        }
+    }
+}
+
+/// How light a colour is, 0.0 to 1.0.
+fn luma((r, g, b): (u8, u8, u8)) -> f32 {
+    (0.2126 * r as f32 + 0.7152 * g as f32 + 0.0722 * b as f32) / 255.0
+}
+
+/// The lit end of the sweep: white, unless the theme paints a light
+/// background, where black is what stands out. Blending towards the background
+/// itself would sink the band into it and leave a moving hole in the line.
+fn lit(pal: &Palette) -> (u8, u8, u8) {
+    match pal.bg {
+        Color::Reset => HIGHLIGHT,
+        c if luma(rgb(c, BASE)) > 0.6 => (0, 0, 0),
+        _ => HIGHLIGHT,
     }
 }
 
@@ -49,7 +119,7 @@ fn intensity(i: usize, len: usize, at: Duration) -> f32 {
 pub fn shimmer(text: &str, at: Duration, pal: &Palette) -> Vec<Span<'static>> {
     let chars: Vec<char> = text.chars().collect();
     let base = rgb(pal.fg, BASE);
-    let highlight = rgb(pal.bg, HIGHLIGHT);
+    let highlight = lit(pal);
     chars
         .iter()
         .enumerate()
@@ -101,39 +171,52 @@ const CREEP_CEIL: f32 = 95.0;
 /// there rather than stopping, so a long wait still moves.
 const CREEP_HALF: f32 = 25.0;
 
-/// How full the bar is, 0 to 99.
+/// How full the bar is, 0.0 to 0.99.
 ///
 /// Two things move it, and it takes whichever is further along. The clock
 /// eases towards [`CREEP_CEIL`] and never stops, so a long silence while the
 /// model reads the conversation never looks like a stall; the summary coming
-/// back overtakes it when the model gets to the point quickly. It stops at 99
-/// either way: a model stops when the summary is done, not when it runs out of
-/// budget, so the last step belongs to the end of the request.
-pub fn percent(p: Progress) -> u8 {
+/// back overtakes it when the model gets to the point quickly. It stops short
+/// of full either way: a model stops when the summary is done, not when it
+/// runs out of budget, so the last step belongs to the end of the request.
+pub fn share(p: Progress) -> f32 {
     let secs = p.elapsed.as_secs_f32();
     let creep = CREEP_CEIL * secs / (secs + CREEP_HALF);
     let written = 100.0 * (p.done as f32 / p.budget.max(1) as f32);
-    creep.max(written).min(99.0) as u8
+    creep.max(written).min(99.0) / 100.0
 }
 
-/// `[███░░░░░░░░░░░░░] 21%`, with the empty cells lit by the sweeping band
-/// while nothing has come back yet.
+/// [`share`] as the whole number the bar is labelled with.
+pub fn percent(p: Progress) -> u8 {
+    (share(p) * 100.0) as u8
+}
+
+/// Halves of a cell: a heavy rule for what is done, a light one for what is
+/// left. Both sit in the middle of the row, so the fill always meets the line
+/// it is eating. A block fill cannot: its part-filled cell is a sliver hanging
+/// at the cell's left edge, which reads as a hole between the two.
+const HALVES: [&str; 3] = ["\u{2500}", "\u{2578}", "\u{2501}"];
+
+/// `[━━━━━━╸─────────] 21%`, the band sweeping the whole bar the way it sweeps
+/// the word, so the wait always has something moving in it.
 fn bar(p: Progress, at: Option<Duration>, pal: &Palette) -> Vec<Span<'static>> {
+    let share = share(p);
     let pct = percent(p);
-    let full = ((pct as f32 / 100.0 * BAR as f32).round() as usize).min(BAR);
+    let halves = (share * (BAR * 2) as f32).round() as usize;
+    let filled = rgb(pal.accent, HIGHLIGHT);
+    let empty = rgb(pal.fg, BASE);
+    let light = lit(pal);
     let mut spans = Vec::with_capacity(BAR + 4);
     spans.push(Span::styled("[", pal.dim()));
-    if full > 0 {
+    for i in 0..BAR {
+        let part = halves.saturating_sub(i * 2).min(2);
+        let t = at.map_or(0.0, |at| intensity(i, BAR, at).clamp(0.0, 1.0));
+        let base = if part > 0 { filled } else { empty };
+        let (r, g, b) = blend(light, base, t * 0.7);
         spans.push(Span::styled(
-            "\u{2588}".repeat(full),
-            Style::default().fg(pal.accent),
+            HALVES[part],
+            Style::default().fg(Color::Rgb(r, g, b)),
         ));
-    }
-    let rest = "\u{2591}".repeat(BAR - full);
-    match at.filter(|_| p.done == 0) {
-        Some(at) => spans.extend(shimmer(&rest, at, pal)),
-        None if !rest.is_empty() => spans.push(Span::styled(rest, pal.dim())),
-        None => {}
     }
     spans.push(Span::styled("]", pal.dim()));
     spans.push(Span::styled(format!(" {pct}%"), pal.dim()));
@@ -303,6 +386,145 @@ mod tests {
     }
 
     #[test]
+    fn the_bar_grows_by_halves_of_a_cell() {
+        let at = |secs| Progress {
+            done: 0,
+            budget: 4096,
+            elapsed: Duration::from_secs_f32(secs),
+        };
+        // A cell is six percent of the bar. Three seconds apart is less than
+        // that, and the bar still shows the difference rather than waiting to
+        // jump a whole cell.
+        let (a, b) = (
+            line("Compacting", 0, None, Some(at(3.0)), &pal()).to_string(),
+            line("Compacting", 0, None, Some(at(6.0)), &pal()).to_string(),
+        );
+        assert_ne!(a, b);
+        // A half-filled cell, which meets the line on both sides of it.
+        assert!(a.contains(HALVES[1]), "{a}");
+    }
+
+    #[test]
+    fn the_fill_and_the_track_meet_in_the_middle_of_the_row() {
+        // Whatever the share, every cell is a rule on the row's centre line:
+        // heavy behind the head, light in front of it. A part-filled block
+        // used to sit at the cell's left edge instead, which left a hole
+        // between the fill and the line.
+        for step in 0..=400 {
+            let p = Progress {
+                done: step * 12,
+                budget: 4096,
+                elapsed: Duration::from_secs_f32(step as f32 / 8.0),
+            };
+            let spans = bar(p, Some(Duration::from_secs_f32(step as f32 / 20.0)), &pal());
+            let cells = &spans[1..1 + BAR];
+            assert!(
+                cells.iter().all(|s| HALVES.contains(&s.content.as_ref())),
+                "{:?}",
+                cells.iter().map(|s| s.content.clone()).collect::<Vec<_>>()
+            );
+            // Heavy first, then at most one half, then light: no gaps in it.
+            let heavy = cells.iter().filter(|s| s.content == HALVES[2]).count();
+            let half = cells.iter().filter(|s| s.content == HALVES[1]).count();
+            assert!(half <= 1);
+            assert!(cells[..heavy].iter().all(|s| s.content == HALVES[2]));
+            assert!(cells[heavy + half..].iter().all(|s| s.content == HALVES[0]));
+        }
+    }
+
+    #[test]
+    fn the_band_sweeps_the_bar_while_the_summary_is_written() {
+        let p = Progress {
+            done: 2048,
+            budget: 4096,
+            elapsed: Duration::from_secs(12),
+        };
+        // Colours, not characters, carry the sweep, and it runs whether or not
+        // anything has come back yet.
+        let colours = |secs| {
+            bar(p, Some(Duration::from_secs_f32(secs)), &pal())
+                .iter()
+                .map(|s| format!("{:?}", s.style.fg))
+                .collect::<Vec<_>>()
+        };
+        assert_ne!(colours(0.4), colours(1.2));
+        // With animation off it is one flat colour per half of the bar.
+        let still: Vec<String> = bar(p, None, &pal())
+            .iter()
+            .map(|s| format!("{:?}", s.style.fg))
+            .collect();
+        assert_eq!(still.len(), BAR + 3);
+    }
+
+    /// A theme with a dark background, the shape the gap showed up in.
+    fn dark() -> Palette {
+        let t = Theme {
+            bg: "#0b0e14".into(),
+            fg: "#c5c9c5".into(),
+            accent: "#7fd4e8".into(),
+            ..Theme::default()
+        };
+        Palette::from_theme(&t)
+    }
+
+    #[test]
+    fn the_band_only_ever_lights_the_bar_up() {
+        let pal = dark();
+        let p = Progress {
+            done: 2048,
+            budget: 4096,
+            elapsed: Duration::from_secs(24),
+        };
+        // The unlit colours: what a cell is worth with the band far away.
+        let floor: Vec<f32> = bar(p, None, &pal)
+            .iter()
+            .filter_map(|s| match s.style.fg {
+                Some(Color::Rgb(r, g, b)) => Some(luma((r, g, b))),
+                _ => None,
+            })
+            .collect();
+        // Over a whole sweep, no cell is ever dimmer than that. Blending
+        // towards the background instead left a moving hole in the bar.
+        for step in 0..60 {
+            let at = Duration::from_secs_f32(step as f32 * SWEEP / 60.0);
+            let cells: Vec<f32> = bar(p, Some(at), &pal)
+                .iter()
+                .filter_map(|s| match s.style.fg {
+                    Some(Color::Rgb(r, g, b)) => Some(luma((r, g, b))),
+                    _ => None,
+                })
+                .collect();
+            for (i, (now, base)) in cells.iter().zip(&floor).enumerate() {
+                assert!(now >= base, "cell {i} went dark at {at:?}: {now} < {base}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_band_stands_out_against_the_background_it_is_given() {
+        // Left to the terminal, or dark: the band is white.
+        assert_eq!(lit(&pal()), (255, 255, 255));
+        assert_eq!(lit(&dark()), (255, 255, 255));
+        // On a light theme white would vanish, so the band is black instead.
+        let light = Theme {
+            bg: "#fdf6e3".into(),
+            ..Theme::default()
+        };
+        assert_eq!(lit(&Palette::from_theme(&light)), (0, 0, 0));
+    }
+
+    #[test]
+    fn a_named_or_indexed_colour_is_still_a_colour() {
+        // Named colours used to fall back to the highlight, which painted a
+        // cyan accent white and left the band with nothing to do.
+        assert_eq!(rgb(Color::Cyan, BASE), (0, 170, 170));
+        assert_eq!(rgb(Color::Indexed(15), BASE), (255, 255, 255));
+        assert_eq!(rgb(Color::Indexed(196), BASE), (255, 0, 0));
+        assert_eq!(rgb(Color::Indexed(244), BASE), (128, 128, 128));
+        assert_eq!(rgb(Color::Reset, BASE), BASE);
+    }
+
+    #[test]
     fn a_percentage_is_all_the_line_says_about_size() {
         let text = line(
             "Compacting",
@@ -318,7 +540,7 @@ mod tests {
         .to_string();
         assert_eq!(
             text,
-            "• Compacting [█░░░░░░░░░░░░░░░] 7% (2s · esc to interrupt)"
+            "• Compacting [━───────────────] 7% (2s · esc to interrupt)"
         );
     }
 }

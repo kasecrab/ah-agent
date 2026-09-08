@@ -28,7 +28,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, Paragraph};
+use ratatui::widgets::{Clear, Paragraph, Widget};
 
 use crate::app::{self, AnyError, Engine, EngineCmd, UiEvent};
 use input::Editor;
@@ -3419,11 +3419,13 @@ impl App {
         let area = Rect { width, ..area };
         let view = self.view;
         let pal_gen = self.pal_gen;
-        let mut lines: Vec<Line<'static>> = Vec::new();
+        // Wrapping is cached per block, so this pass only redoes the blocks
+        // that changed.
+        let mut total = 0;
         for e in &mut self.entries {
-            lines.extend_from_slice(e.lines(width.saturating_sub(1), &view, pal, pal_gen));
+            total += e.lines(width.saturating_sub(1), &view, pal, pal_gen).len();
         }
-        self.total_lines = lines.len();
+        self.total_lines = total;
         self.viewport_lines = area.height as usize;
         let max_scroll = self.total_lines.saturating_sub(self.viewport_lines);
         if self.follow {
@@ -3431,12 +3433,37 @@ impl App {
         } else {
             self.scroll = self.scroll.min(max_scroll);
         }
-        let visible: Vec<Line<'static>> = lines
-            .into_iter()
-            .skip(self.scroll)
-            .take(self.viewport_lines)
-            .collect();
-        f.render_widget(Paragraph::new(visible), area);
+        // Straight from the cache into the buffer, a row at a time: gathering
+        // the whole transcript first would copy every line of it on every
+        // frame, thirty times a second while a turn runs.
+        let mut skip = self.scroll;
+        let mut row = 0;
+        let buf = f.buffer_mut();
+        for e in &self.entries {
+            if row == self.viewport_lines {
+                break;
+            }
+            let lines = e.cached();
+            if skip >= lines.len() {
+                skip -= lines.len();
+                continue;
+            }
+            for line in &lines[skip..] {
+                if row == self.viewport_lines {
+                    break;
+                }
+                line.render(
+                    Rect {
+                        y: area.y + row as u16,
+                        height: 1,
+                        ..area
+                    },
+                    buf,
+                );
+                row += 1;
+            }
+            skip = 0;
+        }
         if !self.follow && max_scroll > 0 {
             let tag = format!(" ↓ {} more ", max_scroll - self.scroll);
             let w = tag.chars().count() as u16;
