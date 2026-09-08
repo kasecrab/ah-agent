@@ -103,7 +103,9 @@ name in, Enter runs it. Plugins can add commands (`ah docs plugins`).
 numbered, and a row for an answer of the user's own. A number picks an option,
 `space` ticks one when the question takes several, typing anywhere starts a
 written answer (which can stand alone or qualify a pick), Enter accepts and
-Esc dismisses. Questions are asked one after another. The model gets the
+Esc dismisses. Sending the answers and leaving without answering both take a
+second key — Enter confirms, Esc goes back — since neither can be undone once
+the model has the reply. Questions are asked one after another. The model gets the
 question and the answer back as text; a dismissed question and a run with
 nobody at the keyboard both come back as errors telling it to decide for
 itself. One-shot runs ask on the terminal instead; `--json` and piped runs

@@ -15,6 +15,15 @@ use super::input::Editor;
 use super::theme::Palette;
 use super::transcript::wrap;
 
+/// A step that cannot be taken back, held for a second key.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Confirm {
+    /// Send the answers to the model.
+    Send,
+    /// Close the box with nothing said.
+    Leave,
+}
+
 /// What the box wants the app to do after a key.
 pub enum Action {
     None,
@@ -36,6 +45,8 @@ pub struct View {
     answers: Vec<Answer>,
     /// Set when Enter had nothing to accept, so the footer says so.
     nag: bool,
+    /// Waiting for a second key on something that cannot be undone.
+    confirm: Option<Confirm>,
     /// First body line drawn, so a long list scrolls instead of overflowing.
     top: usize,
     /// Question text wrapped, and the width it was wrapped to.
@@ -57,6 +68,7 @@ impl View {
             note: Editor::default(),
             answers: Vec::new(),
             nag: false,
+            confirm: None,
             top: 0,
             wrapped: Vec::new(),
             wrap_w: 0,
@@ -114,11 +126,32 @@ impl View {
         }
         self.answers.push(answer);
         if self.at + 1 == self.ask.questions.len() {
-            return Action::Done(std::mem::take(&mut self.answers));
+            // The last answer only leaves the box on a second key: what the
+            // model gets cannot be taken back or edited afterwards.
+            self.confirm = Some(Confirm::Send);
+            return Action::None;
         }
         self.at += 1;
         self.enter();
         Action::None
+    }
+
+    /// A key while something is waiting to be confirmed. Enter (or `y`) goes
+    /// through with it; anything else puts the box back as it was.
+    fn confirmed(&mut self, k: KeyEvent, c: Confirm) -> Action {
+        let yes = matches!(k.code, KeyCode::Enter | KeyCode::Char('y' | 'Y'));
+        self.confirm = None;
+        match (yes, c) {
+            (true, Confirm::Send) => Action::Done(std::mem::take(&mut self.answers)),
+            (true, Confirm::Leave) => Action::Dismiss,
+            (false, Confirm::Send) => {
+                // The answer went on the pile when Enter was pressed; going
+                // back takes it off again so it cannot be counted twice.
+                self.answers.pop();
+                Action::None
+            }
+            (false, Confirm::Leave) => Action::None,
+        }
     }
 
     pub fn paste(&mut self, s: &str) {
@@ -128,12 +161,18 @@ impl View {
     }
 
     pub fn key(&mut self, k: KeyEvent) -> Action {
+        if let Some(c) = self.confirm {
+            return self.confirmed(k, c);
+        }
         let last = self.question().options.len();
         let multi = self.question().multi;
         let on_note = self.on_note();
         let ctrl_alt = KeyModifiers::CONTROL | KeyModifiers::ALT;
         match (k.code, k.modifiers) {
-            (KeyCode::Esc, _) => return Action::Dismiss,
+            (KeyCode::Esc, _) => {
+                self.confirm = Some(Confirm::Leave);
+                self.nag = false;
+            }
             (KeyCode::Enter, _) => return self.accept(),
             (KeyCode::Up | KeyCode::BackTab, _) => self.sel = self.sel.saturating_sub(1),
             (KeyCode::Down | KeyCode::Tab, _) => self.sel = (self.sel + 1).min(last),
@@ -290,7 +329,15 @@ impl View {
             },
         ]));
 
-        let foot = if self.nag {
+        let foot = if let Some(c) = self.confirm {
+            Span::styled(
+                match c {
+                    Confirm::Send => "send these answers? enter confirms · esc goes back",
+                    Confirm::Leave => "leave without answering? enter confirms · esc goes back",
+                },
+                pal.bold(pal.accent),
+            )
+        } else if self.nag {
             // The nudge goes where the hint was, so the box does not jump.
             Span::styled(
                 if q.options.is_empty() {
@@ -401,17 +448,24 @@ mod tests {
         View::new(Ask { questions }).expect("questions")
     }
 
-    fn answers(a: Action) -> Vec<Answer> {
-        match a {
-            Action::Done(v) => v,
-            _ => panic!("not done"),
+    /// Answer the last question and confirm, which is what sends.
+    fn done(v: &mut View) -> Vec<Answer> {
+        assert_eq!(
+            v.confirm,
+            Some(Confirm::Send),
+            "the box asks before it sends"
+        );
+        match v.key(key(KeyCode::Enter)) {
+            Action::Done(a) => a,
+            _ => panic!("the confirmation did not send"),
         }
     }
 
     #[test]
     fn a_number_answers_a_question_in_one_key() {
         let mut v = view(vec![question("Which?", &["a", "b", "c"], false)]);
-        let a = answers(v.key(key(KeyCode::Char('2'))));
+        v.key(key(KeyCode::Char('2')));
+        let a = done(&mut v);
         assert_eq!(a.len(), 1);
         assert_eq!(a[0].picked, ["b"]);
         assert!(a[0].note.is_empty());
@@ -427,7 +481,8 @@ mod tests {
         v.key(key(KeyCode::Down));
         assert_eq!(v.sel, 2);
         v.key(key(KeyCode::Up));
-        let a = answers(v.key(key(KeyCode::Enter)));
+        v.key(key(KeyCode::Enter));
+        let a = done(&mut v);
         assert_eq!(a[0].picked, ["b"]);
     }
 
@@ -439,7 +494,8 @@ mod tests {
         // A tick comes off again.
         v.key(key(KeyCode::Char('3')));
         v.key(key(KeyCode::Char('3')));
-        let a = answers(v.key(key(KeyCode::Enter)));
+        v.key(key(KeyCode::Enter));
+        let a = done(&mut v);
         assert_eq!(a[0].picked, ["a", "c"], "in the order they were offered");
     }
 
@@ -448,7 +504,8 @@ mod tests {
         let mut v = view(vec![question("Which?", &["a", "b"], false)]);
         typed(&mut v, "neither, 2 is closer");
         assert!(v.on_note(), "typing moved to the typing row");
-        let a = answers(v.key(key(KeyCode::Enter)));
+        v.key(key(KeyCode::Enter));
+        let a = done(&mut v);
         assert_eq!(a[0].note, "neither, 2 is closer");
         assert!(a[0].picked.is_empty());
         // A digit typed into text stays text rather than picking a row.
@@ -462,7 +519,8 @@ mod tests {
         v.key(key(KeyCode::Up));
         v.key(key(KeyCode::Up));
         assert_eq!(v.sel, 0);
-        let a = answers(v.key(key(KeyCode::Enter)));
+        v.key(key(KeyCode::Enter));
+        let a = done(&mut v);
         assert_eq!(a[0].picked, ["a"]);
         assert_eq!(a[0].note, "with care");
     }
@@ -475,7 +533,8 @@ mod tests {
         assert!(v.nag, "Enter with nothing said asks again");
         typed(&mut v, "ah");
         assert!(!v.nag);
-        let a = answers(v.key(key(KeyCode::Enter)));
+        v.key(key(KeyCode::Enter));
+        let a = done(&mut v);
         assert_eq!(a[0].note, "ah");
     }
 
@@ -485,7 +544,8 @@ mod tests {
         assert!(matches!(v.key(key(KeyCode::Enter)), Action::None));
         assert!(v.nag);
         v.key(key(KeyCode::Char(' ')));
-        let a = answers(v.key(key(KeyCode::Enter)));
+        v.key(key(KeyCode::Enter));
+        let a = done(&mut v);
         assert_eq!(a[0].picked, ["a"]);
     }
 
@@ -499,7 +559,8 @@ mod tests {
         assert_eq!(v.at, 1, "moved on to the second question");
         assert!(v.note.is_empty(), "the typing row starts empty again");
         typed(&mut v, "yes");
-        let a = answers(v.key(key(KeyCode::Enter)));
+        v.key(key(KeyCode::Enter));
+        let a = done(&mut v);
         assert_eq!(a.len(), 2);
         assert_eq!(a[0].picked, ["a"]);
         assert_eq!(a[1].note, "yes");
@@ -606,10 +667,31 @@ mod tests {
     }
 
     #[test]
-    fn esc_says_nothing_at_all() {
+    fn esc_asks_before_it_throws_the_answers_away() {
         let mut v = view(vec![question("Which?", &["a"], false)]);
         typed(&mut v, "half an answer");
-        assert!(matches!(v.key(key(KeyCode::Esc)), Action::Dismiss));
+        assert!(matches!(v.key(key(KeyCode::Esc)), Action::None));
+        assert_eq!(v.confirm, Some(Confirm::Leave));
+        // Esc again is the way back, not a second yes.
+        assert!(matches!(v.key(key(KeyCode::Esc)), Action::None));
+        assert_eq!(v.confirm, None);
+        assert_eq!(v.note.text, "half an answer", "nothing was lost");
+        v.key(key(KeyCode::Esc));
+        assert!(matches!(v.key(key(KeyCode::Enter)), Action::Dismiss));
+    }
+
+    #[test]
+    fn going_back_from_the_send_leaves_one_answer_to_send() {
+        let mut v = view(vec![question("Which?", &["a", "b"], false)]);
+        v.key(key(KeyCode::Char('1')));
+        assert_eq!(v.confirm, Some(Confirm::Send));
+        // Second thoughts: back to the question, with the answer not counted.
+        assert!(matches!(v.key(key(KeyCode::Esc)), Action::None));
+        assert!(v.answers.is_empty());
+        v.key(key(KeyCode::Char('2')));
+        let a = done(&mut v);
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].picked, ["b"]);
     }
 
     #[test]

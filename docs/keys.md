@@ -72,8 +72,9 @@ quit = ["ctrl-q"]
   keeps the terminal's own selection.
 - The question box (`ask_user`): `1`-`9` picks the option it numbers, Up/Down
   or Tab/Shift-Tab move, `space` ticks one when the question takes several,
-  typing anything else starts an answer of your own, Enter accepts, Esc
-  dismisses and Ctrl-C interrupts the turn.
+  typing anything else starts an answer of your own, Enter accepts. The last
+  Enter and Esc both ask first: Enter (or `y`) goes through with it, Esc goes
+  back. Ctrl-C interrupts the turn without asking.
 - Pickers (`/model`, `/resume`, `/favorite`, `/skills`): type to filter,
   Up/Down or Tab/Shift-Tab move, PgUp/PgDn page, Enter accepts, Esc closes,
   Ctrl-U clears the query, Ctrl-R refreshes the model list. `/favorite` uses
