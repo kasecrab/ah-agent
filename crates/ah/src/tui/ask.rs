@@ -24,9 +24,6 @@ pub enum Action {
     Dismiss,
 }
 
-/// Where the typed answer starts on its row: `" > "`.
-const NOTE_PREFIX: &str = " > ";
-
 pub struct View {
     ask: Ask,
     /// Question being answered.
@@ -149,16 +146,18 @@ impl View {
             (KeyCode::Right, _) => self.note.right(),
             (KeyCode::Home, _) => self.note.home(),
             (KeyCode::End, _) => self.note.end(),
-            // A digit picks the option it numbers, but only while it cannot be
-            // part of what is being typed.
+            // A digit picks the row it numbers, the typing row included, but
+            // only while it cannot be part of what is being typed.
             (KeyCode::Char(c), m)
                 if c.is_ascii_digit()
                     && !m.intersects(ctrl_alt)
                     && self.note.is_empty()
-                    && (1..=last).contains(&(c as usize - '0' as usize)) =>
+                    && (1..=last + 1).contains(&(c as usize - '0' as usize)) =>
             {
                 self.sel = c as usize - '0' as usize - 1;
-                if multi {
+                if self.sel == last {
+                    // The typing row is chosen by going to it, not by picking.
+                } else if multi {
                     self.toggle(self.sel);
                 } else {
                     return self.accept();
@@ -250,31 +249,41 @@ impl View {
                 )));
             }
         }
-        if !q.options.is_empty() {
-            lines.push(Line::default());
-        }
+        // The typing row is one of the list: same number, same marker, same
+        // column, so it reads as the last answer rather than as a separate
+        // field stuck to the bottom of the box.
         let note_line = lines.len();
         if self.on_note() {
             focus = note_line;
         }
         let typed = !self.note.text.is_empty();
+        let mark = match (q.multi, typed, self.on_note()) {
+            (true, true, _) => "[x] ",
+            (true, false, _) => "[ ] ",
+            (false, _, true) => "▸ ",
+            (false, _, false) => "  ",
+        };
+        let num = if q.options.len() < 9 {
+            format!(" {} ", q.options.len() + 1)
+        } else {
+            "   ".into()
+        };
+        let style = if self.on_note() {
+            pal.bold(pal.accent)
+        } else {
+            Style::default().fg(pal.fg)
+        };
         lines.push(Line::from(vec![
-            Span::styled(
-                NOTE_PREFIX,
-                if self.on_note() {
-                    pal.bold(pal.accent)
-                } else {
-                    pal.dim()
-                },
-            ),
+            Span::styled(format!(" {num}"), pal.dim()),
+            Span::styled(mark, style),
             if typed {
                 Span::styled(self.note.text.clone(), Style::default().fg(pal.fg))
             } else {
                 Span::styled(
                     if q.options.is_empty() {
-                        "type your answer"
+                        "type an answer"
                     } else {
-                        "or type your own answer"
+                        "something else"
                     },
                     pal.dim(),
                 )
@@ -352,7 +361,7 @@ impl View {
         }
         let before: String = self.note.text.chars().take(self.note.cursor).collect();
         Some((
-            inner.x + (NOTE_PREFIX.width() + before.width()) as u16,
+            inner.x + (indent + before.width()) as u16,
             inner.y + row as u16,
         ))
     }
@@ -565,6 +574,30 @@ mod tests {
         }
         let (text, _) = drawn(&mut v, 40, 8);
         assert!(text.contains("eight"), "{text}");
+    }
+
+    #[test]
+    fn the_typing_row_is_the_last_row_of_the_list() {
+        let mut v = view(vec![question("Which?", &["a", "b"], false)]);
+        // The number after the last option goes to it, and typing lands there.
+        v.key(key(KeyCode::Char('3')));
+        assert!(v.on_note());
+        assert!(v.answers.is_empty(), "going to it answers nothing");
+        let (text, cursor) = drawn(&mut v, 60, 20);
+        let rows: Vec<&str> = text
+            .lines()
+            .filter(|l| l.contains(" 1 ") || l.contains(" 2 ") || l.contains(" 3 "))
+            .collect();
+        assert_eq!(rows.len(), 3, "{text}");
+        // Columns, not byte offsets: the border and the marker are wide chars.
+        let col = |l: &str, want: char| l.chars().position(|c| c == want);
+        assert_eq!(
+            col(rows[0], 'a'),
+            col(rows[2], 's'),
+            "same column as the options: {text}"
+        );
+        assert!(rows[2].contains("▸"), "the highlight is on it: {text}");
+        assert!(cursor.is_some(), "and the cursor with it");
     }
 
     #[test]
