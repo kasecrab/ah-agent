@@ -175,7 +175,10 @@ impl Picker {
         Action::None
     }
 
-    pub fn draw(&self, f: &mut Frame, area: Rect, pal: &Palette) {
+    /// Draws the overlay and returns where the cursor belongs, if anywhere.
+    /// The caller places it after the frame is on screen, so it is never seen
+    /// on its way there.
+    pub fn draw(&self, f: &mut Frame, area: Rect, pal: &Palette) -> Option<(u16, u16)> {
         let compact = matches!(
             self.kind,
             Kind::Effort { .. } | Kind::Name { .. } | Kind::SessionName | Kind::SkillArgs { .. }
@@ -216,6 +219,7 @@ impl Picker {
             Constraint::Length(1),
         ])
         .areas(inner);
+        let mut cursor = None;
         if !self.hotkeys {
             f.render_widget(
                 Paragraph::new(Line::from(vec![
@@ -224,7 +228,7 @@ impl Picker {
                 ])),
                 q_area,
             );
-            f.set_cursor_position((q_area.x + 2 + self.query.chars().count() as u16, q_area.y));
+            cursor = Some((q_area.x + 2 + self.query.chars().count() as u16, q_area.y));
         }
 
         let rows = list_area.height as usize;
@@ -275,6 +279,7 @@ impl Picker {
             ),
         };
         f.render_widget(Paragraph::new(Span::styled(foot, pal.dim())), foot_area);
+        cursor
     }
 }
 

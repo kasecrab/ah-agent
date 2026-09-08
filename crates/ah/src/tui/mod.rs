@@ -283,6 +283,9 @@ struct App {
     context_window: u64,
     /// When the current turn started, for the working line's clock.
     busy_start: Option<Instant>,
+    /// Where the terminal cursor belongs after the last frame, or `None` when
+    /// nothing on screen is taking keys.
+    cursor: Option<(u16, u16)>,
     /// How much of a summary has been written, and when it was asked for,
     /// while one is being written.
     compact_progress: Option<(working::Progress, Instant)>,
@@ -426,6 +429,7 @@ fn run_inner(
         context_tokens: 0,
         context_window: 0,
         busy_start: None,
+        cursor: None,
         compact_progress: None,
         plugin_status: None,
         plugin_commands: commands,
@@ -957,7 +961,7 @@ impl App {
                 let throttle = Duration::from_millis(self.settings().layout.stream_redraw_ms);
                 let stream = self.busy || self.job_view.is_some();
                 if !stream || self.last_draw.elapsed() >= throttle {
-                    terminal.draw(|f| self.draw(f))?;
+                    self.render(terminal)?;
                     self.last_draw = Instant::now();
                     self.dirty = false;
                 }
@@ -999,6 +1003,35 @@ impl App {
                 }
             }
         }
+    }
+
+    /// One frame, written so the terminal never shows it half done.
+    ///
+    /// ratatui writes the diff with the cursor still visible and only puts it
+    /// back afterwards, so every frame drags the cursor across the screen —
+    /// at thirty frames a second that reads as a cursor blinking in places it
+    /// does not belong. It is hidden for the write, and terminals that
+    /// understand synchronized updates present the frame in one piece.
+    fn render(&mut self, terminal: &mut ratatui::DefaultTerminal) -> Result<(), AnyError> {
+        use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
+        let mut out = std::io::stdout();
+        let _ = crossterm::execute!(out, BeginSynchronizedUpdate);
+        let _ = terminal.hide_cursor();
+        let drawn = terminal.draw(|f| self.draw(f));
+        // ratatui shows the cursor before it moves it, which flashes it
+        // wherever the frame's last write landed — the Compacting line, while
+        // that is the only thing changing. So the frame is drawn without a
+        // cursor at all and it is placed here, once, where it belongs.
+        if let Some((x, y)) = self.cursor {
+            let _ = crossterm::execute!(
+                out,
+                crossterm::cursor::MoveTo(x, y),
+                crossterm::cursor::Show
+            );
+        }
+        let _ = crossterm::execute!(out, EndSynchronizedUpdate);
+        drawn?;
+        Ok(())
     }
 
     fn handle(&mut self, msg: Msg) {
@@ -3205,12 +3238,19 @@ impl App {
             ])];
         }
         f.render_widget(Paragraph::new(visible), inner);
-        if self.pending_perm.is_none() && self.picker.is_none() && self.usage_pane.is_none() {
-            f.set_cursor_position((
+        // Only when the input is what the keys go to: a pane over it takes
+        // them, and a cursor left blinking underneath belongs to nothing.
+        self.cursor = (self.pending_perm.is_none()
+            && self.picker.is_none()
+            && self.usage_pane.is_none()
+            && self.job_view.is_none()
+            && self.plan_view.is_none())
+        .then(|| {
+            (
                 inner.x + prefix_w + cursor_rc.1 as u16,
                 inner.y + (cursor_rc.0 - first_row) as u16,
-            ));
-        }
+            )
+        });
 
         if layout.show_status {
             self.draw_status(f, status_area, &pal);
@@ -3219,7 +3259,7 @@ impl App {
             self.draw_completion(f, c, input_area, &pal);
         }
         if let Some(p) = &self.picker {
-            p.draw(f, area, &pal);
+            self.cursor = p.draw(f, area, &pal);
         }
         if let Some(v) = self.job_view.as_mut()
             && let Some(job) = ah_core::jobs::table().get(v.id)
