@@ -100,13 +100,14 @@ name in, Enter runs it. Plugins can add commands (`ah docs plugins`).
 ### Asking the user
 
 `ask_user` stops the turn and puts a box on screen: the question, its options
-numbered, and a row for an answer of the user's own. A number picks an option,
-`space` ticks one when the question takes several, typing anywhere starts a
-written answer (which can stand alone or qualify a pick), Enter accepts and
-Esc dismisses. Sending the answers and leaving without answering both take a
-second key — Enter confirms, Esc goes back — since neither can be undone once
-the model has the reply. Questions are asked one after another. The model gets the
-question and the answer back as text; a dismissed question and a run with
+numbered, and a row for an answer of the user's own as the last of them. A
+number picks, `space` picks the highlighted row, and typing anywhere starts a
+written answer, which can stand alone or qualify a pick. Left and Right walk
+several questions, each keeping its own answer; Enter sends, and while any
+question is unanswered it goes to the first one and names it in the footer
+instead. Sending and leaving both take a second key — Enter confirms, Esc goes
+back — since neither can be undone once the model has the reply. The model gets
+the questions and the answers back as text; a dismissed question and a run with
 nobody at the keyboard both come back as errors telling it to decide for
 itself. One-shot runs ask on the terminal instead; `--json` and piped runs
 never ask.

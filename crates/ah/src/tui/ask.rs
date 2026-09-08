@@ -1,8 +1,8 @@
-//! The box the `ask_user` tool puts on screen: one question at a time, its
-//! options, and a line to type an answer of your own. The turn is stopped
-//! while it is up, so it takes every key until it is answered or dismissed.
+//! The box the `ask_user` tool puts on screen: the questions it asks, their
+//! options, and a row to type an answer of your own. The turn is stopped while
+//! it is up, so it takes every key until it is sent or dismissed.
 
-use ah_core::abi::{Answer, Ask};
+use ah_core::abi::{Answer, Ask, Question};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -33,25 +33,36 @@ pub enum Action {
     Dismiss,
 }
 
-pub struct View {
-    ask: Ask,
-    /// Question being answered.
-    at: usize,
+/// One question's answer as it is being given. Every question keeps its own,
+/// so moving between them loses nothing.
+struct Slot {
     /// Highlighted row: an option, or the typing row at `options.len()`.
     sel: usize,
-    /// Ticked options of the current question; empty for a question with none.
+    /// Ticked options. A question that takes one answer ticks one at a time.
     picked: Vec<bool>,
     note: Editor,
-    answers: Vec<Answer>,
-    /// Set when Enter had nothing to accept, so the footer says so.
-    nag: bool,
+}
+
+impl Slot {
+    fn answered(&self) -> bool {
+        self.picked.iter().any(|p| *p) || !self.note.text.trim().is_empty()
+    }
+}
+
+pub struct View {
+    ask: Ask,
+    /// Question being looked at.
+    at: usize,
+    slots: Vec<Slot>,
     /// Waiting for a second key on something that cannot be undone.
     confirm: Option<Confirm>,
+    /// Set when a send found this question unanswered, so the footer says so.
+    nag: bool,
     /// First body line drawn, so a long list scrolls instead of overflowing.
     top: usize,
-    /// Question text wrapped, and the width it was wrapped to.
+    /// Question text wrapped, and the width and question it was wrapped for.
     wrapped: Vec<String>,
-    wrap_w: u16,
+    wrap_for: (u16, usize),
 }
 
 impl View {
@@ -60,79 +71,113 @@ impl View {
         if ask.questions.is_empty() {
             return None;
         }
-        let mut v = Self {
+        let slots = ask
+            .questions
+            .iter()
+            .map(|q| Slot {
+                sel: 0,
+                picked: vec![false; q.options.len()],
+                note: Editor::default(),
+            })
+            .collect();
+        Some(Self {
             ask,
             at: 0,
-            sel: 0,
-            picked: Vec::new(),
-            note: Editor::default(),
-            answers: Vec::new(),
-            nag: false,
+            slots,
             confirm: None,
+            nag: false,
             top: 0,
             wrapped: Vec::new(),
-            wrap_w: 0,
-        };
-        v.enter();
-        Some(v)
+            wrap_for: (0, usize::MAX),
+        })
     }
 
-    fn question(&self) -> &ah_core::abi::Question {
+    fn question(&self) -> &Question {
         &self.ask.questions[self.at]
     }
 
-    /// Reset the per-question state for `self.at`.
-    fn enter(&mut self) {
-        let n = self.question().options.len();
-        self.picked = vec![false; n];
-        self.sel = 0;
-        self.note.clear();
-        self.nag = false;
-        self.top = 0;
-        self.wrap_w = 0;
+    fn slot(&self) -> &Slot {
+        &self.slots[self.at]
+    }
+
+    fn slot_mut(&mut self) -> &mut Slot {
+        &mut self.slots[self.at]
     }
 
     fn on_note(&self) -> bool {
-        self.sel >= self.question().options.len()
+        self.slot().sel >= self.question().options.len()
     }
 
-    fn toggle(&mut self, i: usize) {
-        if let Some(p) = self.picked.get_mut(i) {
-            *p = !*p;
+    /// True while there is text under the cursor to move through, which is
+    /// what decides whether Left and Right move in it or between questions.
+    fn editing(&self) -> bool {
+        self.on_note() && !self.slot().note.text.is_empty()
+    }
+
+    /// Tick row `i`. A question that takes one answer keeps one tick.
+    fn pick(&mut self, i: usize) {
+        let multi = self.question().multi;
+        let slot = self.slot_mut();
+        let Some(&was) = slot.picked.get(i) else {
+            return;
+        };
+        if !multi {
+            slot.picked.fill(false);
+        }
+        slot.picked[i] = !was;
+        slot.sel = i;
+        self.nag = false;
+    }
+
+    /// Look at question `to`, clamped to the ones there are.
+    fn go(&mut self, to: usize) {
+        let to = to.min(self.ask.questions.len() - 1);
+        if to != self.at {
+            self.at = to;
+            self.top = 0;
             self.nag = false;
         }
     }
 
-    /// Take the current question's answer, if there is one, and move on.
-    fn accept(&mut self) -> Action {
-        let q = self.question();
-        let note = self.note.text.trim().to_string();
-        let picked: Vec<String> = if q.multi {
-            self.picked
-                .iter()
-                .enumerate()
-                .filter(|(_, p)| **p)
-                .map(|(i, _)| q.options[i].label.clone())
-                .collect()
-        } else if self.sel < q.options.len() {
-            vec![q.options[self.sel].label.clone()]
-        } else {
-            Vec::new()
-        };
-        let answer = Answer { picked, note };
-        if answer.is_empty() {
-            self.nag = true;
-            return Action::None;
+    /// The first question still without an answer.
+    fn unanswered(&self) -> Option<usize> {
+        self.slots.iter().position(|s| !s.answered())
+    }
+
+    fn answers(&self) -> Vec<Answer> {
+        self.ask
+            .questions
+            .iter()
+            .zip(&self.slots)
+            .map(|(q, s)| Answer {
+                picked: q
+                    .options
+                    .iter()
+                    .zip(&s.picked)
+                    .filter(|(_, p)| **p)
+                    .map(|(o, _)| o.label.clone())
+                    .collect(),
+                note: s.note.text.trim().to_string(),
+            })
+            .collect()
+    }
+
+    /// Enter: take the highlighted option when the question takes one answer
+    /// and has none yet, then send if every question is answered and go to the
+    /// first that is not if any is left. A question that takes several answers
+    /// is never ticked for the user: leaving them all off may be the point.
+    fn enter(&mut self) -> Action {
+        if !self.question().multi && !self.slot().answered() && !self.on_note() {
+            let i = self.slot().sel;
+            self.pick(i);
         }
-        self.answers.push(answer);
-        if self.at + 1 == self.ask.questions.len() {
-            // The last answer only leaves the box on a second key: what the
-            // model gets cannot be taken back or edited afterwards.
-            self.confirm = Some(Confirm::Send);
-            return Action::None;
+        match self.unanswered() {
+            Some(i) => {
+                self.go(i);
+                self.nag = true;
+            }
+            None => self.confirm = Some(Confirm::Send),
         }
-        self.at += 1;
-        self.enter();
         Action::None
     }
 
@@ -142,21 +187,18 @@ impl View {
         let yes = matches!(k.code, KeyCode::Enter | KeyCode::Char('y' | 'Y'));
         self.confirm = None;
         match (yes, c) {
-            (true, Confirm::Send) => Action::Done(std::mem::take(&mut self.answers)),
+            (true, Confirm::Send) => Action::Done(self.answers()),
             (true, Confirm::Leave) => Action::Dismiss,
-            (false, Confirm::Send) => {
-                // The answer went on the pile when Enter was pressed; going
-                // back takes it off again so it cannot be counted twice.
-                self.answers.pop();
-                Action::None
-            }
-            (false, Confirm::Leave) => Action::None,
+            (false, _) => Action::None,
         }
     }
 
     pub fn paste(&mut self, s: &str) {
-        self.sel = self.question().options.len();
-        self.note.insert_str(&s.replace('\n', " "));
+        let to = self.question().options.len();
+        let text = s.replace('\n', " ");
+        let slot = self.slot_mut();
+        slot.sel = to;
+        slot.note.insert_str(&text);
         self.nag = false;
     }
 
@@ -165,55 +207,56 @@ impl View {
             return self.confirmed(k, c);
         }
         let last = self.question().options.len();
-        let multi = self.question().multi;
         let on_note = self.on_note();
+        let editing = self.editing();
         let ctrl_alt = KeyModifiers::CONTROL | KeyModifiers::ALT;
         match (k.code, k.modifiers) {
             (KeyCode::Esc, _) => {
                 self.confirm = Some(Confirm::Leave);
                 self.nag = false;
             }
-            (KeyCode::Enter, _) => return self.accept(),
-            (KeyCode::Up | KeyCode::BackTab, _) => self.sel = self.sel.saturating_sub(1),
-            (KeyCode::Down | KeyCode::Tab, _) => self.sel = (self.sel + 1).min(last),
-            (KeyCode::Char('u'), KeyModifiers::CONTROL) => self.note.delete_all(),
-            (KeyCode::Char('w'), KeyModifiers::CONTROL) => self.note.delete_word(),
-            (KeyCode::Backspace, m) if m.contains(KeyModifiers::CONTROL) => self.note.delete_word(),
-            (KeyCode::Backspace, _) => self.note.backspace(),
-            (KeyCode::Delete, _) => self.note.delete(),
-            (KeyCode::Left, _) => self.note.left(),
-            (KeyCode::Right, _) => self.note.right(),
-            (KeyCode::Home, _) => self.note.home(),
-            (KeyCode::End, _) => self.note.end(),
-            // A digit picks the row it numbers, the typing row included, but
+            (KeyCode::Enter, _) => return self.enter(),
+            (KeyCode::Up, _) => self.slot_mut().sel = self.slot().sel.saturating_sub(1),
+            (KeyCode::Down, _) => self.slot_mut().sel = (self.slot().sel + 1).min(last),
+            // Left and Right walk the questions, unless there is text under
+            // the cursor, where they walk that instead. Tab always walks the
+            // questions, so the typing row is never a dead end.
+            (KeyCode::Left, _) if editing => self.slot_mut().note.left(),
+            (KeyCode::Right, _) if editing => self.slot_mut().note.right(),
+            (KeyCode::Left | KeyCode::BackTab, _) => self.go(self.at.saturating_sub(1)),
+            (KeyCode::Right | KeyCode::Tab, _) => self.go(self.at + 1),
+            (KeyCode::Char('u'), KeyModifiers::CONTROL) => self.slot_mut().note.delete_all(),
+            (KeyCode::Char('w'), KeyModifiers::CONTROL) => self.slot_mut().note.delete_word(),
+            (KeyCode::Backspace, m) if m.contains(KeyModifiers::CONTROL) => {
+                self.slot_mut().note.delete_word()
+            }
+            (KeyCode::Backspace, _) => self.slot_mut().note.backspace(),
+            (KeyCode::Delete, _) => self.slot_mut().note.delete(),
+            (KeyCode::Home, _) => self.slot_mut().note.home(),
+            (KeyCode::End, _) => self.slot_mut().note.end(),
+            // A digit goes to the row it numbers, the typing row included, but
             // only while it cannot be part of what is being typed.
             (KeyCode::Char(c), m)
                 if c.is_ascii_digit()
                     && !m.intersects(ctrl_alt)
-                    && self.note.is_empty()
+                    && self.slot().note.is_empty()
                     && (1..=last + 1).contains(&(c as usize - '0' as usize)) =>
             {
-                self.sel = c as usize - '0' as usize - 1;
-                if self.sel == last {
-                    // The typing row is chosen by going to it, not by picking.
-                } else if multi {
-                    self.toggle(self.sel);
+                let i = c as usize - '0' as usize - 1;
+                if i == last {
+                    self.slot_mut().sel = i;
                 } else {
-                    return self.accept();
+                    self.pick(i);
                 }
             }
             (KeyCode::Char(' '), m) if !on_note && !m.intersects(ctrl_alt) => {
-                if multi {
-                    self.toggle(self.sel);
-                } else {
-                    return self.accept();
-                }
+                self.pick(self.slot().sel)
             }
             // Anything else typed is the start of an answer of your own,
             // wherever the highlight was.
             (KeyCode::Char(c), m) if !m.intersects(ctrl_alt) => {
-                self.sel = last;
-                self.note.insert_char(c);
+                self.slot_mut().sel = last;
+                self.slot_mut().note.insert_char(c);
                 self.nag = false;
             }
             _ => {}
@@ -224,18 +267,21 @@ impl View {
     /// Draws the box and returns where the cursor belongs, if anywhere.
     pub fn draw(&mut self, f: &mut Frame, area: Rect, pal: &Palette) -> Option<(u16, u16)> {
         let q = &self.ask.questions[self.at];
+        let sel = self.slots[self.at].sel.min(q.options.len());
         let widest = q
             .options
             .iter()
             .map(|o| o.label.width().max(o.description.width() + 2) + 8)
             .max()
             .unwrap_or(0)
-            .max(48) as u16;
+            // Wide enough for the longest thing the footer says, so a hint is
+            // never cut in half.
+            .max(52) as u16;
         let width = widest.clamp(40, 78).min(area.width);
         let text_w = width.saturating_sub(4) as usize;
-        if self.wrap_w != width {
+        if self.wrap_for != (width, self.at) {
             self.wrapped = wrap(&q.question, text_w.max(8));
-            self.wrap_w = width;
+            self.wrap_for = (width, self.at);
         }
 
         // Body lines, and where the highlight sits among them.
@@ -250,31 +296,49 @@ impl View {
         // Where a label starts, so its description lines up under it.
         let indent = if q.multi { 8 } else { 6 };
         let mut focus = 0;
-        for (i, o) in q.options.iter().enumerate() {
-            let mark = match (q.multi, self.picked.get(i), i == self.sel) {
-                (true, Some(true), _) => "[x] ",
-                (true, _, _) => "[ ] ",
-                (false, _, true) => "▸ ",
-                (false, _, false) => "  ",
+        let picked = &self.slots[self.at].picked;
+        let note = &self.slots[self.at].note;
+        let row = |i: usize, ticked: bool, text: Span<'static>, lines: &mut Vec<Line<'static>>| {
+            let mark = match (q.multi, ticked, i == sel) {
+                (true, true, _) => "[x] ",
+                (true, false, _) => "[ ] ",
+                (false, true, _) => "● ",
+                (false, false, true) => "▸ ",
+                (false, false, false) => "  ",
             };
             let num = if i < 9 {
                 format!(" {} ", i + 1)
             } else {
                 "   ".into()
             };
-            let style = if i == self.sel {
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {num}"), pal.dim()),
+                Span::styled(
+                    mark,
+                    if i == sel {
+                        pal.bold(pal.accent)
+                    } else {
+                        Style::default().fg(pal.fg)
+                    },
+                ),
+                text,
+            ]));
+        };
+        for (i, o) in q.options.iter().enumerate() {
+            let style = if i == sel {
                 pal.bold(pal.accent)
             } else {
                 Style::default().fg(pal.fg)
             };
-            if i == self.sel {
+            if i == sel {
                 focus = lines.len();
             }
-            lines.push(Line::from(vec![
-                Span::styled(format!(" {num}"), pal.dim()),
-                Span::styled(mark, style),
+            row(
+                i,
+                picked[i],
                 Span::styled(o.label.clone(), style),
-            ]));
+                &mut lines,
+            );
             // `wrap` gives a blank line for a blank description; a row with
             // nothing to say gets no second row at all.
             for l in wrap(o.description.trim(), text_w.saturating_sub(indent).max(8))
@@ -292,67 +356,52 @@ impl View {
         // column, so it reads as the last answer rather than as a separate
         // field stuck to the bottom of the box.
         let note_line = lines.len();
-        if self.on_note() {
+        let on_note = sel == q.options.len();
+        if on_note {
             focus = note_line;
         }
-        let typed = !self.note.text.is_empty();
-        let mark = match (q.multi, typed, self.on_note()) {
-            (true, true, _) => "[x] ",
-            (true, false, _) => "[ ] ",
-            (false, _, true) => "▸ ",
-            (false, _, false) => "  ",
-        };
-        let num = if q.options.len() < 9 {
-            format!(" {} ", q.options.len() + 1)
+        let typed = !note.text.is_empty();
+        let text = if typed {
+            Span::styled(note.text.clone(), Style::default().fg(pal.fg))
         } else {
-            "   ".into()
+            Span::styled(
+                if q.options.is_empty() {
+                    "type an answer"
+                } else {
+                    "something else"
+                },
+                pal.dim(),
+            )
         };
-        let style = if self.on_note() {
-            pal.bold(pal.accent)
-        } else {
-            Style::default().fg(pal.fg)
-        };
-        lines.push(Line::from(vec![
-            Span::styled(format!(" {num}"), pal.dim()),
-            Span::styled(mark, style),
-            if typed {
-                Span::styled(self.note.text.clone(), Style::default().fg(pal.fg))
-            } else {
-                Span::styled(
-                    if q.options.is_empty() {
-                        "type an answer"
-                    } else {
-                        "something else"
-                    },
-                    pal.dim(),
-                )
-            },
-        ]));
+        row(q.options.len(), typed, text, &mut lines);
 
+        let n = self.ask.questions.len();
         let foot = if let Some(c) = self.confirm {
             Span::styled(
                 match c {
-                    Confirm::Send => "send these answers? enter confirms · esc goes back",
-                    Confirm::Leave => "leave without answering? enter confirms · esc goes back",
+                    Confirm::Send => "send these answers? enter yes · esc goes back",
+                    Confirm::Leave => "leave the question? enter yes · esc goes back",
                 },
                 pal.bold(pal.accent),
             )
         } else if self.nag {
             // The nudge goes where the hint was, so the box does not jump.
             Span::styled(
-                if q.options.is_empty() {
-                    "type an answer, or esc to dismiss"
+                if n > 1 {
+                    format!("question {} of {n} still needs an answer", self.at + 1)
+                } else if q.options.is_empty() {
+                    "type an answer, or esc to dismiss".to_string()
                 } else {
-                    "pick an option or type an answer"
+                    "pick an option or type an answer".to_string()
                 },
                 Style::default().fg(pal.error),
             )
         } else {
             Span::styled(
-                match (q.options.is_empty(), q.multi) {
-                    (true, _) => "type an answer · enter accepts · esc dismisses",
-                    (false, true) => "space picks · enter accepts · esc dismisses",
-                    (false, false) => "↑↓ or 1-9 · enter accepts · esc dismisses",
+                match (n > 1, q.options.is_empty()) {
+                    (true, _) => "←→ question · space picks · enter sends".to_string(),
+                    (false, true) => "type an answer · enter sends · esc dismisses".to_string(),
+                    (false, false) => "↑↓ or 1-9 · space picks · enter sends".to_string(),
                 },
                 pal.dim(),
             )
@@ -365,11 +414,12 @@ impl View {
             width,
             height,
         };
-        let title = match (self.ask.questions.len(), q.header.trim()) {
+        let answered = self.slots.iter().filter(|s| s.answered()).count();
+        let title = match (n, q.header.trim()) {
             (1, "") => " question ".to_string(),
             (1, h) => format!(" {h} "),
-            (n, "") => format!(" question {}/{n} ", self.at + 1),
-            (n, h) => format!(" {h} · {}/{n} ", self.at + 1),
+            (n, "") => format!(" question {}/{n} · {answered} answered ", self.at + 1),
+            (n, h) => format!(" {h} · {}/{n} · {answered} answered ", self.at + 1),
         };
         f.render_widget(Clear, r);
         let block = pal.block(true).title(title);
@@ -403,10 +453,10 @@ impl View {
 
         // The cursor belongs on the typing row, and only while it is on screen.
         let row = note_line.checked_sub(self.top)?;
-        if !self.on_note() || row >= body {
+        if !on_note || row >= body {
             return None;
         }
-        let before: String = self.note.text.chars().take(self.note.cursor).collect();
+        let before: String = note.text.chars().take(note.cursor).collect();
         Some((
             inner.x + (indent + before.width()) as u16,
             inner.y + row as u16,
@@ -448,7 +498,7 @@ mod tests {
         View::new(Ask { questions }).expect("questions")
     }
 
-    /// Answer the last question and confirm, which is what sends.
+    /// Confirm the send, which is what hands the answers over.
     fn done(v: &mut View) -> Vec<Answer> {
         assert_eq!(
             v.confirm,
@@ -461,11 +511,17 @@ mod tests {
         }
     }
 
+    /// Answer everything that is answerable the quick way, then send.
+    fn send(v: &mut View) -> Vec<Answer> {
+        v.key(key(KeyCode::Enter));
+        done(v)
+    }
+
     #[test]
-    fn a_number_answers_a_question_in_one_key() {
+    fn a_number_ticks_the_option_it_numbers() {
         let mut v = view(vec![question("Which?", &["a", "b", "c"], false)]);
         v.key(key(KeyCode::Char('2')));
-        let a = done(&mut v);
+        let a = send(&mut v);
         assert_eq!(a.len(), 1);
         assert_eq!(a[0].picked, ["b"]);
         assert!(a[0].note.is_empty());
@@ -475,14 +531,22 @@ mod tests {
     fn the_highlight_moves_and_enter_takes_what_it_is_on() {
         let mut v = view(vec![question("Which?", &["a", "b"], false)]);
         v.key(key(KeyCode::Down));
-        assert_eq!(v.sel, 1);
+        assert_eq!(v.slot().sel, 1);
         // Down stops at the typing row rather than wrapping round.
         v.key(key(KeyCode::Down));
         v.key(key(KeyCode::Down));
-        assert_eq!(v.sel, 2);
+        assert_eq!(v.slot().sel, 2);
         v.key(key(KeyCode::Up));
-        v.key(key(KeyCode::Enter));
-        let a = done(&mut v);
+        let a = send(&mut v);
+        assert_eq!(a[0].picked, ["b"], "enter took the highlighted row");
+    }
+
+    #[test]
+    fn one_answer_replaces_another_when_the_question_takes_one() {
+        let mut v = view(vec![question("Which?", &["a", "b"], false)]);
+        v.key(key(KeyCode::Char('1')));
+        v.key(key(KeyCode::Char('2')));
+        let a = send(&mut v);
         assert_eq!(a[0].picked, ["b"]);
     }
 
@@ -494,8 +558,7 @@ mod tests {
         // A tick comes off again.
         v.key(key(KeyCode::Char('3')));
         v.key(key(KeyCode::Char('3')));
-        v.key(key(KeyCode::Enter));
-        let a = done(&mut v);
+        let a = send(&mut v);
         assert_eq!(a[0].picked, ["a", "c"], "in the order they were offered");
     }
 
@@ -504,12 +567,9 @@ mod tests {
         let mut v = view(vec![question("Which?", &["a", "b"], false)]);
         typed(&mut v, "neither, 2 is closer");
         assert!(v.on_note(), "typing moved to the typing row");
-        v.key(key(KeyCode::Enter));
-        let a = done(&mut v);
+        let a = send(&mut v);
         assert_eq!(a[0].note, "neither, 2 is closer");
-        assert!(a[0].picked.is_empty());
-        // A digit typed into text stays text rather than picking a row.
-        assert!(v.answers.is_empty());
+        assert!(a[0].picked.is_empty(), "a digit in text is text");
     }
 
     #[test]
@@ -518,9 +578,9 @@ mod tests {
         typed(&mut v, "with care");
         v.key(key(KeyCode::Up));
         v.key(key(KeyCode::Up));
-        assert_eq!(v.sel, 0);
-        v.key(key(KeyCode::Enter));
-        let a = done(&mut v);
+        assert_eq!(v.slot().sel, 0);
+        v.key(key(KeyCode::Char(' ')));
+        let a = send(&mut v);
         assert_eq!(a[0].picked, ["a"]);
         assert_eq!(a[0].note, "with care");
     }
@@ -530,11 +590,11 @@ mod tests {
         let mut v = view(vec![question("What name?", &[], false)]);
         assert!(v.on_note());
         assert!(matches!(v.key(key(KeyCode::Enter)), Action::None));
-        assert!(v.nag, "Enter with nothing said asks again");
+        assert!(v.nag, "enter with nothing said asks again");
+        assert_eq!(v.confirm, None);
         typed(&mut v, "ah");
         assert!(!v.nag);
-        v.key(key(KeyCode::Enter));
-        let a = done(&mut v);
+        let a = send(&mut v);
         assert_eq!(a[0].note, "ah");
     }
 
@@ -543,27 +603,142 @@ mod tests {
         let mut v = view(vec![question("Which?", &["a", "b"], true)]);
         assert!(matches!(v.key(key(KeyCode::Enter)), Action::None));
         assert!(v.nag);
+        assert_eq!(v.confirm, None, "nothing to send yet");
         v.key(key(KeyCode::Char(' ')));
-        v.key(key(KeyCode::Enter));
-        let a = done(&mut v);
+        let a = send(&mut v);
         assert_eq!(a[0].picked, ["a"]);
     }
 
     #[test]
-    fn questions_are_asked_one_after_another() {
+    fn every_question_is_answered_before_any_of_them_are_sent() {
         let mut v = view(vec![
             question("First?", &["a", "b"], false),
             question("Second?", &[], false),
+            question("Third?", &["x"], true),
         ]);
-        assert!(matches!(v.key(key(KeyCode::Char('1'))), Action::None));
-        assert_eq!(v.at, 1, "moved on to the second question");
-        assert!(v.note.is_empty(), "the typing row starts empty again");
-        typed(&mut v, "yes");
+        v.key(key(KeyCode::Char('1')));
+        // Enter on the last unanswered question goes to it instead of sending.
+        assert!(matches!(v.key(key(KeyCode::Enter)), Action::None));
+        assert_eq!(v.at, 1);
+        assert!(v.nag);
+        assert_eq!(v.confirm, None);
+        typed(&mut v, "second");
         v.key(key(KeyCode::Enter));
-        let a = done(&mut v);
-        assert_eq!(a.len(), 2);
+        assert_eq!(v.at, 2, "and on to the one still missing");
+        assert!(v.nag);
+        v.key(key(KeyCode::Char(' ')));
+        let a = send(&mut v);
+        assert_eq!(a.len(), 3);
         assert_eq!(a[0].picked, ["a"]);
-        assert_eq!(a[1].note, "yes");
+        assert_eq!(a[1].note, "second");
+        assert_eq!(a[2].picked, ["x"]);
+    }
+
+    #[test]
+    fn the_question_that_is_missing_an_answer_is_named() {
+        let mut v = view(vec![
+            question("First?", &["a"], false),
+            question("Second?", &["b"], false),
+            question("Third?", &["c"], false),
+        ]);
+        v.key(key(KeyCode::Char('1')));
+        v.key(key(KeyCode::Right));
+        v.key(key(KeyCode::Char('1')));
+        v.key(key(KeyCode::Enter));
+        assert_eq!(v.at, 2);
+        let (text, _) = drawn(&mut v, 70, 20);
+        assert!(
+            text.contains("question 3 of 3 still needs an answer"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn the_questions_can_be_walked_and_each_keeps_its_own_answer() {
+        let mut v = view(vec![
+            question("First?", &["a", "b"], false),
+            question("Second?", &["c", "d"], true),
+        ]);
+        v.key(key(KeyCode::Char('2')));
+        v.key(key(KeyCode::Right));
+        assert_eq!(v.at, 1);
+        typed(&mut v, "own answer");
+        // Right at the last question stays there rather than wrapping round.
+        v.key(key(KeyCode::Tab));
+        assert_eq!(v.at, 1);
+        v.key(key(KeyCode::BackTab));
+        assert_eq!(v.at, 0, "shift-tab walks back too");
+        assert_eq!(v.slot().sel, 1, "the highlight was left where it was");
+        assert!(v.slot().picked[1], "and the tick with it");
+        v.key(key(KeyCode::Left));
+        assert_eq!(v.at, 0, "left at the first question stays there");
+        v.key(key(KeyCode::Right));
+        assert_eq!(v.slot().note.text, "own answer", "and the text with it");
+        let a = send(&mut v);
+        assert_eq!(a[0].picked, ["b"]);
+        assert_eq!(a[1].note, "own answer");
+    }
+
+    #[test]
+    fn arrows_move_through_what_is_typed_before_they_move_questions() {
+        let mut v = view(vec![
+            question("First?", &["a"], false),
+            question("Second?", &["b"], false),
+        ]);
+        typed(&mut v, "abc");
+        v.key(key(KeyCode::Left));
+        assert_eq!(v.at, 0, "the cursor moved, not the question");
+        assert_eq!(v.slot().note.cursor, 2);
+        // With the text emptied there is nothing to move through.
+        v.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        v.key(key(KeyCode::Right));
+        assert_eq!(v.at, 1);
+    }
+
+    #[test]
+    fn esc_asks_before_it_throws_the_answers_away() {
+        let mut v = view(vec![question("Which?", &["a"], false)]);
+        typed(&mut v, "half an answer");
+        assert!(matches!(v.key(key(KeyCode::Esc)), Action::None));
+        assert_eq!(v.confirm, Some(Confirm::Leave));
+        // Esc again is the way back, not a second yes.
+        assert!(matches!(v.key(key(KeyCode::Esc)), Action::None));
+        assert_eq!(v.confirm, None);
+        assert_eq!(v.slot().note.text, "half an answer", "nothing was lost");
+        v.key(key(KeyCode::Esc));
+        assert!(matches!(v.key(key(KeyCode::Enter)), Action::Dismiss));
+    }
+
+    #[test]
+    fn going_back_from_the_send_changes_nothing() {
+        let mut v = view(vec![question("Which?", &["a", "b"], false)]);
+        v.key(key(KeyCode::Char('1')));
+        v.key(key(KeyCode::Enter));
+        assert_eq!(v.confirm, Some(Confirm::Send));
+        // Second thoughts: back to the question, with the answer still there.
+        assert!(matches!(v.key(key(KeyCode::Esc)), Action::None));
+        assert!(v.slot().picked[0]);
+        v.key(key(KeyCode::Char('2')));
+        let a = send(&mut v);
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].picked, ["b"]);
+    }
+
+    #[test]
+    fn editing_keys_reach_the_typed_answer() {
+        let mut v = view(vec![question("What?", &[], false)]);
+        typed(&mut v, "one two");
+        v.key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        assert_eq!(v.slot().note.text, "one ");
+        v.key(key(KeyCode::Backspace));
+        assert_eq!(v.slot().note.text, "one");
+        v.key(key(KeyCode::Left));
+        v.key(key(KeyCode::Char('x')));
+        assert_eq!(v.slot().note.text, "onxe");
+        v.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert!(v.slot().note.is_empty());
+        v.paste("pasted\nline");
+        assert_eq!(v.slot().note.text, "pasted line");
     }
 
     fn drawn(v: &mut View, w: u16, h: u16) -> (String, Option<(u16, u16)>) {
@@ -605,7 +780,7 @@ mod tests {
         assert!(text.contains("Which store should it use?"), "{text}");
         assert!(text.contains("1 ") && text.contains("sqlite"), "{text}");
         assert!(text.contains("one file, one writer"), "{text}");
-        assert!(text.contains("enter accepts"), "{text}");
+        assert!(text.contains("enter sends"), "{text}");
         assert_eq!(cursor, None, "the highlight starts on an option");
         typed(&mut v, "duckdb");
         let (text, cursor) = drawn(&mut v, 80, 24);
@@ -613,6 +788,30 @@ mod tests {
         let (x, y) = cursor.expect("cursor on the typing row");
         // Just past what has been typed.
         assert!(x > 0 && y > 0, "{cursor:?}");
+    }
+
+    #[test]
+    fn the_typing_row_is_the_last_row_of_the_list() {
+        let mut v = view(vec![question("Which?", &["a", "b"], false)]);
+        // The number after the last option goes to it, and typing lands there.
+        v.key(key(KeyCode::Char('3')));
+        assert!(v.on_note());
+        assert!(v.unanswered().is_some(), "going to it answers nothing");
+        let (text, cursor) = drawn(&mut v, 60, 20);
+        let rows: Vec<&str> = text
+            .lines()
+            .filter(|l| l.contains(" 1 ") || l.contains(" 2 ") || l.contains(" 3 "))
+            .collect();
+        assert_eq!(rows.len(), 3, "{text}");
+        // Columns, not byte offsets: the border and the marker are wide chars.
+        let col = |l: &str, want: char| l.chars().position(|c| c == want);
+        assert_eq!(
+            col(rows[0], 'a'),
+            col(rows[2], 's'),
+            "same column as the options: {text}"
+        );
+        assert!(rows[2].contains("▸"), "the highlight is on it: {text}");
+        assert!(cursor.is_some(), "and the cursor with it");
     }
 
     #[test]
@@ -638,76 +837,7 @@ mod tests {
     }
 
     #[test]
-    fn the_typing_row_is_the_last_row_of_the_list() {
-        let mut v = view(vec![question("Which?", &["a", "b"], false)]);
-        // The number after the last option goes to it, and typing lands there.
-        v.key(key(KeyCode::Char('3')));
-        assert!(v.on_note());
-        assert!(v.answers.is_empty(), "going to it answers nothing");
-        let (text, cursor) = drawn(&mut v, 60, 20);
-        let rows: Vec<&str> = text
-            .lines()
-            .filter(|l| l.contains(" 1 ") || l.contains(" 2 ") || l.contains(" 3 "))
-            .collect();
-        assert_eq!(rows.len(), 3, "{text}");
-        // Columns, not byte offsets: the border and the marker are wide chars.
-        let col = |l: &str, want: char| l.chars().position(|c| c == want);
-        assert_eq!(
-            col(rows[0], 'a'),
-            col(rows[2], 's'),
-            "same column as the options: {text}"
-        );
-        assert!(rows[2].contains("▸"), "the highlight is on it: {text}");
-        assert!(cursor.is_some(), "and the cursor with it");
-    }
-
-    #[test]
     fn an_ask_with_no_questions_is_no_box() {
         assert!(View::new(Ask::default()).is_none());
-    }
-
-    #[test]
-    fn esc_asks_before_it_throws_the_answers_away() {
-        let mut v = view(vec![question("Which?", &["a"], false)]);
-        typed(&mut v, "half an answer");
-        assert!(matches!(v.key(key(KeyCode::Esc)), Action::None));
-        assert_eq!(v.confirm, Some(Confirm::Leave));
-        // Esc again is the way back, not a second yes.
-        assert!(matches!(v.key(key(KeyCode::Esc)), Action::None));
-        assert_eq!(v.confirm, None);
-        assert_eq!(v.note.text, "half an answer", "nothing was lost");
-        v.key(key(KeyCode::Esc));
-        assert!(matches!(v.key(key(KeyCode::Enter)), Action::Dismiss));
-    }
-
-    #[test]
-    fn going_back_from_the_send_leaves_one_answer_to_send() {
-        let mut v = view(vec![question("Which?", &["a", "b"], false)]);
-        v.key(key(KeyCode::Char('1')));
-        assert_eq!(v.confirm, Some(Confirm::Send));
-        // Second thoughts: back to the question, with the answer not counted.
-        assert!(matches!(v.key(key(KeyCode::Esc)), Action::None));
-        assert!(v.answers.is_empty());
-        v.key(key(KeyCode::Char('2')));
-        let a = done(&mut v);
-        assert_eq!(a.len(), 1);
-        assert_eq!(a[0].picked, ["b"]);
-    }
-
-    #[test]
-    fn editing_keys_reach_the_typed_answer() {
-        let mut v = view(vec![question("What?", &[], false)]);
-        typed(&mut v, "one two");
-        v.key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
-        assert_eq!(v.note.text, "one ");
-        v.key(key(KeyCode::Backspace));
-        assert_eq!(v.note.text, "one");
-        v.key(key(KeyCode::Left));
-        v.key(key(KeyCode::Char('x')));
-        assert_eq!(v.note.text, "onxe");
-        v.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
-        assert!(v.note.is_empty());
-        v.paste("pasted\nline");
-        assert_eq!(v.note.text, "pasted line");
     }
 }
