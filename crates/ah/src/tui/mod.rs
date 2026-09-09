@@ -2461,6 +2461,8 @@ impl App {
                     think_ms: 0,
                 });
             }
+            // Drawn by the transcript, once the image half lands.
+            AgentEvent::Image { .. } => {}
             AgentEvent::Text(t) => {
                 self.set_state(State::Streaming);
                 self.finish_thinking();

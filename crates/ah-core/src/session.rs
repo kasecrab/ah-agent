@@ -165,6 +165,13 @@ impl Session {
         &self.path
     }
 
+    /// Where this session's generated images go. An ephemeral session has one
+    /// too: a one-shot run still writes the picture it was asked for, it is
+    /// just not referenced by any session file afterwards.
+    pub fn images_dir(&self) -> PathBuf {
+        crate::paths::session_images_dir(&self.id)
+    }
+
     /// Give the session a name (empty clears it). The last marker wins on
     /// reload, so renaming is an append like everything else.
     pub fn rename(&mut self, name: &str) {

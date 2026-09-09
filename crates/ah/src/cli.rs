@@ -114,6 +114,30 @@ impl AgentIo for PrintIo {
                     let _ = writeln!(std::io::stdout());
                 }
             }
+            // The path goes to stdout, on its own line: with an image model
+            // stdout would otherwise be empty, and `ah -p "draw a cat" | xargs
+            // feh` is the whole point of a one-shot run.
+            AgentEvent::Image {
+                path,
+                mime,
+                width,
+                height,
+                bytes,
+            } => {
+                let mut out = std::io::stdout().lock();
+                let _ = writeln!(out, "{}", path.display());
+                let _ = out.flush();
+                let dims = if width > 0 {
+                    format!("{width}x{height} ")
+                } else {
+                    String::new()
+                };
+                let _ = writeln!(
+                    err,
+                    "\x1b[90m[image {dims}{mime}, {} KB]\x1b[0m",
+                    bytes.div_ceil(1024)
+                );
+            }
             AgentEvent::TurnEnd(s) => {
                 let cached = if s.usage.cached_tokens > 0 {
                     format!(" ({} cached)", s.usage.cached_tokens)
@@ -291,6 +315,16 @@ fn event_json(ev: &AgentEvent) -> serde_json::Value {
             json!({"type": "tool_denied", "call": call, "reason": reason})
         }
         AgentEvent::ToolMessage(m) => json!({"type": "tool_message", "message": m}),
+        AgentEvent::Image {
+            path,
+            mime,
+            width,
+            height,
+            bytes,
+        } => json!({
+            "type": "image", "path": path, "mime": mime,
+            "width": width, "height": height, "bytes": bytes
+        }),
         AgentEvent::Notice(n) => json!({"type": "notice", "text": n}),
         AgentEvent::SettingsPatch(p) => json!({"type": "settings_patch", "patch": p}),
         AgentEvent::Retry {

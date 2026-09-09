@@ -174,9 +174,9 @@ pub struct Engine {
     pub total_usage: Usage,
     /// Conversation size as of the last response.
     pub context_tokens: u64,
-    /// `(model id, window)` looked up in the catalogue. Only a real window is
-    /// kept: a miss must be retried, since the catalogue may still be on its way.
-    window: Option<(String, u64)>,
+    /// `(model id, entry)` looked up in the catalogue. Only a hit is kept: a
+    /// miss must be retried, since the catalogue may still be on its way.
+    info: Option<(String, ah_core::models::ModelInfo)>,
     /// Whether this session has already been told its window is unknown.
     warned_no_window: bool,
 }
@@ -212,7 +212,7 @@ impl Engine {
             cancel: Arc::new(AtomicBool::new(false)),
             total_usage: Usage::default(),
             context_tokens: 0,
-            window: None,
+            info: None,
             warned_no_window: false,
         };
         e.rebuild_provider();
@@ -251,21 +251,23 @@ impl Engine {
         if self.settings.context.window > 0 {
             return self.settings.context.window;
         }
-        let id = &self.settings.model.id;
-        if let Some((m, w)) = &self.window
-            && m == id
-        {
-            return *w;
+        self.model_info().map(|i| i.context_length).unwrap_or(0)
+    }
+
+    /// What the model this session is talking to says about the current model,
+    /// or `None` when the catalogue has not landed or does not list it.
+    ///
+    /// A miss is deliberately not remembered. The catalogue is fetched in the
+    /// background and lands in a file this reads, so remembering one would
+    /// leave auto compaction off — and image output unasked for — for the rest
+    /// of the process.
+    fn model_info(&mut self) -> Option<&ah_core::models::ModelInfo> {
+        let id = self.settings.model.id.clone();
+        let hit = matches!(&self.info, Some((m, _)) if *m == id);
+        if !hit {
+            self.info = ah_core::models::info(&id).map(|i| (id, i));
         }
-        let w = ah_core::models::context_window(id).unwrap_or(0);
-        // A miss is deliberately not remembered. The catalogue is fetched in
-        // the background and lands in a file this reads, so remembering a zero
-        // would leave auto compaction off for the rest of the process and let
-        // the conversation grow until the provider refuses it.
-        if w > 0 {
-            self.window = Some((id.clone(), w));
-        }
-        w
+        self.info.as_ref().map(|(_, i)| i)
     }
 
     /// Say once that the window is unknown. Auto compaction is off until it is
@@ -277,7 +279,9 @@ impl Engine {
         self.warned_no_window = true;
         io.emit(AgentEvent::Notice(format!(
             "the model catalogue does not give a context window for {}, so the conversation \
-             will not be compacted on its own. Set context.window to a size to turn it back on.",
+             will not be compacted on its own, and image output will not be asked for. Set \
+             context.window to a size to turn compaction back on, and images.output to \"always\" \
+             if this model draws.",
             self.settings.model.id
         )));
     }
@@ -285,6 +289,11 @@ impl Engine {
     /// Agent over this engine's provider, registry, hooks and settings.
     /// `None` without an API key.
     fn agent<'a>(&'a mut self, no_hooks: &'a mut NoHooks, window: u64) -> Option<Agent<'a>> {
+        // Read before the borrow below, which takes the whole struct apart.
+        let modalities = self
+            .model_info()
+            .map(|i| i.output_modalities.clone())
+            .unwrap_or_default();
         let Self {
             provider,
             registry,
@@ -317,6 +326,11 @@ impl Engine {
         });
         let mut a = Agent::new(borrowed, registry, hooks, settings, cwd.clone(), cancel);
         a.session_id = session.id.clone();
+        a.output_modalities = modalities;
+        a.image_dir = Some(match settings.images.dir.trim() {
+            "" => session.images_dir(),
+            d => PathBuf::from(d),
+        });
         a.context_window = window;
         a.context_tokens = *context_tokens;
         a.spawner = spawner;
@@ -881,7 +895,7 @@ mod tests {
         assert_eq!(e.context_window(), 0);
         // Remembering the miss would leave auto compaction off for the whole
         // process, and the conversation would grow until the provider refused it.
-        assert!(e.window.is_none(), "a miss must be looked up again");
+        assert!(e.info.is_none(), "a miss must be looked up again");
         let io = Heard(Mutex::new(Vec::new()));
         e.warn_if_no_window(0, &io);
         e.warn_if_no_window(0, &io);

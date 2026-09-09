@@ -192,6 +192,12 @@ pub fn load(base_url: &str, api_key: Option<&str>, max_age: Duration) -> Result<
     }
 }
 
+/// Catalogue entry for `id`, if a usable cache exists and lists it.
+pub fn info(id: &str) -> Option<ModelInfo> {
+    let (models, _) = load_cached()?;
+    models.into_iter().find(|m| m.id == id)
+}
+
 /// Context window of `id` from the cached catalogue, if known.
 pub fn context_window(id: &str) -> Option<u64> {
     let (models, _) = load_cached()?;

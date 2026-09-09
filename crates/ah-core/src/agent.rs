@@ -35,6 +35,16 @@ pub enum AgentEvent {
         reason: String,
     },
     ToolMessage(Message),
+    /// The model drew something and it is on disk. `width` and `height` are 0
+    /// for a format ah cannot measure. The bytes are deliberately not here: a
+    /// UI on the far side of a channel reads the file.
+    Image {
+        path: PathBuf,
+        mime: String,
+        width: u32,
+        height: u32,
+        bytes: usize,
+    },
     Notice(String),
     SettingsPatch(Value),
     Retry {
@@ -123,6 +133,11 @@ fn prompt_bytes(system: &str, messages: &[Message], tools_bytes: usize) -> usize
                     .iter()
                     .map(|c| c.function.name.len() + c.function.arguments.len())
                     .sum::<usize>()
+                // Not the bytes of the image: a provider bills a flat-ish
+                // number of tokens per picture whatever the file weighs, and
+                // counting the base64 would compact the conversation after
+                // every one.
+                + m.images.len() * crate::image::IMAGE_TOKENS * 4
         })
         .sum();
     system.len() + msgs + tools_bytes
@@ -248,10 +263,21 @@ pub struct Agent<'a> {
     /// What the `agent` tool starts subagents with. `None` leaves the loop
     /// unable to start any, whatever its tool list says.
     pub spawner: Option<std::sync::Arc<dyn crate::agents::Spawner + Sync>>,
+    /// Output modalities of the current model as the catalogue reports them,
+    /// empty when it does not list the model. The agent never reads the
+    /// catalogue itself; the caller, which already has it for the context
+    /// window, passes it in.
+    pub output_modalities: Vec<String>,
+    /// Where generated images are written. `None` turns the feature off, which
+    /// is what a caller with nowhere to put a file wants.
+    pub image_dir: Option<PathBuf>,
     /// Plan version behind the last reminder, and how many requests have gone
     /// by without the plan changing.
     plan_seen: u64,
     plan_quiet: u32,
+    /// Last reference read back off disk and the data URL it produced, so a
+    /// turn of ten tool calls re-encodes the picture once instead of ten times.
+    image_cache: Option<(String, String)>,
 }
 
 impl<'a> Agent<'a> {
@@ -279,9 +305,104 @@ impl<'a> Agent<'a> {
             notices: true,
             mailbox: None,
             spawner: None,
+            output_modalities: Vec::new(),
+            image_dir: None,
             plan_seen: 0,
             plan_quiet: 0,
+            image_cache: None,
         }
+    }
+
+    /// Modalities to ask this model for; empty leaves the key off the request.
+    fn modalities(&self) -> Vec<String> {
+        if self.image_dir.is_none() {
+            return Vec::new();
+        }
+        let wanted = match self.settings.images.output {
+            ImageOutput::Off => false,
+            ImageOutput::Always => true,
+            // Unknown means no. Asking a model that cannot draw for images is
+            // an error on some providers, and a catalogue that has not been
+            // fetched yet is the normal state for the first second of a run.
+            ImageOutput::Auto => self.output_modalities.iter().any(|m| m == "image"),
+        };
+        if !wanted {
+            return Vec::new();
+        }
+        let text = self.settings.images.output == ImageOutput::Always
+            || self.output_modalities.is_empty()
+            || self.output_modalities.iter().any(|m| m == "text");
+        if text {
+            vec!["image".into(), "text".into()]
+        } else {
+            vec!["image".into()]
+        }
+    }
+
+    /// Swap stored references for what actually goes on the wire. The newest
+    /// `budget` generated images become `data:` URLs; older ones leave a line
+    /// of text naming their file and their entry goes. Images a user attached
+    /// are already data URLs and are never dropped: that would change what the
+    /// user asked.
+    ///
+    /// This runs on the per-request copy, so the conversation the caller holds
+    /// — and the session file — keep every reference.
+    fn hydrate_images(&mut self, all: &mut Vec<Message>, budget: u32) {
+        if all.iter().all(|m| m.images.is_empty()) {
+            return;
+        }
+        let mut left = budget;
+        for m in all.iter_mut().rev() {
+            if m.images.is_empty() {
+                continue;
+            }
+            let mut kept = Vec::with_capacity(m.images.len());
+            for entry in core::mem::take(&mut m.images) {
+                if crate::image::is_data_url(&entry) {
+                    kept.push(entry);
+                    continue;
+                }
+                if left > 0
+                    && let Some(url) = self.image_data_url(&entry)
+                {
+                    left -= 1;
+                    kept.push(url);
+                    continue;
+                }
+                let note = crate::image::omitted_note(&entry);
+                if !m.content.contains(note.trim()) {
+                    m.content.push_str(&note);
+                }
+            }
+            m.images = kept;
+        }
+        if self.settings.images.echo == ImageEcho::User {
+            move_assistant_images_to_user(all);
+        }
+    }
+
+    /// A stored reference read back as a data URL, `None` when the file has
+    /// gone.
+    fn image_data_url(&mut self, entry: &str) -> Option<String> {
+        if let Some((k, v)) = &self.image_cache
+            && k == entry
+        {
+            return Some(v.clone());
+        }
+        let path = crate::image::resolve(entry)?;
+        let bytes = std::fs::read(&path).ok()?;
+        let url = crate::clipboard::data_url(&bytes);
+        self.image_cache = Some((entry.to_string(), url.clone()));
+        Some(url)
+    }
+
+    /// Write one generated image and return what stands for it in a message.
+    fn save_image(&self, url: &str, seq: u32) -> Result<crate::image::Saved> {
+        let dir = self
+            .image_dir
+            .clone()
+            .ok_or_else(|| Error::Config("nowhere to put a generated image".into()))?;
+        crate::image::save(&dir, url, seq, crate::image::MAX_IMAGE_BYTES)
     }
 
     /// True once the conversation fills `context.compact_at` percent of the window.
@@ -331,6 +452,10 @@ impl<'a> Agent<'a> {
             ask.push_str(focus.trim());
         }
         all.push(Message::user(ask));
+        // No image bytes in a summary request: the notes name the files, which
+        // is all the summary can usefully say about them, and some summarisers
+        // will not take an image at all.
+        self.hydrate_images(&mut all, 0);
         let cache_control = self.cache_control(prompt_bytes(&all[0].content, &all[1..], 0));
         let req = ChatRequest {
             model: self.settings.model.id.clone(),
@@ -373,8 +498,11 @@ impl<'a> Agent<'a> {
             0 => messages_tokens(messages),
             n => n,
         };
-        let msg = summary_message(&acc.content);
+        let mut msg = summary_message(&acc.content);
         let after = estimate_tokens(msg.content.len());
+        // A summary can describe a picture but cannot be edited into a new
+        // one, so the newest generated image comes across the boundary with it.
+        msg.images = last_generated_images(messages, 1);
         *messages = vec![msg];
         self.context_tokens = after;
         self.compactions += 1;
@@ -529,24 +657,41 @@ impl<'a> Agent<'a> {
             let mut all = Vec::with_capacity(messages.len() + 1);
             all.push(Message::system(system.clone()));
             all.extend(messages.iter().cloned());
+            self.hydrate_images(&mut all, self.settings.images.history);
+            let modalities = self.modalities();
+            // A model asked for pictures only has no text channel to call a
+            // tool on; declaring tools it cannot use invites an error.
+            let text_out = modalities.is_empty() || modalities.iter().any(|m| m == "text");
+            let bytes = prompt_bytes(&all[0].content, &all[1..], specs_bytes);
             let req = ChatRequest {
                 model: self.settings.model.id.clone(),
                 messages: all,
-                tools: specs.clone(),
+                tools: if text_out { specs.clone() } else { Vec::new() },
                 max_tokens: self.settings.model.max_tokens,
                 temperature: self.settings.model.temperature,
                 top_p: self.settings.model.top_p,
-                modalities: Vec::new(),
+                modalities: modalities.clone(),
                 reasoning: self.settings.model.reasoning.clone(),
                 provider: self.settings.model.provider.clone(),
                 session_id: self.session_key(),
-                cache_control: self.cache_control(prompt_bytes(&system, messages, specs_bytes)),
+                cache_control: self.cache_control(bytes),
             };
-            let req = self.hooks.before_request(req, turn);
+            let mut req = self.hooks.before_request(req, turn);
+            // A plugin built against an older ABI deserialises the request into
+            // a struct with no `modalities` and drops it on the way back. Every
+            // other field only costs money when that happens; this one turns
+            // image output off without a word.
+            if req.modalities.is_empty()
+                && !modalities.is_empty()
+                && req.model == self.settings.model.id
+            {
+                crate::debug!("a plugin dropped `modalities`; restoring it");
+                req.modalities = modalities;
+            }
 
             io.emit(AgentEvent::RequestStart { turn });
-            let (acc, failure) = self.stream_with_retry(&req, io);
-            let acc = match failure {
+            let (acc, saved, failure) = self.stream_with_retry(&req, io);
+            let mut acc = match failure {
                 None => acc,
                 Some(e) => {
                     // Some models report usage before the stream ends; count it
@@ -556,7 +701,7 @@ impl<'a> Agent<'a> {
                         self.context_tokens = acc.usage.prompt_tokens + acc.usage.completion_tokens;
                         io.emit(AgentEvent::Usage(acc.usage));
                     }
-                    if let Some(m) = partial_message(acc) {
+                    if let Some(m) = partial_message(acc, saved) {
                         io.emit(AgentEvent::AssistantMessage(m.clone()));
                         messages.push(m);
                     }
@@ -571,7 +716,11 @@ impl<'a> Agent<'a> {
             summary.usage.add(&acc.usage);
             self.context_tokens = acc.usage.prompt_tokens + acc.usage.completion_tokens;
             io.emit(AgentEvent::Usage(acc.usage));
-            let assistant = acc.clone().into_message();
+            // Every image is a file by now. Dropping the base64 here keeps it
+            // out of the message, out of the session line and out of `--json`.
+            acc.images.clear();
+            let mut assistant = acc.clone().into_message();
+            assistant.images = saved;
             io.emit(AgentEvent::AssistantMessage(assistant.clone()));
             messages.push(assistant.clone());
 
@@ -835,11 +984,15 @@ impl<'a> Agent<'a> {
         &self,
         req: &ChatRequest,
         io: &dyn AgentIo,
-    ) -> (Accumulator, Option<Error>) {
+    ) -> (Accumulator, Vec<String>, Option<Error>) {
         let mut attempt = 0u32;
         loop {
             let mut acc = Accumulator::default();
             let mut got_any = false;
+            // References to the images this request produced. A retry only
+            // happens when nothing arrived, and an image sets `got_any`, so
+            // this is always empty on the way round again.
+            let mut saved: Vec<String> = Vec::new();
             let res = self.provider.stream(req, self.cancel, &mut |ev| {
                 acc.apply(&ev);
                 match ev {
@@ -851,14 +1004,33 @@ impl<'a> Agent<'a> {
                         got_any = true;
                         io.emit(AgentEvent::Reasoning(t))
                     }
+                    StreamEvent::Image(url) => {
+                        // Paid for the moment it arrived: never retried.
+                        got_any = true;
+                        match self.save_image(&url, saved.len() as u32) {
+                            Ok(s) => {
+                                io.emit(AgentEvent::Image {
+                                    path: s.path,
+                                    mime: s.mime,
+                                    width: s.width,
+                                    height: s.height,
+                                    bytes: s.bytes,
+                                });
+                                saved.push(s.reference);
+                            }
+                            Err(e) => io.emit(AgentEvent::Notice(format!(
+                                "could not save the generated image: {e}"
+                            ))),
+                        }
+                    }
                     StreamEvent::ToolCallDelta { .. } => got_any = true,
-                    _ => {}
+                    StreamEvent::Usage(_) | StreamEvent::Finish(_) => {}
                 }
                 !self.cancel.load(Ordering::Relaxed)
             });
             match res {
-                Ok(()) => return (acc.finish(), None),
-                Err(Error::Cancelled) => return (acc.finish(), Some(Error::Cancelled)),
+                Ok(()) => return (acc.finish(), saved, None),
+                Err(Error::Cancelled) => return (acc.finish(), saved, Some(Error::Cancelled)),
                 Err(e) if attempt < 3 && !got_any && is_transient(&e) => {
                     attempt += 1;
                     let wait = Duration::from_millis(500 * (1u64 << attempt));
@@ -870,12 +1042,12 @@ impl<'a> Agent<'a> {
                     let deadline = Instant::now() + wait;
                     while Instant::now() < deadline {
                         if self.cancel.load(Ordering::Relaxed) {
-                            return (acc.finish(), Some(Error::Cancelled));
+                            return (acc.finish(), saved, Some(Error::Cancelled));
                         }
                         std::thread::sleep(Duration::from_millis(50));
                     }
                 }
-                Err(e) => return (acc.finish(), Some(e)),
+                Err(e) => return (acc.finish(), saved, Some(e)),
             }
         }
     }
@@ -884,19 +1056,83 @@ impl<'a> Agent<'a> {
 /// What is worth keeping from a request that ended part way: the text the
 /// model had already written, said to be cut short. Tool calls are dropped —
 /// one cut off mid-stream has truncated arguments and no result to pair with,
-/// and every call shown to the API needs one. A stream that produced no text
-/// leaves nothing to keep, reasoning alone included: an assistant message with
-/// no content is not one the next request can carry.
-fn partial_message(acc: Accumulator) -> Option<Message> {
+/// and every call shown to the API needs one. Reasoning alone is not enough to
+/// keep: an assistant message with no content and no picture is not one the
+/// next request can carry.
+fn partial_message(acc: Accumulator, images: Vec<String>) -> Option<Message> {
     let text = acc.content.trim_end();
-    if text.is_empty() {
+    if text.is_empty() && images.is_empty() {
         return None;
     }
-    let mut m = Message::assistant(format!("{text}\n\n[cut short]"));
+    // A picture that arrived before the Esc was paid for and is on disk, so it
+    // is worth keeping even with nothing said around it.
+    let mut m = Message::assistant(if text.is_empty() {
+        "[cut short]".to_string()
+    } else {
+        format!("{text}\n\n[cut short]")
+    });
     if !acc.reasoning.is_empty() {
         m.reasoning = Some(acc.reasoning);
     }
+    m.images = images;
     Some(m)
+}
+
+/// Move an assistant's generated images onto a user message just after it, for
+/// a provider that refuses images on an assistant message. An assistant
+/// message with tool calls is left alone: its `tool` results have to follow it
+/// immediately, and a message wedged in between is a hard error.
+fn move_assistant_images_to_user(all: &mut Vec<Message>) {
+    let mut i = 0;
+    while i < all.len() {
+        if all[i].role != Role::Assistant
+            || all[i].images.is_empty()
+            || !all[i].tool_calls.is_empty()
+        {
+            i += 1;
+            continue;
+        }
+        let images = core::mem::take(&mut all[i].images);
+        match all.get_mut(i + 1) {
+            Some(next) if next.role == Role::User => {
+                let mut moved = images;
+                moved.append(&mut next.images);
+                next.images = moved;
+                i += 2;
+            }
+            _ => {
+                all.insert(
+                    i + 1,
+                    Message::user_with_images("[the image you generated]", images),
+                );
+                i += 2;
+            }
+        }
+    }
+}
+
+/// The `n` most recent generated images in a conversation, newest last. Only
+/// references count: an image a user attached belongs to the message they
+/// wrote, which the summary has replaced.
+fn last_generated_images(messages: &[Message], n: usize) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for m in messages.iter().rev() {
+        if m.role != Role::Assistant {
+            continue;
+        }
+        for entry in m.images.iter().rev() {
+            if crate::image::is_data_url(entry) {
+                continue;
+            }
+            out.push(entry.clone());
+            if out.len() == n {
+                out.reverse();
+                return out;
+            }
+        }
+    }
+    out.reverse();
+    out
 }
 
 fn is_transient(e: &Error) -> bool {
@@ -1004,6 +1240,7 @@ mod tests {
     use super::test_support::*;
     use super::*;
     use crate::tools::Tool;
+    use std::path::Path;
 
     fn tool_call_script(name: &str, args: &str) -> Vec<StreamEvent> {
         vec![
@@ -1022,6 +1259,256 @@ mod tests {
                 ..Usage::default()
             }),
         ]
+    }
+
+    /// The smallest real PNG, as a data URL, for a scripted image reply.
+    fn png_url() -> String {
+        let mut v = Vec::new();
+        v.extend_from_slice(b"\x89PNG\r\n\x1a\n");
+        v.extend_from_slice(&[0, 0, 0, 13]);
+        v.extend_from_slice(b"IHDR");
+        v.extend_from_slice(&1u32.to_be_bytes());
+        v.extend_from_slice(&1u32.to_be_bytes());
+        v.extend_from_slice(&[8, 2, 0, 0, 0, 0x90, 0x77, 0x53, 0xDE]);
+        format!("data:image/png;base64,{}", crate::clipboard::base64(&v))
+    }
+
+    fn image_dir(tag: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("ah-agent-image-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        p
+    }
+
+    /// An agent wired to a scripted provider, with somewhere to put pictures.
+    fn image_agent<'a>(
+        provider: &'a MockProvider,
+        registry: &'a Registry,
+        hooks: &'a mut NoHooks,
+        settings: &'a Settings,
+        cancel: &'a AtomicBool,
+        dir: &Path,
+        modalities: &[&str],
+    ) -> Agent<'a> {
+        let mut a = Agent::new(
+            provider,
+            registry,
+            hooks,
+            settings,
+            std::env::current_dir().unwrap(),
+            cancel,
+        );
+        a.notices = false;
+        a.image_dir = Some(dir.to_path_buf());
+        a.output_modalities = modalities.iter().map(|s| String::from(*s)).collect();
+        a
+    }
+
+    #[test]
+    fn a_generated_image_is_written_and_the_message_only_names_it() {
+        let dir = image_dir("saved");
+        let provider = MockProvider::new(vec![vec![
+            StreamEvent::Text("here".into()),
+            StreamEvent::Image(png_url()),
+            StreamEvent::Finish("stop".into()),
+        ]]);
+        let settings = Settings::default();
+        let registry = Registry::builtins(&settings.tools);
+        let mut hooks = NoHooks;
+        let cancel = AtomicBool::new(false);
+        let mut agent = image_agent(
+            &provider,
+            &registry,
+            &mut hooks,
+            &settings,
+            &cancel,
+            &dir,
+            &["image", "text"],
+        );
+        let mut messages = vec![Message::user("draw a cat")];
+        let io = RecordingIo::default();
+        agent.run_turn(&mut messages, &io).unwrap();
+
+        let events = io.events.lock().unwrap();
+        let img = events
+            .iter()
+            .find_map(|e| match e {
+                AgentEvent::Image {
+                    path,
+                    width,
+                    height,
+                    ..
+                } => Some((path.clone(), *width, *height)),
+                _ => None,
+            })
+            .expect("an image event");
+        assert_eq!((img.1, img.2), (1, 1));
+        assert!(img.0.is_file());
+        // The conversation names the file and carries none of its bytes.
+        let stored = &messages[1].images;
+        assert_eq!(stored.len(), 1);
+        assert!(stored[0].starts_with(crate::image::SCHEME) || stored[0].starts_with("file://"));
+        assert!(!messages[1].images[0].contains("base64,"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn images_are_asked_for_only_when_the_model_draws() {
+        let dir = image_dir("modalities");
+        let cases: [(&[&str], ImageOutput, &[&str]); 5] = [
+            (&["image", "text"], ImageOutput::Auto, &["image", "text"]),
+            (&["text"], ImageOutput::Auto, &[]),
+            (&["image"], ImageOutput::Auto, &["image"]),
+            // A catalogue that has not landed yet says nothing, so `auto`
+            // asks for nothing and `always` asks anyway.
+            (&[], ImageOutput::Auto, &[]),
+            (&[], ImageOutput::Always, &["image", "text"]),
+        ];
+        for (out_mods, output, want) in cases {
+            let provider = MockProvider::new(vec![vec![
+                StreamEvent::Text("ok".into()),
+                StreamEvent::Finish("stop".into()),
+            ]]);
+            let mut settings = Settings::default();
+            settings.images.output = output;
+            let registry = Registry::builtins(&settings.tools);
+            let mut hooks = NoHooks;
+            let cancel = AtomicBool::new(false);
+            let mut agent = image_agent(
+                &provider, &registry, &mut hooks, &settings, &cancel, &dir, out_mods,
+            );
+            let mut messages = vec![Message::user("hello")];
+            agent
+                .run_turn(&mut messages, &RecordingIo::default())
+                .unwrap();
+            let reqs = provider.requests.lock().unwrap();
+            assert_eq!(
+                reqs[0].modalities, want,
+                "modalities {out_mods:?} {output:?}"
+            );
+            // A model with no text channel has nothing to call a tool with.
+            if want == ["image"] {
+                assert!(reqs[0].tools.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn only_the_newest_image_goes_back_and_the_rest_stay_put() {
+        let dir = image_dir("history");
+        let url = png_url();
+        let provider = MockProvider::new(vec![
+            vec![
+                StreamEvent::Image(url.clone()),
+                StreamEvent::Finish("stop".into()),
+            ],
+            vec![
+                StreamEvent::Image(url.clone()),
+                StreamEvent::Finish("stop".into()),
+            ],
+            vec![
+                StreamEvent::Text("done".into()),
+                StreamEvent::Finish("stop".into()),
+            ],
+        ]);
+        let settings = Settings::default();
+        let registry = Registry::builtins(&settings.tools);
+        let mut hooks = NoHooks;
+        let cancel = AtomicBool::new(false);
+        let mut agent = image_agent(
+            &provider,
+            &registry,
+            &mut hooks,
+            &settings,
+            &cancel,
+            &dir,
+            &["image", "text"],
+        );
+        let mut messages = vec![Message::user("draw a cat")];
+        agent
+            .run_turn(&mut messages, &RecordingIo::default())
+            .unwrap();
+        messages.push(Message::user("now a dog"));
+        agent
+            .run_turn(&mut messages, &RecordingIo::default())
+            .unwrap();
+        messages.push(Message::user("describe them"));
+        agent
+            .run_turn(&mut messages, &RecordingIo::default())
+            .unwrap();
+
+        let reqs = provider.requests.lock().unwrap();
+        let third = &reqs[2].messages;
+        let sent: Vec<&Message> = third.iter().filter(|m| !m.images.is_empty()).collect();
+        // One picture on the wire: the newest.
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].images[0].starts_with("data:image/png;base64,"));
+        // The older one left a note naming its file, and the note is the same
+        // on every later request, so the cached prefix still matches.
+        let older = third
+            .iter()
+            .find(|m| m.role == Role::Assistant && m.images.is_empty())
+            .unwrap();
+        assert!(older.content.contains("not resent"));
+        // It names the file it left behind, which is what the model can ask
+        // about later.
+        let first_ref = messages
+            .iter()
+            .filter(|m| m.role == Role::Assistant && !m.images.is_empty())
+            .map(|m| m.images[0].clone())
+            .next()
+            .unwrap();
+        assert!(older.content.contains(&first_ref));
+        // The conversation the caller holds still has both references.
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|m| m.role == Role::Assistant && !m.images.is_empty())
+                .count(),
+            2
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_image_that_cannot_be_saved_says_so_and_keeps_nothing() {
+        let dir = image_dir("nowhere");
+        let provider = MockProvider::new(vec![vec![
+            StreamEvent::Text("here".into()),
+            StreamEvent::Image("data:image/png;base64,!!!!".into()),
+            StreamEvent::Finish("stop".into()),
+        ]]);
+        let settings = Settings::default();
+        let registry = Registry::builtins(&settings.tools);
+        let mut hooks = NoHooks;
+        let cancel = AtomicBool::new(false);
+        let mut agent = image_agent(
+            &provider,
+            &registry,
+            &mut hooks,
+            &settings,
+            &cancel,
+            &dir,
+            &["image", "text"],
+        );
+        let mut messages = vec![Message::user("draw a cat")];
+        let io = RecordingIo::default();
+        agent.run_turn(&mut messages, &io).unwrap();
+        assert!(messages[1].images.is_empty());
+        assert!(io.events.lock().unwrap().iter().any(|e| matches!(
+            e,
+            AgentEvent::Notice(n) if n.contains("could not save")
+        )));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_prompt_counts_an_image_as_tokens_not_as_base64() {
+        let mut with = Message::assistant("hi");
+        with.images = vec!["ah-image:s/1-0.png".into()];
+        let plain = Message::assistant("hi");
+        let grew = prompt_bytes("", std::slice::from_ref(&with), 0)
+            - prompt_bytes("", std::slice::from_ref(&plain), 0);
+        assert_eq!(grew, crate::image::IMAGE_TOKENS * 4);
     }
 
     #[test]
