@@ -147,9 +147,9 @@ impl View {
         ];
         parts.push(
             if child.running() {
-                "type to tell it more · k stops it · Esc closes"
+                "type to tell it more · Esc goes back · /agents stops it"
             } else {
-                "type to set it off again · Esc closes"
+                "type to set it off again · Esc goes back"
             }
             .into(),
         );
@@ -157,5 +157,23 @@ impl View {
             Paragraph::new(Span::styled(format!(" {}", parts.join(" · ")), pal.dim())),
             foot,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn watching_sticks_to_the_newest_line() {
+        let mut v = View::new(3);
+        v.scroll(-10, 100, 20);
+        assert!(!v.follow);
+        assert_eq!(v.from, 70);
+        v.scroll(-100, 100, 20);
+        assert_eq!(v.from, 0);
+        v.scroll(1000, 100, 20);
+        assert!(v.follow);
+        assert_eq!(v.from, 80);
     }
 }
