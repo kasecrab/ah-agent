@@ -36,6 +36,10 @@ pub enum Kind {
     SkillArgs {
         name: String,
     },
+    /// Models that take audio input, for `/voice model`.
+    VoiceModel,
+    /// Input devices, for `/voice devices`.
+    VoiceDevice,
     /// Background shell jobs. Enter opens the output view.
     Jobs,
     /// Agents the model started. Enter watches one.

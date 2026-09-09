@@ -64,6 +64,7 @@ name in, Enter runs it. Plugins can add commands (`ah docs plugins`).
 | `/effort [LEVEL]` | reasoning effort: `off`, `minimal`, `low`, `medium`, `high`, `xhigh` |
 | `/favorite [NAME]`, `/fav` | favorites picker; a name switches to it or creates it |
 | `/usage` | session cost per model, wall and API time, tool calls, lines changed, plus OpenRouter balance, limits and 30-day top models (`r` refreshes) |
+| `/voice` | arm dictation: hold the talk key and speak, the words land in the input box in grey and turn white when the phrase is done. `/voice off` disarms, `/voice model [id]` picks the transcribing model from the models that take audio input, `/voice devices` picks the microphone. Nothing is sent until you press Enter |
 | `/compact [FOCUS]` | summarise the conversation now, optionally around a focus; the summary folds behind a one-line header (Ctrl-T shows it) |
 | `/clear` | start an empty conversation in the same session file |
 | `/resume [ID\|NAME]` | switch to another session in place |

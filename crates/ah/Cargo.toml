@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 ah-abi = { path = "../ah-abi" }
 ah-core = { path = "../ah-core" }
+ah-voice = { path = "../ah-voice", default-features = false }
 serde = { workspace = true, features = ["std"] }
 serde_json = { workspace = true, features = ["std"] }
 clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
@@ -20,3 +21,9 @@ crossterm = { version = "0.29", default-features = false, features = ["events"] 
 unicode-width = "0.2"
 pulldown-cmark = { version = "0.13", default-features = false }
 dirs = "7"
+
+[features]
+default = ["mic"]
+# Record from the system microphone. Off, `/voice` needs a recorder on PATH
+# or `voice.capture_cmd`, and nothing links an audio library.
+mic = ["ah-voice/mic"]

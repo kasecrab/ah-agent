@@ -93,6 +93,19 @@ pub fn any_match(chords: &[Chord], ev: &KeyEvent) -> bool {
     chords.iter().any(|c| matches(c, ev))
 }
 
+/// Does `ev` use the same key and modifiers as one of `chords`, whatever kind
+/// of event it is? The dictation talk key has to see releases, which
+/// `matches` deliberately drops.
+pub fn any_code(chords: &[Chord], ev: &KeyEvent) -> bool {
+    chords.iter().any(|c| match (c.code, ev.code) {
+        (KeyCode::Char(a), KeyCode::Char(b)) => {
+            a.eq_ignore_ascii_case(&b)
+                && c.mods - KeyModifiers::SHIFT == ev.modifiers - KeyModifiers::SHIFT
+        }
+        (a, b) => a == b && c.mods == ev.modifiers,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

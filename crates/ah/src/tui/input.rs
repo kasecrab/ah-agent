@@ -3,6 +3,10 @@
 
 use unicode_width::UnicodeWidthChar;
 
+/// Wrapped input rows, each a list of runs: the text, and whether it is
+/// dictation that has not been committed yet.
+pub type Rows = Vec<Vec<(String, bool)>>;
+
 #[derive(Default, Debug)]
 pub struct Editor {
     pub text: String,
@@ -324,34 +328,57 @@ impl Editor {
     }
 
     /// Soft-wrapped rows for `width`, plus the cursor's (row, col).
-    pub fn layout(&self, width: usize) -> (Vec<String>, (usize, usize)) {
+    /// The same rows, but with `pending` shown at the cursor and each run
+    /// marked: false is text that is really there, true is dictation that has
+    /// not been committed yet. The cursor stays where the words will land,
+    /// which is in front of the pending run.
+    pub fn layout_pending(&self, width: usize, pending: &str) -> (Rows, (usize, usize)) {
         let width = width.max(1);
-        let mut rows: Vec<String> = Vec::new();
+        let mut rows: Rows = Vec::new();
         let mut cursor_rc = (0, 0);
-        let mut cur = String::new();
+        let mut cur: Vec<(String, bool)> = Vec::new();
         let mut cur_w = 0usize;
         let total = self.char_len();
-        for (i, c) in self.text.chars().enumerate() {
-            if i == self.cursor {
-                cursor_rc = (rows.len(), cur_w);
-            }
+        let head = self.text.chars().take(self.cursor);
+        let tail = self.text.chars().skip(self.cursor);
+        let chars = head
+            .map(|c| (c, false))
+            .chain(pending.chars().map(|c| (c, true)))
+            .chain(tail.map(|c| (c, false)));
+        let mut i = 0usize;
+        let mut placed = false;
+        for (c, ghost) in chars {
             if c == '\n' {
+                if !placed && i == self.cursor {
+                    cursor_rc = (rows.len(), cur_w);
+                    placed = true;
+                }
                 rows.push(std::mem::take(&mut cur));
                 cur_w = 0;
+                if !ghost {
+                    i += 1;
+                }
                 continue;
             }
             let w = c.width().unwrap_or(1);
             if cur_w + w > width {
                 rows.push(std::mem::take(&mut cur));
                 cur_w = 0;
-                if i == self.cursor {
-                    cursor_rc = (rows.len(), 0);
-                }
             }
-            cur.push(c);
+            if !placed && i == self.cursor {
+                cursor_rc = (rows.len(), cur_w);
+                placed = true;
+            }
+            match cur.last_mut() {
+                Some((t, g)) if *g == ghost => t.push(c),
+                _ => cur.push((c.to_string(), ghost)),
+            }
             cur_w += w;
+            if !ghost {
+                i += 1;
+            }
         }
-        if self.cursor >= total {
+        if !placed {
             if cur_w >= width {
                 rows.push(std::mem::take(&mut cur));
                 cur_w = 0;
@@ -427,16 +454,55 @@ mod tests {
         assert!(e.is_empty(), "{}", e.text);
     }
 
+    fn text_rows(e: &Editor, width: usize, pending: &str) -> Vec<String> {
+        e.layout_pending(width, pending)
+            .0
+            .into_iter()
+            .map(|r| r.into_iter().map(|(t, _)| t).collect::<String>())
+            .collect()
+    }
+
     #[test]
     fn wraps_and_places_cursor() {
         let mut e = Editor::default();
         e.insert_str("abcdefgh");
-        let (rows, cur) = e.layout(4);
-        assert_eq!(rows, vec!["abcd", "efgh", ""]); // cursor needs a row of its own
+        let (rows, cur) = e.layout_pending(4, "");
+        assert_eq!(text_rows(&e, 4, ""), vec!["abcd", "efgh", ""]); // cursor needs a row of its own
+        assert_eq!(rows.len(), 3);
         assert_eq!(cur, (2, 0));
         e.cursor = 5;
-        let (_, cur) = e.layout(4);
+        let (_, cur) = e.layout_pending(4, "");
         assert_eq!(cur, (1, 1));
+    }
+
+    #[test]
+    fn dictation_shows_at_the_cursor_and_is_marked_apart() {
+        let mut e = Editor::default();
+        e.insert_str("fix ");
+        let (rows, cur) = e.layout_pending(40, "the auth bug");
+        assert_eq!(text_rows(&e, 40, "the auth bug"), vec!["fix the auth bug"]);
+        // The caret stays where the words will land, in front of the grey.
+        assert_eq!(cur, (0, 4));
+        assert_eq!(rows[0][0], ("fix ".to_string(), false));
+        assert_eq!(rows[0][1], ("the auth bug".to_string(), true));
+    }
+
+    #[test]
+    fn dictation_lands_where_the_cursor_is_not_at_the_end() {
+        let mut e = Editor::default();
+        e.insert_str("fix now");
+        e.cursor = 4;
+        assert_eq!(text_rows(&e, 40, "the bug "), vec!["fix the bug now"]);
+    }
+
+    #[test]
+    fn dictation_wraps_with_the_rest() {
+        let e = {
+            let mut e = Editor::default();
+            e.insert_str("ab");
+            e
+        };
+        assert_eq!(text_rows(&e, 4, "cdefgh"), vec!["abcd", "efgh"]);
     }
 }
 

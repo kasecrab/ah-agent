@@ -12,6 +12,7 @@ mod plan;
 mod theme;
 mod transcript;
 mod usage;
+mod voice;
 mod working;
 
 use std::collections::HashSet;
@@ -56,6 +57,8 @@ enum Msg {
     Engine(UiEvent),
     Models(Result<Vec<ModelInfo>, String>),
     Usage(Result<usage::Remote, String>),
+    /// A dictated phrase, or a word of one coming back.
+    Voice(voice::Event),
 }
 
 /// Built-in slash commands, alphabetical: `(name, description, takes_args)`.
@@ -100,6 +103,11 @@ const COMMANDS: &[(&str, &str, bool)] = &[
     ("statusline", "choose what the status line shows", false),
     ("tools", "list tools", false),
     ("usage", "session cost, account balance, top models", false),
+    (
+        "voice",
+        "dictate into the prompt: /voice [on|off|model|devices]",
+        true,
+    ),
     ("yolo", "auto-approve tool calls", false),
 ];
 
@@ -108,6 +116,16 @@ const ALIASES: &[(&str, &str)] = &[("favorite", "fav"), ("quit", "exit")];
 
 fn alias_of(name: &str) -> Option<&'static str> {
     ALIASES.iter().find(|(n, _)| *n == name).map(|(_, a)| *a)
+}
+
+/// Eight blocks of input level, so a glance says whether the microphone is
+/// hearing anything at all.
+fn meter(level: f32) -> String {
+    const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let n = (level.clamp(0.0, 1.0).sqrt() * 8.0).round() as usize;
+    (0..6)
+        .map(|i| if i < n { BARS[(n - 1).min(7)] } else { '▁' })
+        .collect()
 }
 
 /// Mouse selection in screen cells.
@@ -216,6 +234,8 @@ struct Binds {
     line_end: Vec<Chord>,
     paste_image: Vec<Chord>,
     toggle_plan: Vec<Chord>,
+    voice: Vec<Chord>,
+    talk: Vec<Chord>,
     /// Plugin-provided `(chord, action)`; action is a Keys field or `/command`.
     extra: Vec<(Chord, String)>,
 }
@@ -249,6 +269,8 @@ impl Binds {
             line_end: p(&k.line_end),
             paste_image: p(&k.paste_image),
             toggle_plan: p(&k.toggle_plan),
+            voice: p(&k.voice),
+            talk: p(&k.talk),
             extra: extra
                 .iter()
                 .filter_map(|(k, a)| keys::parse(k).map(|c| (c, a.clone())))
@@ -323,6 +345,13 @@ struct App {
     agent_view: Option<agents::View>,
     plan_view: Option<plan::View>,
     usage_pane: Option<usage::Pane>,
+    /// Dictation, while it is armed. `None` is the whole cost of the feature
+    /// being switched off: no thread, no buffer, no open device.
+    voice: Option<voice::Session>,
+    /// What the last dictation cost, kept after it is disarmed so `/usage`
+    /// can still show it.
+    voice_cost: f64,
+    voice_requests: u32,
     stats: Stats,
     /// When the current reply started streaming reasoning.
     think_start: Option<Instant>,
@@ -469,6 +498,9 @@ fn run_inner(
         agent_view: None,
         plan_view: None,
         usage_pane: None,
+        voice: None,
+        voice_cost: 0.0,
+        voice_requests: 0,
         stats: Stats::default(),
         think_start: None,
         task: String::new(),
@@ -1003,6 +1035,7 @@ impl App {
             // the frame is not throttled to the stream rate and the loop goes
             // back to waiting on the channel instead of animating.
             let running = self.busy && self.ask.is_none();
+            let voice_wake = self.voice.as_ref().and_then(|v| v.wake_in());
             if self.dirty {
                 let throttle = Duration::from_millis(self.settings().layout.stream_redraw_ms);
                 let stream = running || self.job_view.is_some();
@@ -1015,14 +1048,19 @@ impl App {
             if self.quit {
                 return Ok(());
             }
-            let msg = if running || self.dirty || self.job_view.is_some() {
-                let wait = if self.dirty {
+            let msg = if running || self.dirty || self.job_view.is_some() || voice_wake.is_some() {
+                let mut wait = if self.dirty {
                     Duration::from_millis(self.settings().layout.stream_redraw_ms.max(1))
                 } else if self.job_view.is_some() && !running {
                     Duration::from_millis(250)
+                } else if !running {
+                    Duration::from_millis(1000)
                 } else {
                     Duration::from_millis(self.animation_ms().max(20))
                 };
+                if let Some(v) = voice_wake {
+                    wait = wait.min(v);
+                }
                 match rx.recv_timeout(wait) {
                     Ok(m) => Some(m),
                     Err(RecvTimeoutError::Timeout) => {
@@ -1032,6 +1070,14 @@ impl App {
                         // Keep the clock in the job view moving.
                         if self.job_view.is_some() {
                             self.dirty = true;
+                        }
+                        if let Some(v) = self.voice.as_mut() {
+                            let was = v.listening();
+                            v.tick();
+                            if was {
+                                self.dirty = true;
+                            }
+                            self.voice_settle();
                         }
                         None
                     }
@@ -1088,6 +1134,7 @@ impl App {
             }
             Msg::Jobs => self.jobs_changed(),
             Msg::Agents => self.agents_changed(),
+            Msg::Voice(ev) => self.handle_voice(ev),
             Msg::Plan => self.dirty = true,
             Msg::Engine(ev) => self.handle_engine(ev),
             Msg::Usage(res) => {
@@ -1351,6 +1398,117 @@ impl App {
             .iter()
             .position(|(n, _)| *n == current)
             .unwrap_or(0);
+        self.picker = Some(p);
+        self.dirty = true;
+    }
+
+    /// Models that can hear. The audio price is the number that matters here,
+    /// and it is the one nothing else shows.
+    fn open_voice_model_picker(&mut self, query: &str) {
+        let mut stale = false;
+        if self.catalogue.is_none() {
+            match models::load_cached() {
+                Some((m, age)) => {
+                    stale |= age.as_secs() > 24 * 3600;
+                    self.catalogue = Some(m);
+                }
+                None => stale = true,
+            }
+        }
+        let pal = &self.pal;
+        let current = self.settings().voice.model.clone();
+        let rows: Vec<Row> = self
+            .catalogue
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .filter(|m| m.accepts("audio"))
+            .map(|m| Row {
+                style: None,
+                id: m.id.clone(),
+                search: format!("{} {}", m.id, m.name),
+                label: if m.id == current {
+                    format!("{} •", m.id)
+                } else {
+                    m.id.clone()
+                },
+                cols: vec![
+                    (
+                        if m.audio_per_m > 0.0 {
+                            format!("${:>8.2}/M audio", m.audio_per_m)
+                        } else {
+                            format!("${:>8.2}/M in   ", m.prompt_per_m)
+                        },
+                        pal.dim(),
+                    ),
+                    (
+                        format!(" ${:<6.2} out", m.completion_per_m),
+                        pal.dim(),
+                    ),
+                ],
+            })
+            .collect();
+        let empty = rows.is_empty();
+        let mut p = Picker::new(
+            Kind::VoiceModel,
+            "voice model · Enter select · Esc close · Ctrl-R refresh",
+            query,
+            rows,
+        );
+        p.hint = "audio price per million tokens; a phrase is a second or two of it".into();
+        if empty && !stale {
+            p.error = Some(
+                "no model in the catalogue takes audio input; Ctrl-R refreshes the list".into(),
+            );
+        }
+        if stale {
+            p.loading = true;
+            if empty {
+                p.hint = "fetching model list from OpenRouter…".into();
+            }
+        }
+        self.picker = Some(p);
+        self.dirty = true;
+        if stale {
+            self.fetch_models();
+        }
+    }
+
+    fn open_voice_device_picker(&mut self) {
+        let cur = self.settings().voice.device.clone();
+        let mut rows = vec![Row {
+            style: None,
+            id: String::new(),
+            search: "default system input".into(),
+            label: if cur.is_empty() {
+                "system default •".into()
+            } else {
+                "system default".into()
+            },
+            cols: Vec::new(),
+        }];
+        for name in ah_voice::capture::devices() {
+            rows.push(Row {
+                style: None,
+                search: name.clone(),
+                label: if name == cur {
+                    format!("{name} •")
+                } else {
+                    name.clone()
+                },
+                id: name,
+                cols: Vec::new(),
+            });
+        }
+        let mut p = Picker::new(
+            Kind::VoiceDevice,
+            "microphone · Enter select · Esc close",
+            "",
+            rows,
+        );
+        if p.rows.len() == 1 {
+            p.hint = "this build has no built-in capture; set voice.capture_cmd instead".into();
+        }
         self.picker = Some(p);
         self.dirty = true;
     }
@@ -1633,6 +1791,33 @@ impl App {
                     Kind::Session => {
                         if let Some(id) = chosen {
                             self.resume(&id);
+                        }
+                    }
+                    Kind::VoiceModel => {
+                        let id = chosen.or_else(|| {
+                            (!query.is_empty() && query.contains('/')).then(|| query.clone())
+                        });
+                        if let Some(id) = id {
+                            self.apply_patch(
+                                Origin::Runtime("slash".into()),
+                                serde_json::json!({"voice": {"model": id.clone()}}),
+                            );
+                            if self.voice.is_some() {
+                                self.disarm_voice();
+                            }
+                            self.arm_voice(Some(id));
+                        }
+                    }
+                    Kind::VoiceDevice => {
+                        if let Some(name) = chosen {
+                            self.apply_patch(
+                                Origin::Runtime("slash".into()),
+                                serde_json::json!({"voice": {"device": name}}),
+                            );
+                            if self.voice.is_some() {
+                                self.disarm_voice();
+                                self.arm_voice(None);
+                            }
                         }
                     }
                     Kind::Effort { model, favorite } => {
@@ -2842,7 +3027,186 @@ impl App {
         }
     }
 
+    // ---- dictation -------------------------------------------------------
+
+    /// The talk key, in every event kind, before the rest of the keyboard is
+    /// looked at. Returns true when it took the key.
+    fn talk_key(&mut self, k: &KeyEvent) -> bool {
+        if self.voice.is_none() || !self.overlay_free() {
+            return false;
+        }
+        if !keys::any_code(&self.binds.talk, k) {
+            return false;
+        }
+        let Some(v) = self.voice.as_mut() else {
+            return false;
+        };
+        match k.kind {
+            KeyEventKind::Press => v.press(),
+            KeyEventKind::Repeat => v.repeat(),
+            KeyEventKind::Release => v.release(),
+        }
+        if let Some(n) = self.voice.as_mut().and_then(|v| v.note.take()) {
+            self.push(Block::Notice(n));
+        }
+        let text = self.editor.text.clone();
+        if let Some(v) = self.voice.as_mut() {
+            v.set_context(&text);
+        }
+        self.voice_settle();
+        self.dirty = true;
+        true
+    }
+
+    /// Nothing else is holding the keyboard.
+    fn overlay_free(&self) -> bool {
+        self.ask.is_none()
+            && self.picker.is_none()
+            && self.completion.is_none()
+            && self.pending_perm.is_none()
+            && self.job_view.is_none()
+            && self.plan_view.is_none()
+            && self.usage_pane.is_none()
+    }
+
+    fn handle_voice(&mut self, ev: voice::Event) {
+        let text = self.editor.text.clone();
+        let Some(v) = self.voice.as_mut() else { return };
+        match ev {
+            voice::Event::Phrase(p) => {
+                v.set_context(&text);
+                v.phrase(p);
+            }
+            voice::Event::Delta { seq, text } => v.delta(seq, &text),
+            voice::Event::Done { seq, cost } => v.done(seq, cost),
+            voice::Event::Failed { seq, message } => v.failed(seq, message),
+        }
+        if let Some(n) = self.voice.as_mut().and_then(|v| v.note.take()) {
+            self.push(Block::Notice(n));
+        }
+        self.voice_settle();
+        self.dirty = true;
+    }
+
+    /// The key is up and every phrase is back: the grey text becomes real.
+    fn voice_settle(&mut self) {
+        let Some(v) = self.voice.as_mut() else { return };
+        if !v.settled() {
+            return;
+        }
+        let text = v.take();
+        if text.is_empty() {
+            return;
+        }
+        if !self.editor.text.is_empty() && !self.editor.text.ends_with([' ', '\n']) {
+            self.editor.insert_char(' ');
+        }
+        self.editor.insert_str(&text);
+        self.dirty = true;
+    }
+
+    /// Grey text: spoken, transcribed, not committed yet.
+    fn voice_pending(&self) -> String {
+        self.voice.as_ref().map(|v| v.pending()).unwrap_or_default()
+    }
+
+    fn arm_voice(&mut self, model: Option<String>) {
+        let cfg = self.settings().voice.clone();
+        if !cfg.enabled {
+            self.push(Block::Notice(
+                "dictation is off; set voice.enabled = true to use it".into(),
+            ));
+            return;
+        }
+        let model = model.unwrap_or_else(|| cfg.model.clone());
+        if model.trim().is_empty() {
+            self.open_voice_model_picker("");
+            return;
+        }
+        let Some(key) = ah_core::auth::api_key(self.settings().model.api_key.as_deref()) else {
+            self.push(Block::Error(
+                "no API key: run `ah login` before dictating".into(),
+            ));
+            return;
+        };
+        if self.voice_first_use() {
+            self.push(Block::Notice(format!(
+                "dictation sends recorded audio to {model} through OpenRouter.                  It is billed to your key like any other request, and is never                  written to a session file or the log."
+            )));
+        }
+        let provider: std::sync::Arc<dyn ah_core::provider::Provider> = std::sync::Arc::new(
+            ah_core::provider::openrouter::OpenRouter::new(
+                self.settings().model.base_url.clone(),
+                key,
+            ),
+        );
+        let capture_cmd = self.stack.capture_cmd();
+        let route = format!("voice-{}", self.session_id);
+        match voice::Session::arm(
+            &cfg,
+            model.clone(),
+            provider,
+            capture_cmd,
+            self.self_tx.clone(),
+            route,
+        ) {
+            Ok(v) => {
+                let source = v.source().to_string();
+                self.voice = Some(v);
+                self.push(Block::Notice(format!(
+                    "dictation on: hold {} and speak. {model} transcribes, {source} records.                      Nothing is sent until you press Enter.",
+                    self.talk_key_name()
+                )));
+            }
+            Err(e) => self.push(Block::Error(format!("dictation: {e}"))),
+        }
+        self.dirty = true;
+    }
+
+    fn disarm_voice(&mut self) {
+        let Some(mut v) = self.voice.take() else { return };
+        v.discard();
+        self.voice_cost += v.cost;
+        self.voice_requests += v.requests;
+        self.push(Block::Notice(if v.requests == 0 {
+            "dictation off".into()
+        } else {
+            format!(
+                "dictation off: {} phrase{}, ${:.4}",
+                v.requests,
+                if v.requests == 1 { "" } else { "s" },
+                v.cost
+            )
+        }));
+        self.dirty = true;
+    }
+
+    fn talk_key_name(&self) -> String {
+        self.settings()
+            .keys
+            .talk
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "space".into())
+    }
+
+    /// True the first time dictation is armed on this machine. The marker is
+    /// a file, so the warning is shown once rather than every session.
+    fn voice_first_use(&self) -> bool {
+        let path = ah_core::paths::data_dir().join("voice-ack");
+        if path.exists() {
+            return false;
+        }
+        if let Some(d) = path.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        std::fs::write(&path, b"1").is_ok()
+    }
+
     fn handle_key(&mut self, k: KeyEvent) {
+        if self.talk_key(&k) {
+            return;
+        }
         if !matches!(k.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
             return;
         }
@@ -2959,7 +3323,12 @@ impl App {
                 self.quit = true;
             }
         } else if keys::any_match(&b.cancel, &k) {
-            if !self.editor.is_empty() {
+            if self.voice.as_ref().is_some_and(|v| v.busy()) {
+                if let Some(v) = self.voice.as_mut() {
+                    v.discard();
+                }
+                self.push(Block::Notice("dictation dropped".into()));
+            } else if !self.editor.is_empty() {
                 self.editor.clear();
             } else if self.agent_view.is_some() {
                 // Leaving an agent leaves it running; it is not the turn.
@@ -2991,6 +3360,8 @@ impl App {
             self.follow = true;
         } else if keys::any_match(&b.clear, &k) {
             self.run_action("/clear");
+        } else if keys::any_match(&b.voice, &k) {
+            self.slash_voice("");
         } else if keys::any_match(&b.toggle_plan, &k) {
             self.toggle_plan();
         } else if keys::any_match(&b.toggle_tools, &k) {
@@ -3105,6 +3476,76 @@ impl App {
         );
     }
 
+    /// The microphone is open: say so for as long as it is, not only while
+    /// somebody is talking into it.
+    fn voice_chip(&self, pal: &Palette) -> Option<Vec<Span<'static>>> {
+        let v = self.voice.as_ref()?;
+        let mut out = Vec::new();
+        if v.listening() {
+            let secs = 0;
+            let _ = secs;
+            out.push(Span::styled("● ", Style::default().fg(pal.accent)));
+            out.push(Span::styled("listening", pal.bold(pal.accent)));
+            if self.settings().voice.meter {
+                out.push(Span::raw(" "));
+                out.push(Span::styled(meter(v.level()), Style::default().fg(pal.accent)));
+            }
+        } else {
+            out.push(Span::styled("○ ", pal.dim()));
+            out.push(Span::styled(
+                format!("mic on · hold {}", self.talk_key_name()),
+                pal.dim(),
+            ));
+        }
+        if self.settings().voice.show_cost && v.cost > 0.0 {
+            out.push(Span::styled(format!(" ${:.4}", v.cost), pal.dim()));
+        }
+        Some(out)
+    }
+
+    fn slash_voice(&mut self, args: &str) {
+        match args.trim() {
+            "" => {
+                if self.voice.is_some() {
+                    self.disarm_voice();
+                } else {
+                    self.arm_voice(None);
+                }
+            }
+            "on" => {
+                if self.voice.is_none() {
+                    self.arm_voice(None);
+                }
+            }
+            "off" => self.disarm_voice(),
+            "devices" | "device" => self.open_voice_device_picker(),
+            rest => {
+                let (word, id) = rest
+                    .split_once(' ')
+                    .map(|(w, i)| (w, i.trim()))
+                    .unwrap_or((rest, ""));
+                if word != "model" {
+                    self.push(Block::Notice(
+                        "usage: /voice [on|off|model [id]|devices]".into(),
+                    ));
+                    return;
+                }
+                if id.is_empty() {
+                    self.open_voice_model_picker("");
+                    return;
+                }
+                self.apply_patch(
+                    Origin::Runtime("slash".into()),
+                    serde_json::json!({"voice": {"model": id}}),
+                );
+                if self.voice.is_some() {
+                    self.disarm_voice();
+                }
+                self.arm_voice(Some(id.to_string()));
+            }
+        }
+    }
+
     fn run_action(&mut self, action: &str) {
         if let Some(cmd) = action.strip_prefix('/') {
             self.slash(cmd);
@@ -3119,6 +3560,7 @@ impl App {
             "clear" => self.slash("clear"),
             "toggle_tools" => self.toggle_tools(),
             "toggle_plan" => self.toggle_plan(),
+            "voice" => self.slash_voice(""),
             "scroll_top" => {
                 self.scroll = 0;
                 self.follow = false;
@@ -3184,6 +3626,7 @@ impl App {
                 self.usage_pane = Some(usage::Pane::new());
                 self.fetch_usage();
             }
+            "voice" => self.slash_voice(args),
             "skills" | "skill" => {
                 let (name, rest) = args
                     .split_once(' ')
@@ -3371,7 +3814,8 @@ impl App {
         let side = if pal.has_side_borders() { 2 } else { 0 };
         let prefix_w = unicode_width::UnicodeWidthStr::width(pal.input_prefix.as_str()) as u16;
         let input_width = area.width.saturating_sub(side + prefix_w) as usize;
-        let (rows, cursor_rc) = self.editor.layout(input_width.max(1));
+        let ghost = self.voice_pending();
+        let (rows, cursor_rc) = self.editor.layout_pending(input_width.max(1), &ghost);
         let input_rows = rows.len().clamp(
             layout.input_height.max(1) as usize,
             layout.input_max_height.max(1) as usize,
@@ -3387,12 +3831,19 @@ impl App {
         } else {
             self.queue.len() as u16 + border
         };
+        let mut left = if self.busy {
+            self.working_line().spans
+        } else {
+            Vec::new()
+        };
+        if let Some(chip) = self.voice_chip(&pal) {
+            if !left.is_empty() {
+                left.push(Span::styled("  ", pal.dim()));
+            }
+            left.extend(chip);
+        }
         let dock_line = plan::dock(
-            if self.busy {
-                self.working_line().spans
-            } else {
-                Vec::new()
-            },
+            left,
             &ah_core::plan::store().snapshot(),
             ah_core::jobs::table().running(),
             ah_core::agents::table().running(),
@@ -3473,7 +3924,11 @@ impl App {
 
         // Input box.
         let watching = self.agent_view.as_ref().map(|v| v.id);
-        let placeholder = if watching.is_some() {
+        let talk = self.talk_key_name();
+        let dictating = format!("Hold {talk} and speak; Enter sends");
+        let placeholder = if self.voice.is_some() {
+            dictating.as_str()
+        } else if watching.is_some() {
             "Type to tell this agent more; Esc goes back"
         } else if self.busy && self.settings().layout.queue_max > 0 {
             "Type the next message; Enter queues it"
@@ -3501,10 +3956,18 @@ impl App {
                 } else {
                     pad.clone()
                 };
-                Line::from(vec![Span::styled(lead, prefix_style), Span::raw(r.clone())])
+                let mut spans = vec![Span::styled(lead, prefix_style)];
+                for (text, ghost) in r {
+                    spans.push(if *ghost {
+                        Span::styled(text.clone(), pal.dim())
+                    } else {
+                        Span::raw(text.clone())
+                    });
+                }
+                Line::from(spans)
             })
             .collect();
-        if self.editor.is_empty() {
+        if self.editor.is_empty() && ghost.is_empty() {
             visible = vec![Line::from(vec![
                 Span::styled(pal.input_prefix.clone(), prefix_style),
                 Span::styled(placeholder, pal.dim()),
