@@ -481,6 +481,14 @@ mod tests {
     use super::join;
 
     #[test]
+    fn hold_falls_back_from_the_setting() {
+        assert_eq!(super::Hold::from_setting("auto"), super::Hold::Probing);
+        assert_eq!(super::Hold::from_setting("push_to_talk"), super::Hold::Push);
+        assert_eq!(super::Hold::from_setting("toggle"), super::Hold::Toggle);
+        assert_eq!(super::Hold::from_setting("nonsense"), super::Hold::Probing);
+    }
+
+    #[test]
     fn phrases_join_with_one_space() {
         let mut s = String::new();
         join(&mut s, "fix the auth middleware");

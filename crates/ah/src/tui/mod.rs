@@ -419,6 +419,10 @@ fn run_inner(
     let plugin_count = reports.iter().filter(|r| r.ok).count() as u32;
     let early_logs = engine.take_plugin_logs();
 
+    // The screen belongs to the TUI, so the microphone's troubles go to the
+    // log rather than to stderr, where they would land on the conversation.
+    ah_voice::set_log(|m| ah_core::log::write(1, format_args!("voice: {m}")));
+
     let (ui_tx, ui_rx) = mpsc::channel::<Msg>();
     let (eng_tx, eng_rx) = mpsc::channel::<EngineCmd>();
     let (perm_tx, perm_rx) = mpsc::channel::<bool>();
@@ -3038,6 +3042,13 @@ impl App {
         if !keys::any_code(&self.binds.talk, k) {
             return false;
         }
+        // A slash command needs its spaces. Without this, `/voice off` and
+        // `/set voice.mode cheap` cannot be typed while dictation is armed,
+        // because the space bar has been taken away to talk with.
+        if self.editor.text.starts_with('/') && !self.voice.as_ref().is_some_and(|v| v.listening())
+        {
+            return false;
+        }
         let Some(v) = self.voice.as_mut() else {
             return false;
         };
@@ -4012,7 +4023,12 @@ impl App {
                 current: &self.settings().model.id,
                 icons: &icons,
             };
-            u.draw(f, area, &pal, &self.usage, &self.stats, &models);
+            let voice = usage::Voice {
+                cost: self.voice_cost + self.voice.as_ref().map(|v| v.cost).unwrap_or(0.0),
+                phrases: self.voice_requests
+                    + self.voice.as_ref().map(|v| v.requests).unwrap_or(0),
+            };
+            u.draw(f, area, &pal, &self.usage, &self.stats, &models, voice);
         }
         if let Some(v) = self.ask.as_mut() {
             self.cursor = v.draw(f, area, &pal);

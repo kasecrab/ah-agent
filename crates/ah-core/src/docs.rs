@@ -48,6 +48,11 @@ pub const TOPICS: &[Topic] = &[
         summary: "session files, resume, naming, compaction, history and model cache",
         text: include_str!("../../../docs/sessions.md"),
     },
+    Topic {
+        name: "voice",
+        summary: "dictation: the talk key, the model that transcribes, what it costs, where the audio goes",
+        text: include_str!("../../../docs/voice.md"),
+    },
 ];
 
 pub fn find(name: &str) -> Option<&'static Topic> {

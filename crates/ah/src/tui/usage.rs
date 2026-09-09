@@ -19,6 +19,14 @@ pub struct Models<'a> {
     pub icons: &'a dyn Fn(&str) -> String,
 }
 
+/// What dictation has cost this session. It is billed to the same key as
+/// everything else, so it belongs on the same page.
+#[derive(Default, Clone, Copy)]
+pub struct Voice {
+    pub cost: f64,
+    pub phrases: u32,
+}
+
 /// Counters for the current session, kept by the TUI as events arrive.
 pub struct Stats {
     pub started: Instant,
@@ -104,6 +112,7 @@ impl Pane {
         usage: &Usage,
         s: &Stats,
         models: &Models<'_>,
+        voice: Voice,
     ) {
         let model = models.current;
         let icons = models.icons;
@@ -160,6 +169,17 @@ impl Pane {
                 tokens(usage.completion_tokens)
             ),
         ));
+        if voice.phrases > 0 {
+            lines.push(row(
+                "voice",
+                format!(
+                    "${:.4} · {} phrase{}",
+                    voice.cost,
+                    voice.phrases,
+                    plural(voice.phrases as u64)
+                ),
+            ));
+        }
         if usage.cached_tokens > 0 || usage.cache_write_tokens > 0 {
             let mut parts = vec![format!("{} read", tokens(usage.cached_tokens))];
             if usage.cache_write_tokens > 0 {

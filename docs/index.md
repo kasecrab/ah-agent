@@ -16,6 +16,7 @@ everything else. These pages are embedded in the binary. `ah docs` lists them an
 | skills | `ah docs skills` | saved prompts in skills directories, `/skills` |
 | plugins | `ah docs plugins` | writing, building and installing wasm plugins: manifest, hooks, payloads, host calls |
 | sessions | `ah docs sessions` | session files, resume, naming, `/clear`, compaction, history and model cache |
+| voice | `ah docs voice` | dictation: the talk key, the model that transcribes, what it costs, where the audio goes |
 
 ## Where things live
 

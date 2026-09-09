@@ -338,7 +338,6 @@ impl Editor {
         let mut cursor_rc = (0, 0);
         let mut cur: Vec<(String, bool)> = Vec::new();
         let mut cur_w = 0usize;
-        let total = self.char_len();
         let head = self.text.chars().take(self.cursor);
         let tail = self.text.chars().skip(self.cursor);
         let chars = head
