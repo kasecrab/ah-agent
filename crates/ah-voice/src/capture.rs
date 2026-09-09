@@ -48,7 +48,10 @@ impl Opened {
 }
 
 enum Stop {
-    Process(Child),
+    Process {
+        child: Child,
+        pump: Option<std::thread::JoinHandle<()>>,
+    },
     #[cfg(feature = "mic")]
     Thread(std::sync::mpsc::Sender<()>, Option<std::thread::JoinHandle<()>>),
 }
@@ -56,9 +59,17 @@ enum Stop {
 impl Stop {
     fn close(self) {
         match self {
-            Stop::Process(mut c) => {
-                let _ = c.kill();
-                let _ = c.wait();
+            Stop::Process { mut child, pump } => {
+                // The recorder runs under `sh`, which may fork rather than
+                // exec. Killing only the shell leaves the recorder holding
+                // the pipe, and the thread reading it blocked for ever, so
+                // the whole group goes.
+                kill_group(child.id() as i32);
+                let _ = child.kill();
+                let _ = child.wait();
+                if let Some(p) = pump {
+                    let _ = p.join();
+                }
             }
             #[cfg(feature = "mic")]
             Stop::Thread(tx, join) => {
@@ -180,12 +191,20 @@ fn open_detected(rate: u32, ring_ms: u64) -> Result<Opened, Error> {
 }
 
 fn open_command(cmd: &str, rate: u32, ring_ms: u64) -> Result<Opened, Error> {
-    let mut child = Command::new("sh")
+    let mut command = Command::new("sh");
+    command
         .arg("-c")
         .arg(cmd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        // Its own group, so stopping it stops whatever it started.
+        command.process_group(0);
+    }
+    let mut child = command
         .spawn()
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -199,7 +218,7 @@ fn open_command(cmd: &str, rate: u32, ring_ms: u64) -> Result<Opened, Error> {
         .take()
         .ok_or_else(|| Error::Device("recorder produced no output".into()))?;
     let (producer, audio) = ring::ring(samples(rate, 1, ring_ms));
-    std::thread::Builder::new()
+    let reader = std::thread::Builder::new()
         .name("ah-voice-mic".into())
         .spawn(move || pump(&mut stdout, &producer))
         .map_err(|e| Error::Device(e.to_string()))?;
@@ -208,7 +227,10 @@ fn open_command(cmd: &str, rate: u32, ring_ms: u64) -> Result<Opened, Error> {
         channels: 1,
         source: cmd.split_whitespace().next().unwrap_or(cmd).to_string(),
         audio,
-        stop: Stop::Process(child),
+        stop: Stop::Process {
+            child,
+            pump: Some(reader),
+        },
     })
 }
 
@@ -243,6 +265,19 @@ fn pump(stdout: &mut impl std::io::Read, producer: &Producer) {
         producer.write(&pcm);
     }
 }
+
+#[cfg(unix)]
+fn kill_group(pid: i32) {
+    unsafe extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+    unsafe {
+        kill(-pid, 9);
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_group(_pid: i32) {}
 
 fn samples(rate: u32, channels: u16, ms: u64) -> usize {
     (rate as u64 * channels as u64 * ms / 1000) as usize
@@ -528,6 +563,32 @@ mod tests {
 
     fn o_source() -> &'static str {
         "the default input"
+    }
+
+    /// A recorder that would run for ever must not outlive `close`. `close`
+    /// joins the thread reading it, so if the recorder survived, this would
+    /// never return rather than merely fail.
+    #[test]
+    fn closing_stops_a_recorder_that_would_never_stop_on_its_own() {
+        let o = open(&req("while true; do printf '\\001\\000'; sleep 0.01; done")).unwrap();
+        let mut pcm = Vec::new();
+        for _ in 0..200 {
+            o.audio.drain(&mut pcm);
+            if !pcm.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(!pcm.is_empty(), "recorder produced nothing");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            o.close();
+            let _ = tx.send(());
+        });
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_secs(5)).is_ok(),
+            "close did not come back: the recorder or its reader outlived it"
+        );
     }
 
     #[test]

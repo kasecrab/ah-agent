@@ -19,14 +19,6 @@ pub struct Models<'a> {
     pub icons: &'a dyn Fn(&str) -> String,
 }
 
-/// What dictation has cost this session. It is billed to the same key as
-/// everything else, so it belongs on the same page.
-#[derive(Default, Clone, Copy)]
-pub struct Voice {
-    pub cost: f64,
-    pub phrases: u32,
-}
-
 /// Counters for the current session, kept by the TUI as events arrive.
 pub struct Stats {
     pub started: Instant,
@@ -37,6 +29,10 @@ pub struct Stats {
     pub lines_added: u64,
     pub lines_removed: u64,
     pub by_model: BTreeMap<String, Usage>,
+    /// Dictation is billed to the same key as everything else, so it is
+    /// counted here rather than kept on its own page.
+    pub voice_cost: f64,
+    pub voice_phrases: u32,
 }
 
 impl Default for Stats {
@@ -46,6 +42,8 @@ impl Default for Stats {
             api_time: Duration::ZERO,
             request_started: None,
             requests: 0,
+            voice_cost: 0.0,
+            voice_phrases: 0,
             tool_calls: 0,
             lines_added: 0,
             lines_removed: 0,
@@ -112,7 +110,6 @@ impl Pane {
         usage: &Usage,
         s: &Stats,
         models: &Models<'_>,
-        voice: Voice,
     ) {
         let model = models.current;
         let icons = models.icons;
@@ -169,14 +166,14 @@ impl Pane {
                 tokens(usage.completion_tokens)
             ),
         ));
-        if voice.phrases > 0 {
+        if s.voice_phrases > 0 {
             lines.push(row(
                 "voice",
                 format!(
                     "${:.4} · {} phrase{}",
-                    voice.cost,
-                    voice.phrases,
-                    plural(voice.phrases as u64)
+                    s.voice_cost,
+                    s.voice_phrases,
+                    plural(s.voice_phrases as u64)
                 ),
             ));
         }

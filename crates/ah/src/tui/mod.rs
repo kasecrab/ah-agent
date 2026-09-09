@@ -348,10 +348,6 @@ struct App {
     /// Dictation, while it is armed. `None` is the whole cost of the feature
     /// being switched off: no thread, no buffer, no open device.
     voice: Option<voice::Session>,
-    /// What the last dictation cost, kept after it is disarmed so `/usage`
-    /// can still show it.
-    voice_cost: f64,
-    voice_requests: u32,
     stats: Stats,
     /// When the current reply started streaming reasoning.
     think_start: Option<Instant>,
@@ -503,8 +499,6 @@ fn run_inner(
         plan_view: None,
         usage_pane: None,
         voice: None,
-        voice_cost: 0.0,
-        voice_requests: 0,
         stats: Stats::default(),
         think_start: None,
         task: String::new(),
@@ -3089,7 +3083,11 @@ impl App {
                 v.phrase(p);
             }
             voice::Event::Delta { seq, text } => v.delta(seq, &text),
-            voice::Event::Done { seq, cost } => v.done(seq, cost),
+            voice::Event::Done { seq, cost } => {
+                v.done(seq, cost);
+                self.stats.voice_cost += cost;
+                self.stats.voice_phrases += 1;
+            }
             voice::Event::Failed { seq, message } => v.failed(seq, message),
         }
         if let Some(n) = self.voice.as_mut().and_then(|v| v.note.take()) {
@@ -3177,8 +3175,6 @@ impl App {
     fn disarm_voice(&mut self) {
         let Some(mut v) = self.voice.take() else { return };
         v.discard();
-        self.voice_cost += v.cost;
-        self.voice_requests += v.requests;
         self.push(Block::Notice(if v.requests == 0 {
             "dictation off".into()
         } else {
@@ -4023,12 +4019,7 @@ impl App {
                 current: &self.settings().model.id,
                 icons: &icons,
             };
-            let voice = usage::Voice {
-                cost: self.voice_cost + self.voice.as_ref().map(|v| v.cost).unwrap_or(0.0),
-                phrases: self.voice_requests
-                    + self.voice.as_ref().map(|v| v.requests).unwrap_or(0),
-            };
-            u.draw(f, area, &pal, &self.usage, &self.stats, &models, voice);
+            u.draw(f, area, &pal, &self.usage, &self.stats, &models);
         }
         if let Some(v) = self.ask.as_mut() {
             self.cursor = v.draw(f, area, &pal);
