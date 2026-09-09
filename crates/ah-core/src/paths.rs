@@ -50,6 +50,33 @@ pub fn sessions_dir() -> PathBuf {
     data_dir().join("sessions")
 }
 
+/// Root of the generated-image store. Images live under their own tree
+/// rather than beside the session files so that listing sessions stays a scan
+/// of one flat directory of `*.jsonl`.
+pub fn images_dir() -> PathBuf {
+    data_dir().join("images")
+}
+
+/// Where one session's generated images go. The id is reduced to characters
+/// that cannot escape the store, since it is read back out of a file.
+pub fn session_images_dir(id: &str) -> PathBuf {
+    let safe: String = id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    images_dir().join(if safe.is_empty() {
+        "unknown".to_string()
+    } else {
+        safe
+    })
+}
+
 pub fn plugin_state_dir() -> PathBuf {
     data_dir().join("plugins")
 }

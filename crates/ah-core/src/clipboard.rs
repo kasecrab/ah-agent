@@ -60,7 +60,7 @@ fn has(program: &str) -> bool {
         .is_ok()
 }
 
-fn looks_like_png(b: &[u8]) -> bool {
+pub(crate) fn looks_like_png(b: &[u8]) -> bool {
     b.starts_with(b"\x89PNG\r\n\x1a\n")
 }
 
