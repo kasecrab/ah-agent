@@ -49,6 +49,7 @@ everywhere.
 | `line_start` | `["ctrl-a", "home"]` | |
 | `line_end` | `["ctrl-e", "end"]` | |
 | `paste_image` | `["ctrl-v"]` | attach the clipboard image as an `[Image #1: 120 KB]` chip |
+| `open_image` | `["ctrl-o"]` | open the newest picture the model drew; with several, opens the `/images` list |
 | `toggle_plan` | `["alt-p"]` | show or hide the plan summary above the input |
 | `voice` | `["alt-v"]` | arm or disarm dictation (same as `/voice`) |
 | `talk` | `["space"]` | held to listen while dictation is armed |

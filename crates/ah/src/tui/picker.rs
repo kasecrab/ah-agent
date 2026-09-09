@@ -42,6 +42,8 @@ pub enum Kind {
     VoiceDevice,
     /// Background shell jobs. Enter opens the output view.
     Jobs,
+    /// Pictures the model drew. Enter opens one in the desktop viewer.
+    Images,
     /// Agents the model started. Enter watches one.
     Agents,
     /// What the status line shows. Space or Enter turns a row on or off.

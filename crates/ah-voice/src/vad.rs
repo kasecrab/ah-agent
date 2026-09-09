@@ -298,10 +298,17 @@ mod tests {
         let mut out = Vec::new();
         c.push(&quiet(600), true, &mut out);
         c.push(&loud(9000), true, &mut out);
-        assert!(out.len() >= 2, "9 s of speech produced {} chunks", out.len());
+        assert!(
+            out.len() >= 2,
+            "9 s of speech produced {} chunks",
+            out.len()
+        );
         let longest = out.iter().map(|c| c.pcm.len()).max().unwrap();
         let cap = (RATE as u64 * cfg().max_chunk_ms / 1000) as usize;
-        assert!(longest <= cap + cfg().frame_len(), "chunk of {longest} samples");
+        assert!(
+            longest <= cap + cfg().frame_len(),
+            "chunk of {longest} samples"
+        );
     }
 
     #[test]
@@ -330,7 +337,10 @@ mod tests {
         let mut out = Vec::new();
         c.push(&quiet(600), true, &mut out);
         c.push(&loud(700), true, &mut out);
-        assert!(out.is_empty(), "no pause yet, so nothing should have closed");
+        assert!(
+            out.is_empty(),
+            "no pause yet, so nothing should have closed"
+        );
         let tail = c.flush().expect("release should hand over the open phrase");
         assert!(tail.speech_ms >= 250);
     }

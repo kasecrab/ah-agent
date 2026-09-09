@@ -5,6 +5,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthChar;
 
+use super::image::{ImageData, ImageLayout};
 use super::theme::Palette;
 
 pub enum Block {
@@ -36,6 +37,9 @@ pub enum Block {
     },
     Notice(String),
     Error(String),
+    /// A picture the model drew. Boxed because the payload dwarfs every other
+    /// variant and they would all grow to match.
+    Image(Box<ImageData>),
 }
 
 pub struct Entry {
@@ -54,6 +58,60 @@ pub struct View {
     pub wrap: bool,
     pub markdown: bool,
     pub code_highlight: bool,
+    pub image: ImageView,
+}
+
+/// Everything a picture's layout depends on, so that a resize or a change of
+/// terminal invalidates the wrapped-line cache like any other option.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct ImageView {
+    /// False when the terminal draws no pictures: only the chip is laid out.
+    pub inline: bool,
+    /// Terminal cell size in pixels, `(0, 0)` when it would not say.
+    pub cell_px: (u16, u16),
+    pub max_cols: u16,
+    pub max_rows: u16,
+}
+
+impl Default for ImageView {
+    fn default() -> Self {
+        Self {
+            inline: false,
+            cell_px: (0, 0),
+            max_cols: 0,
+            max_rows: 20,
+        }
+    }
+}
+
+/// Where the picture sits inside an image block's lines, or `None` when it is
+/// shown as a one-line chip: no protocol, or no pixel size to lay it out with.
+pub fn image_layout(block: &Block, width: u16, view: &View) -> Option<ImageLayout> {
+    let Block::Image(d) = block else {
+        return None;
+    };
+    if !view.image.inline {
+        return None;
+    }
+    let cell = if view.image.cell_px.0 > 0 && view.image.cell_px.1 > 0 {
+        view.image.cell_px
+    } else {
+        super::image::CELL_FALLBACK
+    };
+    let room = width.saturating_sub(2).max(1);
+    let max_cols = if view.image.max_cols > 0 {
+        room.min(view.image.max_cols)
+    } else {
+        room
+    };
+    let (cols, rows) = super::image::cells(d.px, cell, max_cols, view.image.max_rows.max(1))?;
+    Some(ImageLayout {
+        id: d.id,
+        first: 0,
+        cols,
+        rows,
+        px: d.px,
+    })
 }
 
 impl Entry {
@@ -76,9 +134,17 @@ impl Entry {
                 | (view.show_reasoning as u64) << 1
                 | (view.wrap as u64) << 2
                 | (view.markdown as u64) << 3
-                | (view.code_highlight as u64) << 4,
+                | (view.code_highlight as u64) << 4
+                | (view.image.inline as u64) << 5,
         );
         mix(&mut k, view.tool_output_lines as u64);
+        mix(
+            &mut k,
+            view.image.cell_px.0 as u64
+                | (view.image.cell_px.1 as u64) << 16
+                | (view.image.max_cols as u64) << 32
+                | (view.image.max_rows as u64) << 48,
+        );
         match &self.block {
             Block::User(s) | Block::Notice(s) | Block::Error(s) => mix(&mut k, s.len() as u64),
             Block::Summary {
@@ -100,6 +166,13 @@ impl Entry {
                 mix(&mut k, reasoning.len() as u64);
                 mix(&mut k, *streaming as u64);
                 mix(&mut k, *think_ms);
+            }
+            // The id is handed out once per picture and the file behind it
+            // never changes, so it is a complete fingerprint on its own; the
+            // size only guards against an id reused after `/clear`.
+            Block::Image(d) => {
+                mix(&mut k, d.id as u64);
+                mix(&mut k, d.bytes as u64);
             }
             Block::Tool {
                 call,
@@ -543,6 +616,23 @@ fn render(block: &Block, width: usize, view: &View, pal: &Palette) -> Vec<Line<'
             pal.bold(pal.error),
             Style::default().fg(pal.error),
         )),
+        Block::Image(d) => {
+            // The picture itself is drawn by escape codes after the frame.
+            // These rows only reserve the room and blank what was there, so
+            // the transcript's line arithmetic does not depend on whether the
+            // terminal actually painted anything.
+            if let Some(l) = image_layout(block, width as u16, view) {
+                out.extend(std::iter::repeat_with(Line::default).take(l.rows as usize));
+            }
+            // The key hint belongs on a chip that stands in for the picture,
+            // not under one the terminal has already drawn.
+            let key = if view.image.inline { "" } else { &d.open_key };
+            out.push(Line::from(Span::styled(
+                super::image::chip(d, key),
+                pal.dim(),
+            )));
+            out.push(Line::default());
+        }
     }
     out
 }
@@ -574,6 +664,7 @@ mod tests {
             wrap: true,
             markdown: false,
             code_highlight: false,
+            image: ImageView::default(),
         };
         render(&block, 80, &view, &pal)[0].to_string()
     }
@@ -606,6 +697,7 @@ mod tests {
             wrap: true,
             markdown: false,
             code_highlight: false,
+            image: ImageView::default(),
         };
         render(&block, 80, &view, &pal)
             .iter()
@@ -626,6 +718,88 @@ mod tests {
         assert!(open[0].ends_with("Ctrl-T hides it"), "{open:?}");
         assert!(open.iter().any(|l| l.contains("did a thing")), "{open:?}");
         assert!(open.iter().any(|l| l.contains("then another")), "{open:?}");
+    }
+
+    fn image_block(px: (u32, u32)) -> Block {
+        Block::Image(Box::new(ImageData {
+            id: 3,
+            path: std::path::PathBuf::from("/tmp/a.png"),
+            mime: "image/png".into(),
+            px,
+            bytes: 640 * 1024,
+            open_key: "Ctrl-O".into(),
+        }))
+    }
+
+    fn image_view(inline: bool) -> View {
+        View {
+            show_tool_output: false,
+            tool_output_lines: 5,
+            show_reasoning: false,
+            wrap: true,
+            markdown: false,
+            code_highlight: false,
+            image: ImageView {
+                inline,
+                cell_px: (10, 20),
+                max_cols: 0,
+                max_rows: 20,
+            },
+        }
+    }
+
+    #[test]
+    fn a_terminal_that_draws_nothing_gets_one_line_and_the_key() {
+        let pal = Palette::from_theme(&ah_core::abi::Theme::default());
+        let lines = render(&image_block((1024, 768)), 80, &image_view(false), &pal);
+        // The chip and the blank line after it.
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        let chip = lines[0].to_string();
+        assert!(chip.contains("1024×768"), "{chip}");
+        assert!(chip.contains("Ctrl-O opens it"), "{chip}");
+    }
+
+    #[test]
+    fn the_rows_reserved_are_the_rows_the_picture_is_placed_on() {
+        let pal = Palette::from_theme(&ah_core::abi::Theme::default());
+        let view = image_view(true);
+        for px in [(1024, 768), (100, 4000), (4000, 100), (1, 1), (33, 47)] {
+            for width in [20u16, 40, 100] {
+                let block = image_block(px);
+                let lines = render(&block, width as usize, &view, &pal);
+                let l = image_layout(&block, width, &view).expect("a layout");
+                // Reserved rows, then the caption, then a blank line. If this
+                // ever drifts, pictures land off the rows they were given.
+                assert_eq!(lines.len(), l.rows as usize + 2, "{px:?} at {width}");
+                for line in &lines[..l.rows as usize] {
+                    assert_eq!(line.to_string(), "", "{px:?} at {width}");
+                }
+                // Under a picture the caption does not repeat the key.
+                assert!(!lines[l.rows as usize].to_string().contains("opens it"));
+            }
+        }
+        // No pixel size: nothing to lay out, so the chip stands in.
+        let block = image_block((0, 0));
+        assert!(image_layout(&block, 80, &view).is_none());
+        assert_eq!(render(&block, 80, &view, &pal).len(), 2);
+    }
+
+    #[test]
+    fn an_image_is_re_wrapped_when_the_terminal_changes_and_not_otherwise() {
+        let pal = Palette::from_theme(&ah_core::abi::Theme::default());
+        let mut e = Entry::new(image_block((1024, 768)));
+        let mut view = image_view(true);
+        // Room enough that the shape of the picture, not the cap, sets the
+        // row count — otherwise both cell sizes hit the cap and say nothing.
+        view.image.max_rows = 200;
+        let first = e.lines(80, &view, &pal, 1).len();
+        assert_eq!(e.lines(80, &view, &pal, 1).len(), first);
+        // A different cell size is a different layout.
+        let mut wider = view;
+        wider.image.cell_px = (20, 20);
+        assert_ne!(e.lines(80, &wider, &pal, 1).len(), first);
+        // And a terminal that draws nothing is the chip again.
+        assert_eq!(e.lines(80, &image_view(false), &pal, 1).len(), 2);
     }
 
     #[test]

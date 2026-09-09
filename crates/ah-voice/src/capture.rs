@@ -53,7 +53,10 @@ enum Stop {
         pump: Option<std::thread::JoinHandle<()>>,
     },
     #[cfg(feature = "mic")]
-    Thread(std::sync::mpsc::Sender<()>, Option<std::thread::JoinHandle<()>>),
+    Thread(
+        std::sync::mpsc::Sender<()>,
+        Option<std::thread::JoinHandle<()>>,
+    ),
 }
 
 impl Stop {
@@ -127,10 +130,7 @@ const RECORDERS: &[(&str, &str)] = &[
         "parec",
         "parec --format=s16le --rate={rate} --channels=1 --raw",
     ),
-    (
-        "arecord",
-        "arecord -q -t raw -f S16_LE -r {rate} -c 1 -",
-    ),
+    ("arecord", "arecord -q -t raw -f S16_LE -r {rate} -c 1 -"),
     (
         "ffmpeg",
         "ffmpeg -v quiet -f {ffin} -i {ffdev} -ac 1 -ar {rate} -f s16le -",
@@ -204,15 +204,13 @@ fn open_command(cmd: &str, rate: u32, ring_ms: u64) -> Result<Opened, Error> {
         // Its own group, so stopping it stops whatever it started.
         command.process_group(0);
     }
-    let mut child = command
-        .spawn()
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                Error::NoTool(format!("cannot run `{cmd}`: {e}"))
-            } else {
-                Error::Device(format!("cannot run `{cmd}`: {e}"))
-            }
-        })?;
+    let mut child = command.spawn().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            Error::NoTool(format!("cannot run `{cmd}`: {e}"))
+        } else {
+            Error::Device(format!("cannot run `{cmd}`: {e}"))
+        }
+    })?;
     let mut stdout = child
         .stdout
         .take()
@@ -318,7 +316,8 @@ mod native {
     pub fn open(req: &Request, want: u32) -> Result<Opened, Error> {
         let device = req.device.clone();
         let ring_ms = req.ring_ms;
-        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(u32, u16, String, Consumer), Error>>();
+        let (ready_tx, ready_rx) =
+            std::sync::mpsc::channel::<Result<(u32, u16, String, Consumer), Error>>();
         let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
         let join = std::thread::Builder::new()
             .name("ah-voice-mic".into())

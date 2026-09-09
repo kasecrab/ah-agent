@@ -367,6 +367,8 @@ pub struct Keys {
     pub line_end: Vec<String>,
     /// Attach the image on the clipboard to the next message.
     pub paste_image: Vec<String>,
+    /// Open a picture the model drew in whatever the desktop uses.
+    pub open_image: Vec<String>,
     /// Show or hide the plan line above the input.
     pub toggle_plan: Vec<String>,
     /// Arm and disarm dictation.
@@ -403,6 +405,7 @@ impl Default for Keys {
             line_start: v(&["ctrl-a", "home"]),
             line_end: v(&["ctrl-e", "end"]),
             paste_image: v(&["ctrl-v"]),
+            open_image: v(&["ctrl-o"]),
             toggle_plan: v(&["alt-p"]),
             voice: v(&["alt-v"]),
             talk: v(&["space"]),

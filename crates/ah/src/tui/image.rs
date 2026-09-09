@@ -44,6 +44,9 @@ pub struct ImageData {
     /// since there is no aspect ratio to lay the picture out with.
     pub px: (u32, u32),
     pub bytes: usize,
+    /// How the chip says to open this picture, e.g. `"Ctrl-O"`. Filled in
+    /// where the key bindings are known, which is not here.
+    pub open_key: String,
 }
 
 /// Where a picture sits inside its block's lines, or `None` when the block is
@@ -90,6 +93,17 @@ impl Placement {
             height: self.visible,
         }
     }
+}
+
+/// First image id for this process. kitty ids are shared by every program
+/// writing to the terminal, so they are seeded from the pid and the clock
+/// rather than starting at one in every window.
+pub fn id_base() -> u32 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    ((std::process::id() << 16) ^ (nanos & 0xffff)) | 1
 }
 
 /// What this terminal draws. `env` is injected so a test does not have to
@@ -225,6 +239,30 @@ pub fn kitty_unplace(id: u32) -> String {
 pub fn kitty_delete(id: u32) -> String {
     format!("\x1b_Ga=d,d=I,i={id},q=2\x1b\\")
 }
+
+/// kitty: drop every placement on screen, keeping the pixels.
+pub fn kitty_unplace_all() -> &'static str {
+    "\x1b_Ga=d,d=a,q=2\x1b\\"
+}
+
+/// Remember the protocol for the panic hook, which runs with no access to the
+/// app and must not write an APC string to a terminal that cannot read one.
+pub fn remember_proto(p: Proto) {
+    PROTO.store(p as u8, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Free every picture this process put in the terminal. Safe to call from a
+/// panic hook: it writes nothing unless a kitty terminal was detected.
+pub fn cleanup_on_panic() {
+    if PROTO.load(std::sync::atomic::Ordering::Relaxed) == Proto::Kitty as u8 {
+        use std::io::Write as _;
+        let mut out = std::io::stdout();
+        let _ = out.write_all(kitty_delete_all().as_bytes());
+        let _ = out.flush();
+    }
+}
+
+static PROTO: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(Proto::None as u8);
 
 /// kitty: drop everything, pixels included. For the panic hook, which has no
 /// list of what was on screen.
@@ -377,6 +415,7 @@ mod tests {
             mime: "image/png".into(),
             px,
             bytes,
+            open_key: String::new(),
         }
     }
 

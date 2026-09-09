@@ -16,9 +16,9 @@ pub mod ring;
 pub mod vad;
 pub mod wav;
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::Arc;
 use std::time::Duration;
 
 /// One run of speech, encoded and ready to send.
@@ -272,7 +272,8 @@ mod tests {
                 v.push(((t * 300.0 * 2.0 * std::f64::consts::PI).sin() * 9000.0) as i16);
             }
         };
-        let hush = |v: &mut Vec<i16>, ms: usize| v.extend(std::iter::repeat_n(0i16, rate * ms / 1000));
+        let hush =
+            |v: &mut Vec<i16>, ms: usize| v.extend(std::iter::repeat_n(0i16, rate * ms / 1000));
         hush(&mut pcm, 500);
         tone(&mut pcm, 800);
         hush(&mut pcm, 700);

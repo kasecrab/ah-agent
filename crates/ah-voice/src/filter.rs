@@ -126,7 +126,10 @@ mod tests {
     fn real_speech_is_left_alone() {
         assert!(!is_stock("thank you for the review, it helped"));
         assert!(!is_stock("fix the auth middleware"));
-        assert_eq!(clean("fix the auth middleware", true).unwrap(), "fix the auth middleware");
+        assert_eq!(
+            clean("fix the auth middleware", true).unwrap(),
+            "fix the auth middleware"
+        );
     }
 
     #[test]
@@ -148,7 +151,10 @@ mod tests {
 
     #[test]
     fn filtering_off_keeps_everything_but_blanks() {
-        assert_eq!(clean("Thanks for watching", false).unwrap(), "Thanks for watching");
+        assert_eq!(
+            clean("Thanks for watching", false).unwrap(),
+            "Thanks for watching"
+        );
         assert!(clean("   ", false).is_none());
     }
 }

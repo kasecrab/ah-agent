@@ -17,6 +17,8 @@ mod voice;
 mod working;
 
 use std::collections::HashSet;
+use std::io::Write as _;
+use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
@@ -80,6 +82,7 @@ const COMMANDS: &[(&str, &str, bool)] = &[
         true,
     ),
     ("help", "list commands and keys", false),
+    ("images", "pictures in this conversation", false),
     ("init", "write an AGENTS.md for this project", false),
     ("keys", "show key bindings", false),
     (
@@ -234,6 +237,7 @@ struct Binds {
     line_start: Vec<Chord>,
     line_end: Vec<Chord>,
     paste_image: Vec<Chord>,
+    open_image: Vec<Chord>,
     toggle_plan: Vec<Chord>,
     voice: Vec<Chord>,
     talk: Vec<Chord>,
@@ -269,6 +273,7 @@ impl Binds {
             line_start: p(&k.line_start),
             line_end: p(&k.line_end),
             paste_image: p(&k.paste_image),
+            open_image: p(&k.open_image),
             toggle_plan: p(&k.toggle_plan),
             voice: p(&k.voice),
             talk: p(&k.talk),
@@ -372,7 +377,36 @@ struct App {
     dirty: bool,
     quit: bool,
     size: (u16, u16),
+    /// What this terminal can draw, decided once at start-up.
+    img_proto: image::Proto,
+    /// Terminal cell size in pixels, `(0, 0)` when it would not say.
+    cell_px: (u16, u16),
+    /// Pictures the last frame left on screen.
+    img_prev: Vec<image::Placement>,
+    /// Pictures this frame wants: filled while drawing, drained after it.
+    img_cur: Vec<image::Placement>,
+    /// Scratch for the placement pass, so a frame allocates nothing.
+    img_scan: Vec<(usize, Option<image::ImageLayout>)>,
+    /// Ids whose pixels the terminal already holds.
+    img_sent: Vec<u32>,
+    /// Base64 of each picture, read from its file the first time the terminal
+    /// needs it. Resuming a session with fifty pictures encodes none of them
+    /// until they are actually on screen.
+    img_payload: std::collections::HashMap<u32, String>,
+    /// Send everything again next frame: a resize, or an overlay just closed.
+    img_force: bool,
+    /// Ids are handed out from a per-process base, so two ah windows in one
+    /// terminal cannot claim each other's pictures.
+    img_id_next: u32,
+    /// iTerm2 has no ids, so a moving picture means re-sending the payload.
+    /// This is when the last one went, and when to try again once it settles.
+    img_settled: Instant,
+    img_retry_at: Option<Instant>,
 }
+
+/// How long iTerm2 waits for the scroll to stop before re-sending a picture.
+/// Without it a wheel spin re-uploads every payload at thirty frames a second.
+const ITERM_SETTLE: Duration = Duration::from_millis(120);
 
 pub fn run(
     o: &crate::Overrides,
@@ -383,10 +417,13 @@ pub fn run(
     let mut terminal = ratatui::init();
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        image::cleanup_on_panic();
         ratatui::restore();
         hook(info);
     }));
     let r = run_inner(o, resume, initial_prompt, &mut terminal);
+    // Before leaving the alternate screen, while the pictures are still ours.
+    image::cleanup_on_panic();
     disable_extras();
     ratatui::restore();
     let hint = r?;
@@ -462,6 +499,7 @@ fn run_inner(
             wrap: settings.layout.wrap,
             markdown: settings.layout.markdown,
             code_highlight: settings.layout.code_highlight,
+            image: transcript::ImageView::default(),
         },
         stack,
         entries: Vec::new(),
@@ -518,6 +556,17 @@ fn run_inner(
         dirty: true,
         quit: false,
         size: (0, 0),
+        img_proto: image::Proto::None,
+        cell_px: (0, 0),
+        img_prev: Vec::new(),
+        img_cur: Vec::new(),
+        img_scan: Vec::new(),
+        img_sent: Vec::new(),
+        img_payload: std::collections::HashMap::new(),
+        img_force: false,
+        img_id_next: image::id_base(),
+        img_settled: Instant::now(),
+        img_retry_at: None,
     };
     app.refresh_window();
 
@@ -542,6 +591,8 @@ fn run_inner(
         .map(|m| task_from(&m.content))
         .unwrap_or_default();
     app.set_title();
+    // Before the history, so a picture in it is laid out for this terminal.
+    app.update_image_view();
     app.load_history(&resumed);
     if app.entries.is_empty() {
         app.push(Block::Notice(format!(
@@ -713,6 +764,9 @@ impl App {
                             think_ms: 0,
                         });
                     }
+                    for entry in &m.images {
+                        self.push_stored_image(entry);
+                    }
                     for c in &m.tool_calls {
                         self.push(Block::Tool {
                             call: c.clone(),
@@ -825,6 +879,197 @@ impl App {
             .unwrap_or_default()
     }
 
+    /// Re-read everything a picture's layout depends on. Changing it
+    /// invalidates every image block's wrapped-line cache, so it runs on a
+    /// resize and a settings change, never per frame.
+    fn update_image_view(&mut self) {
+        let s = self.settings().images.clone();
+        self.img_proto = image::detect(s.inline, &|k| std::env::var(k).ok());
+        image::remember_proto(self.img_proto);
+        self.cell_px = image::query_cell_px(&s.cell_px);
+        // Never more than two thirds of the window: a picture taller than the
+        // viewport could never be shown whole, and under iTerm2 that means
+        // never shown at all.
+        let cap = (self.size.1 as u32 * 2 / 3).max(3) as u16;
+        self.view.image = transcript::ImageView {
+            inline: self.img_proto != image::Proto::None,
+            cell_px: self.cell_px,
+            max_cols: s.max_cols,
+            max_rows: s.max_rows.max(1).min(cap),
+        };
+        self.dirty = true;
+    }
+
+    fn next_image_id(&mut self) -> u32 {
+        let id = self.img_id_next;
+        self.img_id_next = self.img_id_next.wrapping_add(1).max(1);
+        id
+    }
+
+    /// Add a picture to the transcript. `px` of `(0, 0)` means the header
+    /// could not be read, which shows the chip instead.
+    fn push_image(&mut self, path: PathBuf, mime: String, px: (u32, u32), bytes: usize) {
+        let id = self.next_image_id();
+        let open_key = self
+            .settings()
+            .keys
+            .open_image
+            .first()
+            .cloned()
+            .unwrap_or_default();
+        self.push(Block::Image(Box::new(image::ImageData {
+            id,
+            path,
+            mime,
+            px,
+            bytes,
+            open_key,
+        })));
+    }
+
+    /// A picture stored in a message, read off disk. Only the first bytes are
+    /// read here: the payload waits until the terminal asks for it.
+    fn push_stored_image(&mut self, entry: &str) {
+        let Some(path) = ah_core::image::resolve(entry) else {
+            return;
+        };
+        let (px, bytes) = match std::fs::File::open(&path) {
+            Ok(mut f) => {
+                use std::io::Read as _;
+                let len = f.metadata().map(|m| m.len() as usize).unwrap_or(0);
+                let mut head = [0u8; 32];
+                let n = f.read(&mut head).unwrap_or(0);
+                (ah_core::image::size(&head[..n]).unwrap_or((0, 0)), len)
+            }
+            // The file has been deleted since; the chip still says what was
+            // there and where it was.
+            Err(_) => ((0, 0), 0),
+        };
+        let mime = match path.extension().and_then(|e| e.to_str()) {
+            Some("png") => "image/png",
+            Some("jpg") | Some("jpeg") => "image/jpeg",
+            Some("webp") => "image/webp",
+            Some("gif") => "image/gif",
+            _ => "image",
+        };
+        self.push_image(path, mime.into(), px, bytes);
+    }
+
+    fn image_by_id(&self, id: u32) -> Option<&image::ImageData> {
+        self.entries.iter().find_map(|e| match &e.block {
+            Block::Image(d) if d.id == id => Some(&**d),
+            _ => None,
+        })
+    }
+
+    /// Base64 of a picture, read from its file once and kept.
+    fn image_payload(&mut self, id: u32) -> Option<&str> {
+        if !self.img_payload.contains_key(&id) {
+            let path = self.image_by_id(id)?.path.clone();
+            let bytes = std::fs::read(&path).ok()?;
+            self.img_payload
+                .insert(id, ah_core::clipboard::base64(&bytes));
+        }
+        self.img_payload.get(&id).map(|s| s.as_str())
+    }
+
+    /// Drop every placement but keep what the terminal holds, so the next
+    /// frame puts the pictures back where they now belong.
+    fn unplace_images(&mut self) {
+        if self.img_proto == image::Proto::Kitty && !self.img_prev.is_empty() {
+            let mut out = std::io::stdout();
+            let _ = out.write_all(image::kitty_unplace_all().as_bytes());
+            let _ = out.flush();
+        }
+        self.img_prev.clear();
+        self.img_force = true;
+    }
+
+    /// Forget every picture: free the terminal's copies and this side's
+    /// caches. For `/clear`, a session switch, and leaving.
+    fn images_forget(&mut self) {
+        if self.img_proto == image::Proto::Kitty && !self.img_sent.is_empty() {
+            let mut s = String::new();
+            for id in &self.img_sent {
+                s.push_str(&image::kitty_delete(*id));
+            }
+            let mut out = std::io::stdout();
+            let _ = out.write_all(s.as_bytes());
+            let _ = out.flush();
+        }
+        self.img_sent.clear();
+        self.img_prev.clear();
+        self.img_cur.clear();
+        self.img_payload.clear();
+        self.img_force = true;
+    }
+
+    /// Put this frame's pictures on screen. One buffer, one write, one flush:
+    /// a megabyte of base64 through `execute!` would be a syscall per escape.
+    fn emit_images(&mut self, out: &mut std::io::Stdout) {
+        if self.img_proto == image::Proto::None {
+            return;
+        }
+        let want = std::mem::take(&mut self.img_cur);
+        if want == self.img_prev && !self.img_force {
+            self.img_prev = want;
+            return;
+        }
+        let mut s = String::new();
+        match self.img_proto {
+            image::Proto::Kitty => {
+                for p in &self.img_prev {
+                    if !want.iter().any(|q| q.id == p.id) {
+                        s.push_str(&image::kitty_unplace(p.id));
+                    }
+                }
+                for p in &want {
+                    if !self.img_sent.contains(&p.id) {
+                        // Sent once; every later frame is a placement of sixty
+                        // bytes, whatever the picture weighs.
+                        if let Some(b64) = self.image_payload(p.id) {
+                            s.push_str(&image::kitty_transmit(p.id, b64));
+                            self.img_sent.push(p.id);
+                        }
+                    }
+                    if self.img_force || !self.img_prev.contains(p) {
+                        s.push_str(&format!("\x1b[{};{}H", p.y + 1, p.x + 1));
+                        s.push_str(&image::kitty_place(p));
+                    }
+                }
+            }
+            image::Proto::Iterm2 => {
+                // No ids and no crop: the picture lives in the cells, so it
+                // goes again whenever it moves, and only when it is whole.
+                let moving = want.iter().any(|p| !self.img_prev.contains(p));
+                if moving && self.img_settled.elapsed() < ITERM_SETTLE {
+                    self.img_retry_at = Some(Instant::now() + ITERM_SETTLE);
+                    self.img_prev = Vec::new();
+                    return;
+                }
+                for p in want.iter().filter(|p| p.whole()) {
+                    if !self.img_force && self.img_prev.contains(p) {
+                        continue;
+                    }
+                    let bytes = self.image_by_id(p.id).map(|d| d.bytes).unwrap_or(0);
+                    if let Some(b64) = self.image_payload(p.id) {
+                        let seq = image::iterm2(b64, bytes, p.cols, p.rows);
+                        s.push_str(&format!("\x1b[{};{}H", p.y + 1, p.x + 1));
+                        s.push_str(&seq);
+                    }
+                }
+                self.img_settled = Instant::now();
+            }
+            image::Proto::None => {}
+        }
+        if !s.is_empty() {
+            let _ = out.write_all(s.as_bytes());
+            let _ = out.flush();
+        }
+        self.img_prev = want;
+        self.img_force = false;
+    }
+
     /// Re-derive palette, binds and view flags from the current settings.
     fn refresh_from_settings(&mut self, plugin_binds: &[(String, String)]) {
         self.refresh_window();
@@ -839,7 +1084,9 @@ impl App {
             wrap: s.layout.wrap,
             markdown: s.layout.markdown,
             code_highlight: s.layout.code_highlight,
+            image: self.view.image,
         };
+        self.update_image_view();
         if s.layout.mouse != self.mouse_on {
             use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
             let mut out = std::io::stdout();
@@ -998,6 +1245,88 @@ impl App {
         }
     }
 
+    /// Ctrl-O: open the picture the model drew. With more than one, ask which.
+    fn open_image(&mut self) {
+        let ids: Vec<u32> = self
+            .entries
+            .iter()
+            .filter_map(|e| match &e.block {
+                Block::Image(d) => Some(d.id),
+                _ => None,
+            })
+            .collect();
+        match ids.len() {
+            0 => self.push(Block::Notice("no pictures in this conversation".into())),
+            1 => self.open_image_by_id(ids[0]),
+            _ => self.open_images_picker(),
+        }
+    }
+
+    fn open_image_by_id(&mut self, id: u32) {
+        let Some(path) = self.image_by_id(id).map(|d| d.path.clone()) else {
+            return;
+        };
+        if !path.is_file() {
+            self.push(Block::Error(format!("{} is gone", path.display())));
+            return;
+        }
+        let custom = self.settings().images.open_cmd.clone();
+        let shown = path.display().to_string();
+        match image::opener(std::env::consts::OS, &custom, &shown) {
+            Some((prog, args)) => {
+                // Null stdio: a viewer must not touch the terminal ah owns.
+                let r = std::process::Command::new(prog)
+                    .args(args)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn();
+                match r {
+                    Ok(_) => self.push(Block::Notice(format!("opened {shown}"))),
+                    Err(e) => self.push(Block::Error(format!("open failed: {e} · {shown}"))),
+                }
+            }
+            None => self.push(Block::Notice(format!(
+                "{shown} · set images.open_cmd to open it from here"
+            ))),
+        }
+    }
+
+    fn open_images_picker(&mut self) {
+        let rows: Vec<Row> = self
+            .entries
+            .iter()
+            .filter_map(|e| match &e.block {
+                Block::Image(d) => {
+                    let label = format!(
+                        "{} · {}",
+                        image::chip(d, ""),
+                        d.path
+                            .file_name()
+                            .map(|f| f.to_string_lossy().into_owned())
+                            .unwrap_or_default()
+                    );
+                    Some(Row {
+                        id: d.id.to_string(),
+                        search: label.clone(),
+                        label,
+                        style: None,
+                        cols: Vec::new(),
+                    })
+                }
+                _ => None,
+            })
+            .collect();
+        if rows.is_empty() {
+            self.push(Block::Notice("no pictures in this conversation".into()));
+            return;
+        }
+        let mut p = Picker::new(Kind::Images, "pictures", "", rows);
+        p.hint = "Enter opens · Esc closes".into();
+        self.picker = Some(p);
+        self.dirty = true;
+    }
+
     /// Send the oldest queued message once the engine is free.
     fn drain_queue(&mut self) {
         if !self.busy
@@ -1035,6 +1364,16 @@ impl App {
             // back to waiting on the channel instead of animating.
             let running = self.busy && self.ask.is_none();
             let voice_wake = self.voice.as_ref().and_then(|v| v.wake_in());
+            // iTerm2 waits for the scroll to settle before the payload goes
+            // again; this is the frame that puts the picture back.
+            let img_wake = self
+                .img_retry_at
+                .map(|t| t.saturating_duration_since(Instant::now()));
+            if self.img_retry_at.is_some_and(|t| t <= Instant::now()) {
+                self.img_retry_at = None;
+                self.img_force = true;
+                self.dirty = true;
+            }
             if self.dirty {
                 let throttle = Duration::from_millis(self.settings().layout.stream_redraw_ms);
                 let stream = running || self.job_view.is_some();
@@ -1047,7 +1386,12 @@ impl App {
             if self.quit {
                 return Ok(());
             }
-            let msg = if running || self.dirty || self.job_view.is_some() || voice_wake.is_some() {
+            let msg = if running
+                || self.dirty
+                || self.job_view.is_some()
+                || voice_wake.is_some()
+                || img_wake.is_some()
+            {
                 let mut wait = if self.dirty {
                     Duration::from_millis(self.settings().layout.stream_redraw_ms.max(1))
                 } else if self.job_view.is_some() && !running {
@@ -1059,6 +1403,9 @@ impl App {
                 };
                 if let Some(v) = voice_wake {
                     wait = wait.min(v);
+                }
+                if let Some(v) = img_wake {
+                    wait = wait.min(v.max(Duration::from_millis(10)));
                 }
                 match rx.recv_timeout(wait) {
                     Ok(m) => Some(m),
@@ -1109,6 +1456,9 @@ impl App {
         let _ = crossterm::execute!(out, BeginSynchronizedUpdate);
         let _ = terminal.hide_cursor();
         let drawn = terminal.draw(|f| self.draw(f));
+        // After the text and inside the same synchronized update, so a frame
+        // with a hole in it is never on screen.
+        self.emit_images(&mut out);
         // ratatui shows the cursor before it moves it, which flashes it
         // wherever the frame's last write landed — the Compacting line, while
         // that is the only thing changing. So the frame is drawn without a
@@ -1440,10 +1790,7 @@ impl App {
                         },
                         pal.dim(),
                     ),
-                    (
-                        format!(" ${:<6.2} out", m.completion_per_m),
-                        pal.dim(),
-                    ),
+                    (format!(" ${:<6.2} out", m.completion_per_m), pal.dim()),
                 ],
             })
             .collect();
@@ -1843,6 +2190,11 @@ impl App {
                     Kind::Jobs => {
                         if let Some(id) = chosen.and_then(|c| c.parse().ok()) {
                             self.open_job_view(id);
+                        }
+                    }
+                    Kind::Images => {
+                        if let Some(id) = chosen.and_then(|c| c.parse().ok()) {
+                            self.open_image_by_id(id);
                         }
                     }
                     // Enter toggles a row and leaves the list open, like Space.
@@ -2419,6 +2771,7 @@ impl App {
                 self.push(Block::Notice(s));
             }
             UiEvent::Resumed { id, name, messages } => {
+                self.images_forget();
                 self.entries.clear();
                 self.usage = Usage::default();
                 self.stats = Stats::default();
@@ -2462,8 +2815,16 @@ impl App {
                     think_ms: 0,
                 });
             }
-            // Drawn by the transcript, once the image half lands.
-            AgentEvent::Image { .. } => {}
+            AgentEvent::Image {
+                path,
+                mime,
+                width,
+                height,
+                bytes,
+            } => {
+                self.finish_thinking();
+                self.push_image(path, mime, (width, height), bytes);
+            }
             AgentEvent::Text(t) => {
                 self.set_state(State::Streaming);
                 self.finish_thinking();
@@ -2628,6 +2989,10 @@ impl App {
             }
             Event::Resize(w, h) => {
                 self.size = (w, h);
+                // The cell size can change with the font, and every picture
+                // has to be laid out and placed again either way.
+                self.update_image_view();
+                self.unplace_images();
                 self.dirty = true;
             }
             Event::Mouse(m) => {
@@ -3146,12 +3511,11 @@ impl App {
                 "dictation sends recorded audio to {model} through OpenRouter.                  It is billed to your key like any other request, and is never                  written to a session file or the log."
             )));
         }
-        let provider: std::sync::Arc<dyn ah_core::provider::Provider> = std::sync::Arc::new(
-            ah_core::provider::openrouter::OpenRouter::new(
+        let provider: std::sync::Arc<dyn ah_core::provider::Provider> =
+            std::sync::Arc::new(ah_core::provider::openrouter::OpenRouter::new(
                 self.settings().model.base_url.clone(),
                 key,
-            ),
-        );
+            ));
         let capture_cmd = self.stack.capture_cmd();
         let route = format!("voice-{}", self.session_id);
         match voice::Session::arm(
@@ -3176,7 +3540,9 @@ impl App {
     }
 
     fn disarm_voice(&mut self) {
-        let Some(mut v) = self.voice.take() else { return };
+        let Some(mut v) = self.voice.take() else {
+            return;
+        };
         v.discard();
         self.push(Block::Notice(if v.requests == 0 {
             "dictation off".into()
@@ -3355,6 +3721,8 @@ impl App {
             self.submit_editor();
         } else if keys::any_match(&b.paste_image, &k) {
             self.paste_image();
+        } else if keys::any_match(&b.open_image, &k) {
+            self.open_image();
         } else if keys::any_match(&b.scroll_up, &k) {
             self.scroll_by(-(self.settings().layout.scroll_step.max(1) as isize));
         } else if keys::any_match(&b.scroll_down, &k) {
@@ -3498,7 +3866,10 @@ impl App {
             out.push(Span::styled("listening", pal.bold(pal.accent)));
             if self.settings().voice.meter {
                 out.push(Span::raw(" "));
-                out.push(Span::styled(meter(v.level()), Style::default().fg(pal.accent)));
+                out.push(Span::styled(
+                    meter(v.level()),
+                    Style::default().fg(pal.accent),
+                ));
             }
         } else {
             out.push(Span::styled("○ ", pal.dim()));
@@ -3565,6 +3936,7 @@ impl App {
         match action {
             "submit" => self.submit_editor(),
             "paste_image" => self.paste_image(),
+            "open_image" => self.open_image(),
             "cancel" => self.cancel_turn(),
             "quit" => self.quit = true,
             "clear" => self.slash("clear"),
@@ -3683,6 +4055,7 @@ impl App {
                 }
             }
             "clear" => {
+                self.images_forget();
                 self.entries.clear();
                 self.task.clear();
                 self.set_title();
@@ -3711,6 +4084,7 @@ impl App {
                 }
                 self.push(Block::Notice(s));
             }
+            "images" => self.open_images_picker(),
             "tools" => {
                 let s = self.settings().tools.enabled.join(", ");
                 self.push(Block::Notice(format!(
@@ -4041,6 +4415,22 @@ impl App {
                 }
             }
         }
+        // An overlay is opaque, and a kitty picture floats above the text: one
+        // would be drawn over. While anything is up there are no pictures.
+        if self.picker.is_some()
+            || self.job_view.is_some()
+            || self.plan_view.is_some()
+            || self.usage_pane.is_some()
+            || self.ask.is_some()
+            || self.pending_perm.is_some()
+            || self.completion.is_some()
+        {
+            self.img_cur.clear();
+        }
+        // Last, so nothing drawn afterwards can un-skip a covered cell.
+        let (cur, prev) = (std::mem::take(&mut self.img_cur), &self.img_prev);
+        image::mark(f.buffer_mut(), &cur, prev);
+        self.img_cur = cur;
     }
 
     fn draw_completion(&self, f: &mut Frame, c: &Completion, input_area: Rect, pal: &Palette) {
@@ -4176,8 +4566,13 @@ impl App {
         // Wrapping is cached per block, so this pass only redoes the blocks
         // that changed.
         let mut total = 0;
+        let text_width = width.saturating_sub(1);
+        self.img_scan.clear();
         for e in &mut self.entries {
-            total += e.lines(width.saturating_sub(1), &view, pal, pal_gen).len();
+            let n = e.lines(text_width, &view, pal, pal_gen).len();
+            self.img_scan
+                .push((n, transcript::image_layout(&e.block, text_width, &view)));
+            total += n;
         }
         self.total_lines = total;
         self.viewport_lines = area.height as usize;
@@ -4187,6 +4582,13 @@ impl App {
         } else {
             self.scroll = self.scroll.min(max_scroll);
         }
+        // Where each visible picture landed, for the escape codes that go out
+        // once the frame has been written.
+        self.img_cur = if self.img_proto == image::Proto::None {
+            Vec::new()
+        } else {
+            image::placements(&self.img_scan, self.scroll, self.viewport_lines, area)
+        };
         // Straight from the cache into the buffer, a row at a time: gathering
         // the whole transcript first would copy every line of it on every
         // frame, thirty times a second while a turn runs.

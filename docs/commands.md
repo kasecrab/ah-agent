@@ -71,6 +71,7 @@ name in, Enter runs it. Plugins can add commands (`ah docs plugins`).
 | `/rename [NAME]` | name the session; empty removes the name |
 | `/session` | session id and file |
 | `/skills [NAME] [ARGS]`, `/skill` | run a saved prompt (`ah docs skills`) |
+| `/images` | pictures the model drew in this conversation; Enter opens one |
 | `/init` | ask the model to write or refresh `AGENTS.md` (`ah docs instructions`) |
 | `/set KEY VALUE` | override a setting for this run |
 | `/config` | config paths and active layers |
