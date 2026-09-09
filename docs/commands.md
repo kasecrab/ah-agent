@@ -266,6 +266,7 @@ One JSON object per line on stdout. `type` is one of:
 | `tool_end` | `call`, `result`, `duration_ms` |
 | `tool_denied` | `call`, `reason` |
 | `tool_message` | `message` (the tool result as sent to the model) |
+| `image` | `path`, `mime`, `width`, `height`, `bytes` (a picture the model drew, already written) |
 | `notice` | `text` |
 | `settings_patch` | `patch` (from a plugin) |
 | `retry` | `attempt`, `wait_ms`, `error` |
@@ -277,4 +278,8 @@ One JSON object per line on stdout. `type` is one of:
 
 Messages and calls use the OpenAI chat shape: `{"role": ..., "content":
 ..., "tool_calls": [...], "tool_call_id": ..., "reasoning": ..., "images":
-[...]}`.
+[...]}`. An entry in `images` is either a `data:` URL, for a picture attached
+to the prompt, or an `ah-image:<session>/<file>` reference to one the model
+drew — the bytes of a generated image are never in the stream, only its path,
+which the `image` event gives in full. In one-shot mode that path is also
+printed on stdout on its own line, so `ah -p "draw a cat" | xargs feh` works.

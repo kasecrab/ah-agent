@@ -20,9 +20,19 @@ marker lines in between:
 {"role":"user","content":"[The conversation so far was compacted. Summary:] ... [End of summary. Continue from here.]"}
 ```
 
-- Messages have the OpenAI chat shape; `reasoning` and `images` (data URLs)
-  are present when used. The system prompt is not stored; it is rebuilt on
-  every turn.
+- Messages have the OpenAI chat shape; `reasoning` and `images` are present
+  when used. The system prompt is not stored; it is rebuilt on every turn.
+- An `images` entry is a `data:` URL for a picture attached to the prompt, and
+  an `ah-image:<session>/<file>` reference for one the model drew. Generated
+  images are written to `~/.local/share/ah/images/<session>/` and only named
+  here: a base64 picture inlined into a line would slow every later `/resume`
+  scan for the life of the install. The reference is relative to `AH_DATA_DIR`,
+  so moving the data directory keeps it working. An older ah reading a file
+  with one of these would hand the reference to the provider as an image and
+  get an error back.
+- Nothing deletes the images. `/clear` and compaction append a marker and stop
+  loading what is above it, but the files stay; `rm -r
+  ~/.local/share/ah/images/<id>` clears one session's pictures.
 - An answer the model did not finish — Esc, or a connection dropped part way
   — is kept and marked `[cut short]`, without any tool call it had begun: those
   are truncated and have no result to pair with. The tokens were paid for, so
