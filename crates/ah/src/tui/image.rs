@@ -298,22 +298,21 @@ pub fn chip(d: &ImageData, key: &str) -> String {
     s
 }
 
-/// Program and arguments that open `path`. `custom` wins, with `{path}`
-/// substituted or the path appended.
+/// Program and arguments that open `path`. A command of your own runs through
+/// the shell, like `layout.image_paste_cmd`, so quoting and pipelines work:
+/// `{path}` is substituted where it appears, else the path is appended.
 pub fn opener(os: &str, custom: &str, path: &str) -> Option<(String, Vec<String>)> {
     let custom = custom.trim();
     if !custom.is_empty() {
-        let mut parts = custom.split_whitespace().map(String::from);
-        let prog = parts.next()?;
-        let mut args: Vec<String> = parts.collect();
-        if args.iter().any(|a| a.contains("{path}")) {
-            for a in &mut args {
-                *a = a.replace("{path}", path);
-            }
+        let line = if custom.contains("{path}") {
+            custom.replace("{path}", &shell_quote(path))
         } else {
-            args.push(path.to_string());
-        }
-        return Some((prog, args));
+            format!("{custom} {}", shell_quote(path))
+        };
+        return Some(match os {
+            "windows" => ("cmd".into(), vec!["/C".into(), line]),
+            _ => ("sh".into(), vec!["-c".into(), line]),
+        });
     }
     match os {
         "linux" | "freebsd" | "openbsd" | "netbsd" => {
@@ -326,6 +325,11 @@ pub fn opener(os: &str, custom: &str, path: &str) -> Option<(String, Vec<String>
         )),
         _ => None,
     }
+}
+
+/// A path the shell will read as one word, whatever is in it.
+fn shell_quote(path: &str) -> String {
+    format!("'{}'", path.replace('\'', "'\\''"))
 }
 
 /// Screen placements for the pictures in a transcript. `entries` is one
@@ -564,15 +568,32 @@ mod tests {
             "cmd".to_string()
         );
         assert_eq!(opener("haiku", "", "/a.png"), None);
-        // A command of one's own, with and without a placeholder.
+    }
+
+    #[test]
+    fn a_command_of_your_own_goes_through_the_shell() {
+        // Where the placeholder is, and appended when there is none.
         assert_eq!(
             opener("linux", "feh {path} --scale", "/a.png"),
-            Some(("feh".into(), vec!["/a.png".into(), "--scale".into()]))
+            Some((
+                "sh".into(),
+                vec!["-c".into(), "feh '/a.png' --scale".into()]
+            ))
         );
         assert_eq!(
             opener("linux", "feh", "/a.png"),
-            Some(("feh".into(), vec!["/a.png".into()]))
+            Some(("sh".into(), vec!["-c".into(), "feh '/a.png'".into()]))
         );
+        // Quotes and pipelines survive, and so does a hostile file name.
+        assert_eq!(
+            opener("linux", "sh -c 'cat {path} | wc -c'", "/a.png"),
+            Some((
+                "sh".into(),
+                vec!["-c".into(), "sh -c 'cat '/a.png' | wc -c'".into()]
+            ))
+        );
+        let (_, args) = opener("linux", "feh {path}", "/tmp/a'; rm -rf x; '.png").unwrap();
+        assert_eq!(args[1], "feh '/tmp/a'\\''; rm -rf x; '\\''.png'");
     }
 
     #[test]

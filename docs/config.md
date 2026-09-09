@@ -305,7 +305,7 @@ Code, Alacritty — a picture shows as a one-line chip and Ctrl-O opens it.
 | `max_rows` | `20` | tallest inline picture, in rows; also capped at two thirds of the window |
 | `max_cols` | `0` | widest inline picture, in columns; 0 = the transcript width |
 | `cell_px` | `""` | cell size as `"9x18"` for terminals that will not report one; empty asks the terminal |
-| `open_cmd` | `""` | command that opens a saved image; `{path}` is substituted, else appended; empty tries `xdg-open`, `open`, `start` |
+| `open_cmd` | `""` | shell command that opens a saved image; `{path}` is substituted, else appended; empty tries `xdg-open`, `open`, `start` |
 
 `history` is the one knob that costs money. Providers cache a prompt by its
 exact prefix, so when an image ages out of the window the bytes at that
