@@ -23,6 +23,10 @@ marker lines in between:
 - Messages have the OpenAI chat shape; `reasoning` and `images` (data URLs)
   are present when used. The system prompt is not stored; it is rebuilt on
   every turn.
+- An answer the model did not finish — Esc, or a connection dropped part way
+  — is kept and marked `[cut short]`, without any tool call it had begun: those
+  are truncated and have no result to pair with. The tokens were paid for, so
+  the next turn carries on from what was said instead of asking for it again.
 - `{"_name": "..."}` names the session (`/rename`).
 - `{"_clear": true}` (`/clear`) and `{"_compact": true}` (compaction) mean
   "ignore every message above". Nothing is rewritten; the file keeps the full

@@ -509,13 +509,25 @@ impl<'a> Agent<'a> {
             let req = self.hooks.before_request(req, turn);
 
             io.emit(AgentEvent::RequestStart { turn });
-            let acc = match self.stream_with_retry(&req, io) {
-                Ok(acc) => acc,
-                Err(Error::Cancelled) => {
-                    summary.cancelled = true;
-                    break;
-                }
-                Err(e) => {
+            let (acc, failure) = self.stream_with_retry(&req, io);
+            let acc = match failure {
+                None => acc,
+                Some(e) => {
+                    // Some models report usage before the stream ends; count it
+                    // rather than lose the spend along with the answer.
+                    if acc.usage.total_tokens > 0 {
+                        summary.usage.add(&acc.usage);
+                        self.context_tokens = acc.usage.prompt_tokens + acc.usage.completion_tokens;
+                        io.emit(AgentEvent::Usage(acc.usage));
+                    }
+                    if let Some(m) = partial_message(acc) {
+                        io.emit(AgentEvent::AssistantMessage(m.clone()));
+                        messages.push(m);
+                    }
+                    if matches!(e, Error::Cancelled) {
+                        summary.cancelled = true;
+                        break;
+                    }
                     io.emit(AgentEvent::Error(e.to_string()));
                     return Err(e);
                 }
@@ -777,7 +789,15 @@ impl<'a> Agent<'a> {
         }
     }
 
-    fn stream_with_retry(&self, req: &ChatRequest, io: &dyn AgentIo) -> Result<Accumulator> {
+    /// Stream one request. A transient failure that produced nothing is
+    /// retried; one that arrives after the model has started talking is not,
+    /// because the retry would pay for those tokens a second time. Either way
+    /// what did arrive comes back beside the error, for the caller to keep.
+    fn stream_with_retry(
+        &self,
+        req: &ChatRequest,
+        io: &dyn AgentIo,
+    ) -> (Accumulator, Option<Error>) {
         let mut attempt = 0u32;
         loop {
             let mut acc = Accumulator::default();
@@ -799,8 +819,8 @@ impl<'a> Agent<'a> {
                 !self.cancel.load(Ordering::Relaxed)
             });
             match res {
-                Ok(()) => return Ok(acc.finish()),
-                Err(Error::Cancelled) => return Err(Error::Cancelled),
+                Ok(()) => return (acc.finish(), None),
+                Err(Error::Cancelled) => return (acc.finish(), Some(Error::Cancelled)),
                 Err(e) if attempt < 3 && !got_any && is_transient(&e) => {
                     attempt += 1;
                     let wait = Duration::from_millis(500 * (1u64 << attempt));
@@ -812,15 +832,33 @@ impl<'a> Agent<'a> {
                     let deadline = Instant::now() + wait;
                     while Instant::now() < deadline {
                         if self.cancel.load(Ordering::Relaxed) {
-                            return Err(Error::Cancelled);
+                            return (acc.finish(), Some(Error::Cancelled));
                         }
                         std::thread::sleep(Duration::from_millis(50));
                     }
                 }
-                Err(e) => return Err(e),
+                Err(e) => return (acc.finish(), Some(e)),
             }
         }
     }
+}
+
+/// What is worth keeping from a request that ended part way: the text the
+/// model had already written, said to be cut short. Tool calls are dropped —
+/// one cut off mid-stream has truncated arguments and no result to pair with,
+/// and every call shown to the API needs one. A stream that produced no text
+/// leaves nothing to keep, reasoning alone included: an assistant message with
+/// no content is not one the next request can carry.
+fn partial_message(acc: Accumulator) -> Option<Message> {
+    let text = acc.content.trim_end();
+    if text.is_empty() {
+        return None;
+    }
+    let mut m = Message::assistant(format!("{text}\n\n[cut short]"));
+    if !acc.reasoning.is_empty() {
+        m.reasoning = Some(acc.reasoning);
+    }
+    Some(m)
 }
 
 fn is_transient(e: &Error) -> bool {
@@ -1292,6 +1330,96 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|e| matches!(e, AgentEvent::Retry { .. }))
+        );
+    }
+
+    #[test]
+    fn a_stream_cut_short_keeps_the_text_it_was_paid_for() {
+        struct Cuts;
+        impl Provider for Cuts {
+            fn name(&self) -> &str {
+                "cuts"
+            }
+            fn stream(
+                &self,
+                _r: &ChatRequest,
+                _c: &AtomicBool,
+                on: crate::provider::OnEvent<'_>,
+            ) -> Result<()> {
+                on(StreamEvent::Text("half an answer".into()));
+                // A call the model never finished spelling out.
+                on(StreamEvent::ToolCallDelta {
+                    index: 0,
+                    id: Some("c1".into()),
+                    name: Some("bash".into()),
+                    arguments: "{\"comm".into(),
+                });
+                Err(Error::Http("connection reset".into()))
+            }
+        }
+        let settings = Settings::default();
+        let registry = Registry::builtins(&settings.tools);
+        let mut hooks = NoHooks;
+        let cancel = AtomicBool::new(false);
+        let mut agent = Agent::new(&Cuts, &registry, &mut hooks, &settings, ".".into(), &cancel);
+        agent.notices = false;
+        let mut messages = vec![Message::user("x")];
+        let io = RecordingIo::default();
+        let err = agent.run_turn(&mut messages, &io).unwrap_err();
+        assert!(matches!(err, Error::Http(_)), "{err}");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].role, Role::Assistant);
+        assert!(messages[1].content.starts_with("half an answer"));
+        assert!(messages[1].content.contains("[cut short]"));
+        // A kept call would have no result to pair with, and the API insists.
+        assert!(messages[1].tool_calls.is_empty());
+    }
+
+    #[test]
+    fn a_cancelled_answer_is_kept_as_well() {
+        struct Interrupted<'a>(&'a AtomicBool);
+        impl Provider for Interrupted<'_> {
+            fn name(&self) -> &str {
+                "interrupted"
+            }
+            fn stream(
+                &self,
+                _r: &ChatRequest,
+                _c: &AtomicBool,
+                on: crate::provider::OnEvent<'_>,
+            ) -> Result<()> {
+                on(StreamEvent::Text("half an ans".into()));
+                // Esc, part way through the next word.
+                self.0.store(true, Ordering::Relaxed);
+                if !on(StreamEvent::Text("wer".into())) {
+                    return Err(Error::Cancelled);
+                }
+                Ok(())
+            }
+        }
+        let cancel = AtomicBool::new(false);
+        let provider = Interrupted(&cancel);
+        let settings = Settings::default();
+        let registry = Registry::builtins(&settings.tools);
+        let mut hooks = NoHooks;
+        let mut agent = Agent::new(
+            &provider,
+            &registry,
+            &mut hooks,
+            &settings,
+            ".".into(),
+            &cancel,
+        );
+        agent.notices = false;
+        let mut messages = vec![Message::user("x")];
+        let io = RecordingIo::default();
+        let summary = agent.run_turn(&mut messages, &io).unwrap();
+        assert!(summary.cancelled);
+        assert_eq!(messages.len(), 2);
+        assert!(
+            messages[1].content.starts_with("half an answer"),
+            "{}",
+            messages[1].content
         );
     }
 

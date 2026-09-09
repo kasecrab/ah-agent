@@ -27,7 +27,7 @@ everywhere.
 |---|---|---|
 | `submit` | `["enter"]` | send the message, or queue it while a turn runs |
 | `newline` | `["shift-enter", "alt-enter", "ctrl-j"]` | insert a line break |
-| `cancel` | `["esc"]` | cancel the running turn, stopping a command that is still running; returns queued messages to the input |
+| `cancel` | `["esc"]` | cancel the running turn, stopping a command that is still running; keeps what the model had already written, marked `[cut short]`; returns queued messages to the input |
 | `quit` | `["ctrl-c", "ctrl-d"]` | exit (Ctrl-C cancels first while busy) |
 | `scroll_up` | `["ctrl-up", "alt-k"]` | scroll transcript one step |
 | `scroll_down` | `["ctrl-down", "alt-j"]` | |
