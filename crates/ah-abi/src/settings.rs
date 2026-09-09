@@ -833,6 +833,21 @@ impl VoiceSettings {
             _ => None,
         }
     }
+
+    /// `phrase_ms`, `max_chunk_ms` and `max_inflight` after the preset has had
+    /// its say. A dial still sitting at its default follows `mode`; one that
+    /// has been moved keeps the value it was given.
+    pub fn dials(&self) -> (u64, u64, usize) {
+        let d = Self::default();
+        let Some((phrase, chunk, inflight)) = self.preset() else {
+            return (self.phrase_ms, self.max_chunk_ms, self.max_inflight);
+        };
+        (
+            if self.phrase_ms == d.phrase_ms { phrase } else { self.phrase_ms },
+            if self.max_chunk_ms == d.max_chunk_ms { chunk } else { self.max_chunk_ms },
+            if self.max_inflight == d.max_inflight { inflight } else { self.max_inflight },
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

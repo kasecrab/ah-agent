@@ -202,9 +202,10 @@ price.
 | `meter` | `false` | draw the input level; the only part that redraws on a clock |
 
 `mode` sets `phrase_ms`, `max_chunk_ms` and `max_inflight` together: `fast` is
-`300 / 2000 / 3`, `balanced` `400 / 3500 / 2`, `cheap` `700 / 8000 / 1`. Any of
-the three set by hand wins over the preset. Shorter phrases reach the screen
-sooner and cost more, because each one is its own request.
+`300 / 2000 / 3`, `balanced` `400 / 3500 / 2`, `cheap` `700 / 8000 / 1`. A dial
+still sitting at its own default follows `mode`; one moved away from it keeps
+the value it was given. Shorter phrases reach the screen sooner and cost more,
+because each one is its own request.
 
 `capture_cmd` is a shell command, so it is read from `~/.config/ah/config.toml`
 or `AH_VOICE_CAPTURE_CMD` only. A project's `.ah/config.toml` cannot set it.

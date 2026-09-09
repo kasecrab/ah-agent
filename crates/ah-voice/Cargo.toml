@@ -1,0 +1,15 @@
+[package]
+name = "ah-voice"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["mic"]
+# Capture from the system microphone. Without it only `voice.capture_cmd`
+# works, and nothing links an audio library.
+mic = ["dep:cpal"]
+
+[dependencies]
+ah-abi = { path = "../ah-abi" }
+cpal = { version = "0.18", optional = true, default-features = false }
