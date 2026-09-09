@@ -3,6 +3,7 @@
 mod agents;
 mod ask;
 mod highlight;
+mod image;
 mod input;
 mod jobs;
 mod keys;
