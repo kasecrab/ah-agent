@@ -154,6 +154,12 @@ pub struct ChatRequest {
     /// OpenRouter `provider` routing preferences, passed through verbatim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<serde_json::Value>,
+    /// Sticky-routing key: every request carrying the same one is sent to the
+    /// provider that already holds this conversation's prompt cache. Without
+    /// it the key is guessed from the opening messages, and a turn that lands
+    /// elsewhere pays full input price for a prefix that was already cached.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     /// Top-level `cache_control` for providers that need an explicit cache
     /// breakpoint. The provider keeps the breakpoint at the end of the prompt
     /// and advances it as the conversation grows.

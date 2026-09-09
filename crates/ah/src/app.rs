@@ -258,6 +258,7 @@ impl Engine {
             cwd,
             cancel,
             context_tokens,
+            session,
             ..
         } = self;
         let provider = provider.as_deref()?;
@@ -266,6 +267,7 @@ impl Engine {
             None => no_hooks,
         };
         let mut a = Agent::new(provider, registry, hooks, settings, cwd.clone(), cancel);
+        a.session_id = session.id.clone();
         a.context_window = window;
         a.context_tokens = *context_tokens;
         Some(a)

@@ -220,6 +220,9 @@ pub struct Agent<'a> {
     pub cancel: &'a AtomicBool,
     /// Hard stop on runaway tool loops.
     pub max_requests: u32,
+    /// Id of the session this turn belongs to, empty when there is none. It
+    /// rides along as the provider's sticky-routing key.
+    pub session_id: String,
     /// Model context window in tokens; 0 disables auto compaction.
     pub context_window: u64,
     /// Conversation size as of the last response.
@@ -252,6 +255,7 @@ impl<'a> Agent<'a> {
             cwd,
             cancel,
             max_requests: 200,
+            session_id: String::new(),
             context_window: 0,
             context_tokens: 0,
             compactions: 0,
@@ -318,6 +322,7 @@ impl<'a> Agent<'a> {
             top_p: None,
             reasoning: None,
             provider: self.settings.model.provider.clone(),
+            session_id: self.session_key(),
             cache_control,
         };
         let budget = self.settings.context.summary_max_tokens as u64;
@@ -384,6 +389,16 @@ impl<'a> Agent<'a> {
             "" | "5m" => serde_json::json!({"type": "ephemeral"}),
             ttl => serde_json::json!({"type": "ephemeral", "ttl": ttl}),
         })
+    }
+
+    /// Sticky-routing key for this conversation, or `None` when the session
+    /// has no id. OpenRouter caps it at 256 characters.
+    fn session_key(&self) -> Option<String> {
+        let id = self.session_id.trim();
+        if id.is_empty() {
+            return None;
+        }
+        Some(id.chars().take(256).collect())
     }
 
     pub fn system_prompt(&mut self) -> String {
@@ -488,6 +503,7 @@ impl<'a> Agent<'a> {
                 top_p: self.settings.model.top_p,
                 reasoning: self.settings.model.reasoning.clone(),
                 provider: self.settings.model.provider.clone(),
+                session_id: self.session_key(),
                 cache_control: self.cache_control(prompt_bytes(&system, messages, specs_bytes)),
             };
             let req = self.hooks.before_request(req, turn);
@@ -982,6 +998,7 @@ mod tests {
             &cancel,
         );
         agent.notices = false;
+        agent.session_id = "sess-1".into();
         agent.context_window = 100;
         let mut messages = vec![Message::user("say hi via bash")];
         let io = RecordingIo::default();
@@ -993,6 +1010,11 @@ mod tests {
         assert_eq!(messages[1].content, "done");
         let reqs = provider.requests.lock().unwrap();
         assert!(reqs[1].tools.is_empty());
+        // Including the summary request, which is part of the same session.
+        assert!(
+            reqs.iter()
+                .all(|r| r.session_id.as_deref() == Some("sess-1"))
+        );
         assert!(
             reqs[1]
                 .messages
@@ -1325,6 +1347,43 @@ mod tests {
                 "1h".into()),
             Some(serde_json::json!({"type": "ephemeral", "ttl": "1h"}))
         );
+    }
+
+    #[test]
+    fn the_session_id_rides_along_as_the_routing_key() {
+        let reply = || {
+            vec![
+                StreamEvent::Text("hi".into()),
+                StreamEvent::Finish("stop".into()),
+            ]
+        };
+        let provider = MockProvider::new(vec![reply(), reply()]);
+        let settings = Settings::default();
+        let registry = Registry::builtins(&settings.tools);
+        let mut hooks = NoHooks;
+        let cancel = AtomicBool::new(false);
+        let mut agent = Agent::new(
+            &provider,
+            &registry,
+            &mut hooks,
+            &settings,
+            ".".into(),
+            &cancel,
+        );
+        agent.notices = false;
+        let io = RecordingIo::default();
+        // A session-less run asks for no sticky routing at all.
+        agent.run_turn(&mut vec![Message::user("x")], &io).unwrap();
+        agent.session_id = "1a2b3c".into();
+        agent.run_turn(&mut vec![Message::user("x")], &io).unwrap();
+        let reqs = provider.requests.lock().unwrap();
+        assert_eq!(reqs[0].session_id, None);
+        assert_eq!(reqs[1].session_id.as_deref(), Some("1a2b3c"));
+        // What matters is the body on the wire, not just the struct.
+        let sent = serde_json::to_value(&reqs[1]).unwrap();
+        assert_eq!(sent["session_id"], "1a2b3c");
+        let none = serde_json::to_value(&reqs[0]).unwrap();
+        assert!(none.get("session_id").is_none());
     }
 
     #[test]

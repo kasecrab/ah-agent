@@ -299,6 +299,14 @@ provider keeps the breakpoint at the end of the prompt and advances it as the
 conversation grows, so every request after the first reads the whole prefix
 from the cache.
 
+A cache only helps if the next request reaches the machine holding it, so every
+request carries the session id as OpenRouter's `session_id` and requests with
+the same one are routed to the same provider endpoint. Without it the routing
+key is guessed from the opening messages, and a turn that lands elsewhere pays
+full input price for a prefix that was already cached. This matters just as
+much for the providers that cache on their own as for the ones that need a
+breakpoint.
+
 The price of a cache write is 1.25x the input price (2x with `cache_ttl =
 "1h"`), and a read is 0.1x. One re-read pays for the write several times over,
 which a tool call already guarantees, but a prompt that is never re-sent would
