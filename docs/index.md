@@ -64,6 +64,7 @@ prints the resolved locations.
 | block shell commands | `permissions.deny` in config |
 | run read-only tool calls at once | `parallel` in `[tools]`, config page |
 | keep a server or long build running | `bash` with `background`, commands page |
+| speak a prompt instead of typing it | `/voice`, voice page |
 | tune compaction | `[context]` in config |
 | cut input cost on long sessions | `cache` in `[context]`, config page |
 | change the status bar | `/statusline`, `statusline.items` in config, or a `statusline` plugin hook |
