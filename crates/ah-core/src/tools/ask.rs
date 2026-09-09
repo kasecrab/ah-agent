@@ -245,6 +245,7 @@ mod tests {
             agent: 0,
             cancel: crate::tools::never(),
             ask: &asker,
+            spawn: None,
         };
         AskTool.run(&args, &ctx)
     }

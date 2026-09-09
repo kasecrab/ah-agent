@@ -171,6 +171,13 @@ impl crate::tools::AskUser for IoAsker<'_> {
     }
 }
 
+/// Somewhere the loop looks for messages that arrived while it was working:
+/// what a subagent is told by the agent above it, or by the user watching it.
+/// Read between requests, so a message never lands mid-tool.
+pub trait Mailbox: Send + Sync {
+    fn take(&self) -> Vec<String>;
+}
+
 /// Plugin hook surface used by the loop. `NoHooks` is the empty impl.
 pub trait Hooks {
     fn system_prompt(&mut self, input: SystemPromptIn) -> String {
@@ -235,6 +242,12 @@ pub struct Agent<'a> {
     /// Tell the model about background jobs that ended and plans it has left
     /// alone. Off in tests that assert on exact message lists.
     pub notices: bool,
+    /// Where messages for this loop arrive while it works. Subagents have one;
+    /// the agent the user talks to hears from the user directly.
+    pub mailbox: Option<std::sync::Arc<dyn Mailbox>>,
+    /// What the `agent` tool starts subagents with. `None` leaves the loop
+    /// unable to start any, whatever its tool list says.
+    pub spawner: Option<std::sync::Arc<dyn crate::agents::Spawner + Sync>>,
     /// Plan version behind the last reminder, and how many requests have gone
     /// by without the plan changing.
     plan_seen: u64,
@@ -264,6 +277,8 @@ impl<'a> Agent<'a> {
             context_tokens: 0,
             compactions: 0,
             notices: true,
+            mailbox: None,
+            spawner: None,
             plan_seen: 0,
             plan_quiet: 0,
         }
@@ -491,6 +506,18 @@ impl<'a> Agent<'a> {
                     crate::jobs::table().notices(crate::jobs::Audience::Model(self.agent_id))
                 {
                     messages.push(Message::user(format!("[background] {note}")));
+                }
+                for note in
+                    crate::agents::table().notices(crate::agents::Audience::Model(self.agent_id))
+                {
+                    messages.push(Message::user(format!("[agent] {note}")));
+                }
+            }
+            // Anything said to this loop while it was working: an agent above
+            // it, or the user watching it.
+            if let Some(mailbox) = self.mailbox.as_ref() {
+                for said in mailbox.take() {
+                    messages.push(Message::user(said));
                 }
             }
             if let Some(line) = self.plan_reminder().filter(|_| self.notices) {
@@ -793,6 +820,7 @@ impl<'a> Agent<'a> {
             agent: self.agent_id,
             cancel: self.cancel,
             ask,
+            spawn: self.spawner.as_deref(),
         }
     }
 

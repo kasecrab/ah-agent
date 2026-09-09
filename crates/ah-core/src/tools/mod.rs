@@ -1,5 +1,6 @@
 //! Built-in tools and the registry that dispatches model tool calls.
 
+pub mod agent;
 pub mod ask;
 pub mod bash;
 pub mod describe;
@@ -26,6 +27,9 @@ pub struct ToolCtx<'a> {
     /// Set when the user cancels the turn. A tool that waits for anything
     /// watches this and gives up at once.
     pub cancel: &'a std::sync::atomic::AtomicBool,
+    /// The way to start subagents, for the one tool that does. `None` where
+    /// there is nothing to start them with: a bare tool run, or a test.
+    pub spawn: Option<&'a (dyn crate::agents::Spawner + Sync)>,
     /// The way to the person at the keyboard, for the one tool that asks them
     /// something. Read-only calls run side by side on scoped threads, so this
     /// is shared between threads even though only one tool ever uses it.
@@ -182,7 +186,7 @@ pub(crate) fn arg_u64(args: &Value, key: &str) -> Option<u64> {
     })
 }
 
-pub(crate) fn resolve_path(cwd: &std::path::Path, p: &str) -> PathBuf {
+pub fn resolve_path(cwd: &std::path::Path, p: &str) -> PathBuf {
     let path = if let Some(rest) = p.strip_prefix("~/") {
         dirs::home_dir().unwrap_or_default().join(rest)
     } else {

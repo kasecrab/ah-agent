@@ -1,6 +1,7 @@
 //! Provider client, tools, agent loop, settings, sessions, wasm plugin host.
 
 pub mod agent;
+pub mod agents;
 pub mod auth;
 pub mod clipboard;
 pub mod docs;

@@ -168,6 +168,7 @@ mod tests {
             agent: 0,
             cancel: crate::tools::never(),
             ask: crate::tools::no_user(),
+            spawn: None,
         };
         PlanTool.run(&args, &ctx)
     }

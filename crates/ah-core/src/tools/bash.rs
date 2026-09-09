@@ -144,6 +144,7 @@ mod tests {
             agent: 0,
             cancel: crate::tools::never(),
             ask: crate::tools::no_user(),
+            spawn: None,
         };
         Bash.run(&args, &ctx)
     }
@@ -226,6 +227,7 @@ mod tests {
             agent: 0,
             cancel: &cancel,
             ask: crate::tools::no_user(),
+            spawn: None,
         };
         std::thread::scope(|s| {
             s.spawn(|| {

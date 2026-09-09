@@ -112,6 +112,7 @@ mod tests {
             agent: 0,
             cancel: crate::tools::never(),
             ask: crate::tools::no_user(),
+            spawn: None,
         };
         JobsTool.run(&args, &ctx)
     }

@@ -192,7 +192,13 @@ fn main() {
             1
         }
     };
-    // Background jobs are children of this process; none outlives it.
+    // Agents and background jobs are children of this process; none outlives
+    // it. Agents stop first, or one of them starts a command after the sweep.
+    let agents = ah_core::agents::table().running();
+    if agents > 0 {
+        eprintln!("ah: stopping {agents} agent(s)");
+        ah_core::agents::table().shutdown(std::time::Duration::from_secs(2));
+    }
     let running = ah_core::jobs::table().running();
     if running > 0 {
         eprintln!("ah: stopping {running} background job(s)");

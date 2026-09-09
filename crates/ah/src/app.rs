@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use ah_core::abi::*;
 use ah_core::agent::{Agent, AgentEvent, AgentIo, Hooks, NoHooks, TurnSummary};
+use ah_core::agents::{AgentSpawner, Spawner};
 use ah_core::plugins::{LoadReport, PluginHost};
 use ah_core::provider::Provider;
 use ah_core::provider::openrouter::OpenRouter;
@@ -162,7 +163,7 @@ pub type PluginLoad = (
 
 /// Provider, tools, plugins and session. Runs one turn at a time.
 pub struct Engine {
-    pub provider: Option<Box<dyn Provider>>,
+    pub provider: Option<Arc<dyn Provider>>,
     pub registry: Registry,
     pub host: Option<PluginHost>,
     pub settings: Settings,
@@ -202,7 +203,7 @@ impl Engine {
         };
         let mut e = Self {
             provider: None,
-            registry: Registry::builtins(&settings.tools),
+            registry: Registry::new(),
             host: None,
             settings,
             settings_value: stack.value().clone(),
@@ -215,6 +216,7 @@ impl Engine {
             warned_no_window: false,
         };
         e.rebuild_provider();
+        e.rebuild_registry();
         // A resumed conversation is already using the window, but no reply has
         // reported its size yet, so estimate it rather than start from zero.
         e.context_tokens = ah_core::agent::messages_tokens(&e.session.messages);
@@ -223,10 +225,19 @@ impl Engine {
         Ok(e)
     }
 
+    /// The built-in tools, plus the two that start and mind subagents. Those
+    /// two name the configured agent types in their description, so they are
+    /// added here rather than among the built-ins.
+    pub fn rebuild_registry(&mut self) {
+        self.registry = Registry::builtins(&self.settings.tools);
+        let types = ah_core::agents::types_of(&self.settings);
+        ah_core::agents::install_tools(&mut self.registry, &self.settings, types);
+    }
+
     pub fn rebuild_provider(&mut self) {
         let key = ah_core::auth::api_key(self.settings.model.api_key.as_deref());
         self.provider = key.map(|k| {
-            Box::new(OpenRouter::new(self.settings.model.base_url.clone(), k)) as Box<dyn Provider>
+            Arc::new(OpenRouter::new(self.settings.model.base_url.clone(), k)) as Arc<dyn Provider>
         });
     }
 
@@ -283,17 +294,32 @@ impl Engine {
             cancel,
             context_tokens,
             session,
+            settings_value,
             ..
         } = self;
-        let provider = provider.as_deref()?;
+        let shared = provider.clone()?;
+        let borrowed = provider.as_deref()?;
         let hooks: &mut dyn Hooks = match host.as_mut() {
             Some(h) => h,
             None => no_hooks,
         };
-        let mut a = Agent::new(provider, registry, hooks, settings, cwd.clone(), cancel);
+        // Subagents share this provider, so they share its connections too.
+        let spawner: Option<Arc<dyn Spawner + Sync>> = settings.agents.enabled.then(|| {
+            Arc::new(AgentSpawner::new(
+                shared.clone(),
+                settings.clone(),
+                settings_value.clone(),
+                cwd.clone(),
+                session.id.clone(),
+                0,
+                0,
+            )) as Arc<dyn Spawner + Sync>
+        });
+        let mut a = Agent::new(borrowed, registry, hooks, settings, cwd.clone(), cancel);
         a.session_id = session.id.clone();
         a.context_window = window;
         a.context_tokens = *context_tokens;
+        a.spawner = spawner;
         Some(a)
     }
 
@@ -322,7 +348,8 @@ impl Engine {
         let model_changed = settings.model.id != self.settings.model.id
             || settings.model.base_url != self.settings.model.base_url
             || settings.model.api_key != self.settings.model.api_key;
-        let tools_changed = settings.tools != self.settings.tools;
+        let tools_changed =
+            settings.tools != self.settings.tools || settings.agents != self.settings.agents;
         self.settings = settings;
         self.settings_value = value;
         if let Some(h) = self.host.as_mut() {
@@ -333,7 +360,7 @@ impl Engine {
             self.warned_no_window = false;
         }
         if tools_changed {
-            self.registry = Registry::builtins(&self.settings.tools);
+            self.rebuild_registry();
         }
     }
 
@@ -399,6 +426,9 @@ impl Engine {
         if let Ok(s) = &res {
             self.total_usage.add(&s.usage);
         }
+        // Subagents spend on their own account; fold it in so the status line
+        // and /usage count the whole turn, not just this loop.
+        self.total_usage.add(&ah_core::agents::table().take_spent());
         self.session.save_plan(&ah_core::plan::store().snapshot());
         res
     }
@@ -470,7 +500,9 @@ impl Engine {
                     let _ = tx.send(UiEvent::Busy(false));
                 }
                 EngineCmd::Wake => {
-                    if ah_core::jobs::table().unheard(ah_core::jobs::Audience::Model(0)) {
+                    if ah_core::jobs::table().unheard(ah_core::jobs::Audience::Model(0))
+                        || ah_core::agents::table().unheard(ah_core::agents::Audience::Model(0))
+                    {
                         let _ = tx.send(UiEvent::Busy(true));
                         let _ = self.wake(&io);
                         let _ = tx.send(UiEvent::Busy(false));

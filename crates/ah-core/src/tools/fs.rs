@@ -257,6 +257,7 @@ mod tests {
             agent: 0,
             cancel: crate::tools::never(),
             ask: crate::tools::no_user(),
+            spawn: None,
         };
         WriteFile.run(
             &json!({"path": "f.rs", "content": "fn a() {\n    one();\n    two();\n}\n"}),
@@ -315,6 +316,7 @@ mod tests {
             agent: 0,
             cancel: crate::tools::never(),
             ask: crate::tools::no_user(),
+            spawn: None,
         };
         let r = EditFile.run(
             &json!({"path": "nope.txt", "old_string": "a", "new_string": "b"}),
@@ -335,6 +337,7 @@ mod tests {
             agent: 0,
             cancel: crate::tools::never(),
             ask: crate::tools::no_user(),
+            spawn: None,
         };
         let w = WriteFile.run(
             &json!({"path": "sub/f.txt", "content": "one\ntwo\nthree\n"}),
