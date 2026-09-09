@@ -33,7 +33,7 @@ impl Tool for JobsTool {
         let action = arg_str(args, "action").unwrap_or("list");
         let table = jobs::table();
         if action == "list" {
-            let all = table.all();
+            let all = table.owned_by(ctx.agent);
             if all.is_empty() {
                 return ToolResult::ok("no background jobs");
             }
@@ -46,7 +46,7 @@ impl Tool for JobsTool {
         let Some(id) = arg_u64(args, "id").map(|n| n as u32) else {
             return ToolResult::err("missing `id`");
         };
-        let Some(job) = table.get(id) else {
+        let Some(job) = table.get_owned(id, ctx.agent) else {
             return ToolResult::err(format!("no job {id}; use action list"));
         };
         match action {
@@ -109,6 +109,7 @@ mod tests {
         let ctx = ToolCtx {
             cwd: &cwd,
             settings: &settings,
+            agent: 0,
             cancel: crate::tools::never(),
             ask: crate::tools::no_user(),
         };
@@ -123,6 +124,7 @@ mod tests {
                 "for i in 1 2 3; do echo tick $i; sleep 0.1; done; sleep 30",
                 &std::env::current_dir().unwrap(),
                 65536,
+                0,
             )
             .unwrap();
         let id = job.id;

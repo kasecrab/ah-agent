@@ -254,6 +254,7 @@ mod tests {
         let ctx = ToolCtx {
             cwd: &dir,
             settings: &settings,
+            agent: 0,
             cancel: crate::tools::never(),
             ask: crate::tools::no_user(),
         };
@@ -311,6 +312,7 @@ mod tests {
         let ctx = ToolCtx {
             cwd: &dir,
             settings: &settings,
+            agent: 0,
             cancel: crate::tools::never(),
             ask: crate::tools::no_user(),
         };
@@ -330,6 +332,7 @@ mod tests {
         let ctx = ToolCtx {
             cwd: &dir,
             settings: &settings,
+            agent: 0,
             cancel: crate::tools::never(),
             ask: crate::tools::no_user(),
         };

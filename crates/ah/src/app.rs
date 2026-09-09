@@ -470,7 +470,7 @@ impl Engine {
                     let _ = tx.send(UiEvent::Busy(false));
                 }
                 EngineCmd::Wake => {
-                    if ah_core::jobs::table().unheard(ah_core::jobs::Audience::Model) {
+                    if ah_core::jobs::table().unheard(ah_core::jobs::Audience::Model(0)) {
                         let _ = tx.send(UiEvent::Busy(true));
                         let _ = self.wake(&io);
                         let _ = tx.send(UiEvent::Busy(false));

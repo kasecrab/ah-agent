@@ -2503,7 +2503,7 @@ impl App {
         // attention now, instead of waiting for the user's next message.
         if !self.busy
             && self.settings().tools.job_wake
-            && table.unheard(ah_core::jobs::Audience::Model)
+            && table.unheard(ah_core::jobs::Audience::Model(0))
         {
             self.busy = true;
             self.busy_start = Some(Instant::now());

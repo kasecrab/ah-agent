@@ -220,6 +220,9 @@ pub struct Agent<'a> {
     pub cancel: &'a AtomicBool,
     /// Hard stop on runaway tool loops.
     pub max_requests: u32,
+    /// 0 for the agent the user talks to, else the id of the subagent this
+    /// loop is. It tags the jobs the loop starts and keeps their news apart.
+    pub agent_id: u32,
     /// Id of the session this turn belongs to, empty when there is none. It
     /// rides along as the provider's sticky-routing key.
     pub session_id: String,
@@ -255,6 +258,7 @@ impl<'a> Agent<'a> {
             cwd,
             cancel,
             max_requests: 200,
+            agent_id: 0,
             session_id: String::new(),
             context_window: 0,
             context_tokens: 0,
@@ -483,7 +487,9 @@ impl<'a> Agent<'a> {
             // Jobs that ended since the last request; the model hears about
             // them here instead of having to poll.
             if self.notices {
-                for note in crate::jobs::table().notices(crate::jobs::Audience::Model) {
+                for note in
+                    crate::jobs::table().notices(crate::jobs::Audience::Model(self.agent_id))
+                {
                     messages.push(Message::user(format!("[background] {note}")));
                 }
             }
@@ -784,6 +790,7 @@ impl<'a> Agent<'a> {
         ToolCtx {
             cwd: &self.cwd,
             settings: &self.settings.tools,
+            agent: self.agent_id,
             cancel: self.cancel,
             ask,
         }
@@ -1660,7 +1667,7 @@ mod tests {
         // Notices are process-wide: only one test at a time may collect them.
         let _notices = crate::jobs::notice_lock();
         let job = crate::jobs::table()
-            .spawn("sh", "true", &std::env::current_dir().unwrap(), 4096)
+            .spawn("sh", "true", &std::env::current_dir().unwrap(), 4096, 0)
             .unwrap();
         assert!(job.wait(Duration::from_secs(5)));
         let provider = MockProvider::new(vec![vec![

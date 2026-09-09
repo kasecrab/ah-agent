@@ -47,7 +47,13 @@ impl Tool for Bash {
             .and_then(Value::as_bool)
             .unwrap_or(false);
         let table = jobs::table();
-        let job = match table.spawn(&shell, cmd, ctx.cwd, ctx.settings.job_buffer_bytes) {
+        let job = match table.spawn(
+            &shell,
+            cmd,
+            ctx.cwd,
+            ctx.settings.job_buffer_bytes,
+            ctx.agent,
+        ) {
             Ok(j) => j,
             Err(e) => return ToolResult::err(format!("failed to spawn {shell}: {e}")),
         };
@@ -135,6 +141,7 @@ mod tests {
         let ctx = ToolCtx {
             cwd: &cwd,
             settings,
+            agent: 0,
             cancel: crate::tools::never(),
             ask: crate::tools::no_user(),
         };
@@ -216,6 +223,7 @@ mod tests {
         let ctx = ToolCtx {
             cwd: &cwd,
             settings: &settings,
+            agent: 0,
             cancel: &cancel,
             ask: crate::tools::no_user(),
         };

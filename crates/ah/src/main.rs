@@ -196,7 +196,7 @@ fn main() {
     let running = ah_core::jobs::table().running();
     if running > 0 {
         eprintln!("ah: stopping {running} background job(s)");
-        ah_core::jobs::table().shutdown();
+        ah_core::jobs::table().shutdown(std::time::Duration::from_millis(500));
     }
     std::process::exit(code);
 }

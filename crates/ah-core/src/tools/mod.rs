@@ -19,6 +19,10 @@ use serde_json::Value;
 pub struct ToolCtx<'a> {
     pub cwd: &'a PathBuf,
     pub settings: &'a ToolSettings,
+    /// Which agent is calling: 0 for the main one, else a subagent id. It tags
+    /// the background jobs a call starts, so news of one reaches the agent that
+    /// started it and nobody else.
+    pub agent: u32,
     /// Set when the user cancels the turn. A tool that waits for anything
     /// watches this and gives up at once.
     pub cancel: &'a std::sync::atomic::AtomicBool,

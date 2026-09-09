@@ -242,6 +242,7 @@ mod tests {
         let ctx = ToolCtx {
             cwd: &cwd,
             settings: &settings,
+            agent: 0,
             cancel: crate::tools::never(),
             ask: &asker,
         };

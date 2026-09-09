@@ -15,18 +15,28 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-/// Who has already been told that a job finished.
+/// Who has already been told that a job finished. A job belongs to one agent —
+/// the main one is 0, a subagent its own id — so `Model` carries whose news it
+/// is and one bit is enough for all of them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Audience {
-    Model,
+    Model(u32),
     Ui,
 }
 
 impl Audience {
     fn bit(self) -> u32 {
         match self {
-            Audience::Model => 1,
+            Audience::Model(_) => 1,
             Audience::Ui => 2,
+        }
+    }
+
+    /// Whether this job is any of that audience's business.
+    fn covers(self, job: &Job) -> bool {
+        match self {
+            Audience::Model(owner) => job.owner() == owner,
+            Audience::Ui => true,
         }
     }
 }
@@ -133,6 +143,9 @@ pub struct Job {
     pub id: u32,
     pub command: String,
     pub started: Instant,
+    /// The agent that started it: 0 for the main one, else a subagent id. A
+    /// job outliving its agent is handed back to 0 rather than left unheard.
+    owner: AtomicU32,
     pid: i32,
     out: Mutex<Output>,
     state: Mutex<State>,
@@ -148,6 +161,18 @@ pub struct Job {
 impl Job {
     pub fn state(&self) -> State {
         *self.state.lock().unwrap()
+    }
+
+    pub fn owner(&self) -> u32 {
+        self.owner.load(Ordering::Relaxed)
+    }
+
+    /// Hand the job to another agent, and let that one hear about it even if
+    /// the first already did.
+    pub fn reparent(&self, to: u32) {
+        self.owner.store(to, Ordering::Relaxed);
+        self.reported
+            .fetch_and(!Audience::Model(to).bit(), Ordering::SeqCst);
     }
 
     pub fn running(&self) -> bool {
@@ -238,6 +263,21 @@ impl Job {
         });
     }
 
+    /// The polite half of [`Job::kill`], for a caller that does the waiting
+    /// itself. Used at exit, where a detached thread would not outlive the
+    /// process long enough to fire.
+    fn term(&self) {
+        if self.running() {
+            signal(self.pid, SIGTERM);
+        }
+    }
+
+    fn hard_kill(&self) {
+        if self.running() {
+            signal(self.pid, SIGKILL);
+        }
+    }
+
     /// True the first time this audience is told the job finished.
     fn claim(&self, who: Audience) -> bool {
         !self.running() && self.reported.fetch_or(who.bit(), Ordering::SeqCst) & who.bit() == 0
@@ -296,6 +336,7 @@ impl Jobs {
         command: &str,
         cwd: &std::path::Path,
         buffer_bytes: usize,
+        owner: u32,
     ) -> std::io::Result<std::sync::Arc<Job>> {
         let mut cmd = Command::new(shell);
         cmd.arg("-c")
@@ -318,6 +359,7 @@ impl Jobs {
             id: self.next_id.fetch_add(1, Ordering::Relaxed),
             command: command.to_string(),
             started: Instant::now(),
+            owner: AtomicU32::new(owner),
             pid,
             out: Mutex::new(Output::new(buffer_bytes)),
             state: Mutex::new(State::Running),
@@ -343,8 +385,11 @@ impl Jobs {
             return;
         }
         let mut over = finished - self.keep;
+        // Only once the owning model has heard: the UI reading the news must
+        // not throw away a job the agent it belongs to has yet to see.
+        let heard = Audience::Model(0).bit();
         jobs.retain(|j| {
-            if over > 0 && !j.running() && j.reported.load(Ordering::Relaxed) != 0 {
+            if over > 0 && !j.running() && j.reported.load(Ordering::Relaxed) & heard != 0 {
                 over -= 1;
                 return false;
             }
@@ -366,8 +411,34 @@ impl Jobs {
             .cloned()
     }
 
+    /// The job as far as one agent is concerned: another agent's job is not
+    /// there at all, so nobody reads or stops a command they did not start.
+    pub fn get_owned(&self, id: u32, owner: u32) -> Option<std::sync::Arc<Job>> {
+        self.get(id).filter(|j| j.owner() == owner)
+    }
+
     pub fn all(&self) -> Vec<std::sync::Arc<Job>> {
         self.jobs.lock().unwrap().clone()
+    }
+
+    pub fn owned_by(&self, owner: u32) -> Vec<std::sync::Arc<Job>> {
+        self.jobs
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|j| j.owner() == owner)
+            .cloned()
+            .collect()
+    }
+
+    /// Hand every job of `owner` to `to`. An agent that ends while a command
+    /// of its own is still running gives it back to the one above.
+    pub fn reparent_all(&self, owner: u32, to: u32) {
+        for j in self.jobs.lock().unwrap().iter() {
+            if j.owner() == owner {
+                j.reparent(to);
+            }
+        }
     }
 
     pub fn running(&self) -> usize {
@@ -379,13 +450,14 @@ impl Jobs {
             .count()
     }
 
-    /// One line per job that finished since this audience last asked.
+    /// One line per job that finished since this audience last asked, and that
+    /// belongs to it.
     pub fn notices(&self, who: Audience) -> Vec<String> {
         self.jobs
             .lock()
             .unwrap()
             .iter()
-            .filter(|j| j.claim(who))
+            .filter(|j| who.covers(j) && j.claim(who))
             .map(|j| j.summary())
             .collect()
     }
@@ -393,11 +465,9 @@ impl Jobs {
     /// True when a job has ended that this audience has not been told about,
     /// without claiming the news.
     pub fn unheard(&self, who: Audience) -> bool {
-        self.jobs
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|j| !j.running() && j.reported.load(Ordering::Relaxed) & who.bit() == 0)
+        self.jobs.lock().unwrap().iter().any(|j| {
+            who.covers(j) && !j.running() && j.reported.load(Ordering::Relaxed) & who.bit() == 0
+        })
     }
 
     /// Called when a job prints or ends. Whoever is watching gets one wake
@@ -420,10 +490,28 @@ impl Jobs {
         self.pending.store(false, Ordering::SeqCst);
     }
 
-    /// Stop every running job. Called when ah exits.
-    pub fn shutdown(&self) {
-        for j in self.all() {
-            j.kill(Duration::from_millis(200));
+    /// Stop every running job and wait for it. Called when ah exits, where a
+    /// kill that finishes on a thread of its own would never get the chance:
+    /// the process is gone before the thread wakes up.
+    pub fn shutdown(&self, grace: Duration) {
+        let jobs = self.all();
+        for j in &jobs {
+            j.term();
+        }
+        let deadline = Instant::now() + grace;
+        for j in &jobs {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if !left.is_zero() {
+                j.wait(left);
+            }
+        }
+        for j in &jobs {
+            j.hard_kill();
+        }
+        // A killed process is only done once its pipes close and the reaper
+        // has it, which is what the rest of the table believes.
+        for j in &jobs {
+            j.wait(Duration::from_millis(200));
         }
     }
 }
@@ -497,7 +585,7 @@ mod tests {
     #[test]
     fn runs_and_reports_exit_code() {
         let j = table()
-            .spawn("sh", "echo one; echo two 1>&2; exit 3", &cwd(), 65536)
+            .spawn("sh", "echo one; echo two 1>&2; exit 3", &cwd(), 65536, 0)
             .unwrap();
         assert!(j.wait(Duration::from_secs(5)));
         assert_eq!(j.state(), State::Done(3));
@@ -509,7 +597,7 @@ mod tests {
 
     #[test]
     fn waiting_times_out_then_the_job_can_be_killed() {
-        let j = table().spawn("sh", "sleep 30", &cwd(), 65536).unwrap();
+        let j = table().spawn("sh", "sleep 30", &cwd(), 65536, 0).unwrap();
         assert!(!j.wait(Duration::from_millis(100)));
         assert!(j.running());
         j.kill(Duration::from_millis(50));
@@ -544,23 +632,23 @@ mod tests {
     #[test]
     fn a_finish_is_announced_once_per_audience() {
         let _guard = notice_lock();
-        let j = table().spawn("sh", "true", &cwd(), 65536).unwrap();
+        let j = table().spawn("sh", "true", &cwd(), 65536, 0).unwrap();
         assert!(j.wait(Duration::from_secs(5)));
-        assert!(table().unheard(Audience::Model));
+        assert!(table().unheard(Audience::Model(0)));
         let mine = format!("job {} exited 0", j.id);
         assert!(
             table()
-                .notices(Audience::Model)
+                .notices(Audience::Model(0))
                 .iter()
                 .any(|n| n.starts_with(&mine))
         );
         assert!(
             !table()
-                .notices(Audience::Model)
+                .notices(Audience::Model(0))
                 .iter()
                 .any(|n| n.starts_with(&mine))
         );
-        assert!(!table().unheard(Audience::Model));
+        assert!(!table().unheard(Audience::Model(0)));
         assert!(
             table()
                 .notices(Audience::Ui)
@@ -568,5 +656,73 @@ mod tests {
                 .any(|n| n.starts_with(&mine))
         );
         table().remove(j.id);
+    }
+
+    /// A table of this test's own. The process-wide one is shared with every
+    /// other test running beside it, and these want to count what is in it.
+    fn own_table() -> Jobs {
+        Jobs {
+            jobs: Mutex::new(Vec::new()),
+            next_id: AtomicU32::new(1),
+            keep: 32,
+            waker: Mutex::new(None),
+            pending: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    #[test]
+    fn news_of_a_job_only_reaches_the_agent_that_started_it() {
+        let t = own_table();
+        let mine = t.spawn("sh", "true", &cwd(), 65536, 0).unwrap();
+        let theirs = t.spawn("sh", "true", &cwd(), 65536, 7).unwrap();
+        assert!(mine.wait(Duration::from_secs(5)));
+        assert!(theirs.wait(Duration::from_secs(5)));
+
+        let heard = t.notices(Audience::Model(0));
+        assert_eq!(heard.len(), 1, "{heard:?}");
+        assert!(heard[0].starts_with(&format!("job {} exited 0", mine.id)));
+        assert!(t.unheard(Audience::Model(7)));
+
+        let theirs_heard = t.notices(Audience::Model(7));
+        assert_eq!(theirs_heard.len(), 1, "{theirs_heard:?}");
+        assert!(theirs_heard[0].starts_with(&format!("job {} exited 0", theirs.id)));
+    }
+
+    #[test]
+    fn one_agent_cannot_reach_anothers_job() {
+        let t = own_table();
+        let j = t.spawn("sh", "true", &cwd(), 65536, 7).unwrap();
+        assert!(j.wait(Duration::from_secs(5)));
+        assert!(t.get_owned(j.id, 0).is_none());
+        assert!(t.get_owned(j.id, 7).is_some());
+        assert!(t.owned_by(0).is_empty());
+    }
+
+    #[test]
+    fn a_job_left_behind_is_handed_back() {
+        let t = own_table();
+        let j = t.spawn("sh", "true", &cwd(), 65536, 7).unwrap();
+        assert!(j.wait(Duration::from_secs(5)));
+        t.reparent_all(7, 0);
+        assert_eq!(j.owner(), 0);
+        let heard = t.notices(Audience::Model(0));
+        assert!(
+            heard
+                .iter()
+                .any(|n| n.starts_with(&format!("job {} exited 0", j.id))),
+            "{heard:?}"
+        );
+    }
+
+    #[test]
+    fn shutdown_ends_a_job_that_ignores_the_polite_signal() {
+        let t = own_table();
+        let j = t
+            .spawn("sh", "trap '' TERM; sleep 30", &cwd(), 65536, 0)
+            .unwrap();
+        // Give the shell time to install the trap before the signal lands.
+        assert!(!j.wait(Duration::from_millis(200)));
+        t.shutdown(Duration::from_millis(200));
+        assert!(!j.running(), "shutdown returned with the job still running");
     }
 }
