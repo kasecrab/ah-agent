@@ -47,14 +47,19 @@ back.
 ## Compaction
 
 The status bar shows how full the context window is (`42%`). The window comes
-from the model catalogue, or `context.window` when set. When the conversation
-reaches `context.compact_at` percent (default 90) and `context.auto_compact`
-is on, ah asks the model for a summary (at most `context.summary_max_tokens`
-tokens, no tools), replaces the messages with one user message containing it,
-and writes a `_compact` marker to the session file. This happens before a
-new message is sent or between tool calls inside a turn, never in the middle
-of a request. `/compact [focus]` does it on demand; a focus is appended to the
-summary request.
+from the model catalogue, or `context.window` when set. A model the catalogue
+does not list has no window, and without one nothing is compacted on its own:
+ah says so once at the start of a turn, and `context.window` sets a size by
+hand. The catalogue is looked up again each turn until it answers, so one that
+arrives mid-session is picked up.
+
+When the conversation reaches `context.compact_at` percent (default 90) and
+`context.auto_compact` is on, ah asks the model for a summary (at most
+`context.summary_max_tokens` tokens, no tools), replaces the messages with one
+user message containing it, and writes a `_compact` marker to the session file.
+This happens before a new message is sent or between tool calls inside a turn,
+never in the middle of a request. `/compact [focus]` does it on demand; a focus
+is appended to the summary request.
 
 While the summary is being written the working line reads `Compacting` and
 carries a bar: `[━━━━━━━━━───────] 56%`. Two things move it and it takes

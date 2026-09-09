@@ -127,6 +127,10 @@ enum Grain {
 /// Two clicks count as a double click within this long, in the same place.
 const DOUBLE_CLICK_MS: u128 = 400;
 
+/// A cached model catalogue older than this is still used, but a fresh one is
+/// fetched behind it.
+const CATALOGUE_MAX_AGE: Duration = Duration::from_secs(24 * 3600);
+
 /// The window title for a session: its name, else what it was first asked to
 /// do, else where it is running.
 fn title_text(fmt: &str, task: &str, cwd: &str, model: &str, session: &str) -> String {
@@ -712,14 +716,21 @@ impl App {
 
     /// Window and modalities of the current model from the cached catalogue
     /// (`context.window` overrides the window). Without a usable cache the
-    /// catalogue is fetched once in the background.
+    /// catalogue is fetched once in the background, and a cache a day old is
+    /// used while a fresh one is fetched behind it: a model added since the
+    /// snapshot was taken has no window, and no window means no compaction.
     fn refresh_window(&mut self) {
         let s = self.stack.settings();
         let id = s.model.id.clone();
         let override_window = s.context.window;
         if self.catalogue.is_none() {
             match models::load_cached() {
-                Some((m, _)) => self.catalogue = Some(m),
+                Some((m, age)) => {
+                    self.catalogue = Some(m);
+                    if age > CATALOGUE_MAX_AGE {
+                        self.fetch_models();
+                    }
+                }
                 None => self.fetch_models(),
             }
         }

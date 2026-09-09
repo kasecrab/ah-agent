@@ -173,8 +173,11 @@ pub struct Engine {
     pub total_usage: Usage,
     /// Conversation size as of the last response.
     pub context_tokens: u64,
-    /// `(model id, window)` looked up in the catalogue.
+    /// `(model id, window)` looked up in the catalogue. Only a real window is
+    /// kept: a miss must be retried, since the catalogue may still be on its way.
     window: Option<(String, u64)>,
+    /// Whether this session has already been told its window is unknown.
+    warned_no_window: bool,
 }
 
 impl Engine {
@@ -209,6 +212,7 @@ impl Engine {
             total_usage: Usage::default(),
             context_tokens: 0,
             window: None,
+            warned_no_window: false,
         };
         e.rebuild_provider();
         // A resumed conversation is already using the window, but no reply has
@@ -243,8 +247,28 @@ impl Engine {
             return *w;
         }
         let w = ah_core::models::context_window(id).unwrap_or(0);
-        self.window = Some((id.clone(), w));
+        // A miss is deliberately not remembered. The catalogue is fetched in
+        // the background and lands in a file this reads, so remembering a zero
+        // would leave auto compaction off for the rest of the process and let
+        // the conversation grow until the provider refuses it.
+        if w > 0 {
+            self.window = Some((id.clone(), w));
+        }
         w
+    }
+
+    /// Say once that the window is unknown. Auto compaction is off until it is
+    /// known, and nothing else on screen would show that.
+    fn warn_if_no_window(&mut self, window: u64, io: &dyn AgentIo) {
+        if window > 0 || self.warned_no_window || !self.settings.context.auto_compact {
+            return;
+        }
+        self.warned_no_window = true;
+        io.emit(AgentEvent::Notice(format!(
+            "the model catalogue does not give a context window for {}, so the conversation \
+             will not be compacted on its own. Set context.window to a size to turn it back on.",
+            self.settings.model.id
+        )));
     }
 
     /// Agent over this engine's provider, registry, hooks and settings.
@@ -306,6 +330,7 @@ impl Engine {
         }
         if model_changed {
             self.rebuild_provider();
+            self.warned_no_window = false;
         }
         if tools_changed {
             self.registry = Registry::builtins(&self.settings.tools);
@@ -342,6 +367,7 @@ impl Engine {
         io: &dyn AgentIo,
     ) -> Result<TurnSummary, ah_core::Error> {
         let window = self.context_window();
+        self.warn_if_no_window(window, io);
         self.cancel.store(false, Ordering::Relaxed);
         let mut messages = std::mem::take(&mut self.session.messages);
         let mut no_hooks = NoHooks;
@@ -798,6 +824,42 @@ pub fn render_status_template(fmt: &str, ctx: &StatusContext) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Collects the notices an engine emits.
+    struct Heard(Mutex<Vec<String>>);
+
+    impl AgentIo for Heard {
+        fn emit(&self, ev: AgentEvent) {
+            if let AgentEvent::Notice(n) = ev {
+                self.0.lock().unwrap().push(n);
+            }
+        }
+        fn ask_permission(&self, _call: &ToolCall, _reason: &str) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn an_unknown_window_is_looked_up_again_and_said_once() {
+        let mut stack = SettingsStack::new();
+        stack
+            .push(
+                Origin::Cli,
+                serde_json::json!({"model": {"id": "nobody/not-a-real-model"}}),
+            )
+            .unwrap();
+        let mut e = Engine::new(&stack, ".".into(), None, false).unwrap();
+        assert_eq!(e.context_window(), 0);
+        // Remembering the miss would leave auto compaction off for the whole
+        // process, and the conversation would grow until the provider refused it.
+        assert!(e.window.is_none(), "a miss must be looked up again");
+        let io = Heard(Mutex::new(Vec::new()));
+        e.warn_if_no_window(0, &io);
+        e.warn_if_no_window(0, &io);
+        let said = io.0.lock().unwrap();
+        assert_eq!(said.len(), 1, "said more than once: {said:?}");
+        assert!(said[0].contains("nobody/not-a-real-model"), "{}", said[0]);
+    }
 
     #[test]
     fn context_labels() {
