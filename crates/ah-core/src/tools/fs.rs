@@ -96,6 +96,11 @@ impl Tool for WriteFile {
             return ToolResult::err("missing `content`");
         };
         let path = resolve_path(ctx.cwd, p);
+        // Agents run side by side; one file is written by one of them at a time.
+        let lock = super::path_lock(&path);
+        let _held = lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(parent) = path.parent()
             && let Err(e) = std::fs::create_dir_all(parent)
         {
@@ -172,6 +177,11 @@ impl Tool for EditFile {
             Err(e) => return ToolResult::err(e),
         };
         let path = resolve_path(ctx.cwd, p);
+        // Read, apply and write are one step as far as other agents are concerned.
+        let lock = super::path_lock(&path);
+        let _held = lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let text = match std::fs::read_to_string(&path) {
             Ok(t) => t,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -245,6 +255,36 @@ fn edits_from(args: &Value) -> Result<Vec<(String, String, bool)>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn two_agents_editing_one_file_do_not_lose_each_others_work() {
+        let dir = std::env::temp_dir().join(format!("ah-race-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("f.txt"), "one\ntwo\n").unwrap();
+        let settings = ah_abi::ToolSettings::default();
+        let edit = |old: &str, new: &str| {
+            let ctx = ToolCtx {
+                cwd: &dir,
+                settings: &settings,
+                agent: 0,
+                cancel: crate::tools::never(),
+                ask: crate::tools::no_user(),
+                spawn: None,
+            };
+            EditFile.run(
+                &json!({"path": "f.txt", "old_string": old, "new_string": new}),
+                &ctx,
+            )
+        };
+        std::thread::scope(|s| {
+            s.spawn(|| edit("one", "ONE"));
+            s.spawn(|| edit("two", "TWO"));
+        });
+        let text = std::fs::read_to_string(dir.join("f.txt")).unwrap();
+        assert_eq!(text, "ONE\nTWO\n", "an edit was lost: {text:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn several_edits_in_one_call() {

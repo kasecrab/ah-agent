@@ -50,6 +50,24 @@ pub fn describe(name: &str, args: &Value) -> Option<String> {
         }
         "plan" => Some(format!("Plan({})", plan(args))),
         "ask_user" => Some(format!("Ask({})", asked(args)?)),
+        "agent" => {
+            let tasks = args.get("tasks").and_then(Value::as_array)?;
+            let first = tasks.first().and_then(|t| arg_str(t, "task"))?;
+            Some(match tasks.len() {
+                1 => format!("Agent({})", one_line(first)),
+                n => format!("Agent({n} tasks: {})", one_line(first)),
+            })
+        }
+        "agents" => {
+            let id = arg_u64(args, "id").unwrap_or(0);
+            Some(match arg_str(args, "action").unwrap_or("list") {
+                "status" => "Agents(status)".into(),
+                "wait" => "Agents(wait)".into(),
+                "kill" => format!("Agents(stop {id})"),
+                "say" => format!("Agents(say to {id})"),
+                _ => "Agents(list)".into(),
+            })
+        }
         _ => None,
     }
 }

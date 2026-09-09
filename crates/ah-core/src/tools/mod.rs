@@ -186,6 +186,19 @@ pub(crate) fn arg_u64(args: &Value, key: &str) -> Option<u64> {
     })
 }
 
+/// One lock per path, so two agents editing the same file take turns instead
+/// of reading the same old copy and writing over each other.
+pub fn path_lock(path: &std::path::Path) -> std::sync::Arc<std::sync::Mutex<()>> {
+    static LOCKS: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<PathBuf, std::sync::Arc<std::sync::Mutex<()>>>>,
+    > = std::sync::OnceLock::new();
+    let map = LOCKS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut map = map
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    map.entry(path.to_path_buf()).or_default().clone()
+}
+
 pub fn resolve_path(cwd: &std::path::Path, p: &str) -> PathBuf {
     let path = if let Some(rest) = p.strip_prefix("~/") {
         dirs::home_dir().unwrap_or_default().join(rest)

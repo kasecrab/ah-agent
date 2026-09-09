@@ -11,6 +11,12 @@ host calls below, a fuel budget per hook call (`plugins.fuel_per_call`) and a
 memory cap (`plugins.max_memory_bytes`). A hook that traps or runs out of fuel
 is disabled for the rest of the session; the harness keeps going.
 
+Plugins run for the conversation you are in, not for subagents: the
+interpreter is one, and a hook cannot be in two loops at once. So a plugin
+that gates tool calls does not see what an agent does, which is why an agent
+gets only the tools its type lists (`ah docs config`), and why the ones it
+gets by default cannot write anything.
+
 ## Where plugins load from
 
 1. `~/.config/ah/plugins/*.wasm`

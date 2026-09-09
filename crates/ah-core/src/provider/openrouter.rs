@@ -29,7 +29,14 @@ impl OpenRouter {
             .timeout_connect(Some(Duration::from_secs(20)))
             .http_status_as_error(false)
             .user_agent(concat!("ah/", env!("CARGO_PKG_VERSION")))
-            .max_idle_connections(2)
+            // One per agent that can be streaming at once, plus the catalogue
+            // fetch: subagents share this pool, and a connection they cannot
+            // keep is a TLS handshake they pay for again.
+            .max_idle_connections(8)
+            .max_idle_connections_per_host(8)
+            // A model that stops sending without closing the socket would
+            // otherwise park the reader thread for the life of the process.
+            .timeout_recv_body(Some(Duration::from_secs(120)))
             .build();
         Self {
             agent: config.new_agent(),
