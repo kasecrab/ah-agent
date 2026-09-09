@@ -20,6 +20,9 @@ pub enum StreamEvent {
         name: Option<String>,
         arguments: String,
     },
+    /// A complete generated image as a `data:` URL. Image models send the
+    /// whole picture in one chunk; there is no partial form to accumulate.
+    Image(String),
     Usage(Usage),
     Finish(String),
 }
@@ -38,6 +41,8 @@ pub struct Accumulator {
     pub content: String,
     pub reasoning: String,
     pub tool_calls: Vec<ToolCall>,
+    /// Generated images as `data:` URLs, in arrival order.
+    pub images: Vec<String>,
     pub usage: Usage,
     pub finish_reason: Option<String>,
 }
@@ -73,6 +78,13 @@ impl Accumulator {
                 }
                 tc.function.arguments.push_str(arguments);
             }
+            // A provider that repeats the image on the final `message` as
+            // well as in a delta would otherwise store it twice.
+            StreamEvent::Image(url) => {
+                if !self.images.iter().any(|u| u == url) {
+                    self.images.push(url.clone());
+                }
+            }
             StreamEvent::Usage(u) => self.usage = *u,
             StreamEvent::Finish(r) => self.finish_reason = Some(r.clone()),
         }
@@ -97,6 +109,7 @@ impl Accumulator {
         if !self.reasoning.is_empty() {
             m.reasoning = Some(self.reasoning);
         }
+        m.images = self.images;
         m
     }
 }

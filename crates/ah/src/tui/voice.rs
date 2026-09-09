@@ -21,9 +21,18 @@ use super::Msg;
 pub enum Event {
     /// A phrase was recorded and is ready to be transcribed.
     Phrase(ah_voice::Phrase),
-    Delta { seq: u64, text: String },
-    Done { seq: u64, cost: f64 },
-    Failed { seq: u64, message: String },
+    Delta {
+        seq: u64,
+        text: String,
+    },
+    Done {
+        seq: u64,
+        cost: f64,
+    },
+    Failed {
+        seq: u64,
+        message: String,
+    },
 }
 
 /// How the talk key behaves here, which is not a matter of opinion but of
@@ -333,11 +342,16 @@ impl Session {
         );
         let req = ChatRequest {
             model: self.model.clone(),
-            messages: vec![Message::system(system), Message::user_with_audio(user, vec![url])],
+            messages: vec![
+                Message::system(system),
+                Message::user_with_audio(user, vec![url]),
+            ],
             tools: Vec::new(),
             max_tokens: Some(256),
             temperature: Some(0.0),
             top_p: None,
+            // Transcription: words back, never pictures.
+            modalities: Vec::new(),
             reasoning: None,
             provider: None,
             session_id: Some(self.route.clone()),
@@ -414,7 +428,6 @@ impl Session {
         self.chunks.clear();
         self.waiting.clear();
     }
-
 }
 
 /// Characters of the sentence so far sent with each phrase. Long enough to

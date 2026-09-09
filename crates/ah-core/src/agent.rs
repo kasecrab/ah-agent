@@ -339,6 +339,8 @@ impl<'a> Agent<'a> {
             max_tokens: Some(self.settings.context.summary_max_tokens),
             temperature: None,
             top_p: None,
+            // A summariser is never asked to draw.
+            modalities: Vec::new(),
             reasoning: None,
             provider: self.settings.model.provider.clone(),
             session_id: self.session_key(),
@@ -534,6 +536,7 @@ impl<'a> Agent<'a> {
                 max_tokens: self.settings.model.max_tokens,
                 temperature: self.settings.model.temperature,
                 top_p: self.settings.model.top_p,
+                modalities: Vec::new(),
                 reasoning: self.settings.model.reasoning.clone(),
                 provider: self.settings.model.provider.clone(),
                 session_id: self.session_key(),

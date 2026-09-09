@@ -159,6 +159,12 @@ pub struct ChatRequest {
     pub temperature: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f32>,
+    /// Output modalities to ask the model for: `["image", "text"]` on a model
+    /// that draws, `["image"]` on one with no text output. Empty leaves the
+    /// key off the request, which is what a text model wants — asking a model
+    /// that cannot draw for images is an error on some providers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modalities: Vec<String>,
     /// OpenRouter `reasoning` object (`{"effort": "high"}`, `{"max_tokens": 2000}`, ...).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<serde_json::Value>,

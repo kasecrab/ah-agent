@@ -102,10 +102,56 @@ struct Chunk {
 struct Choice {
     #[serde(default)]
     delta: Delta,
+    /// The whole message, which some providers repeat on the last chunk. Only
+    /// its images are read: the text already arrived as deltas, and reading it
+    /// again would say everything twice.
+    #[serde(default)]
+    message: Option<MessageWire>,
     #[serde(default)]
     finish_reason: Option<String>,
     #[serde(default)]
     error: Option<ApiError>,
+}
+
+#[derive(Deserialize, Default)]
+struct MessageWire {
+    #[serde(default)]
+    images: Vec<ImageWire>,
+}
+
+/// `{"type":"image_url","image_url":{"url":"data:…"}}`. Some providers put a
+/// bare string on `image_url`, and a few put the url one level up.
+#[derive(Deserialize)]
+struct ImageWire {
+    #[serde(default)]
+    image_url: Option<ImageUrlWire>,
+    #[serde(default)]
+    url: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ImageUrlWire {
+    /// First, so a bare string is not tried against the object form.
+    Url(String),
+    Object {
+        #[serde(default)]
+        url: Option<String>,
+    },
+}
+
+impl ImageWire {
+    /// The inline image, if there is one. A remote url is dropped: ah has no
+    /// fetcher, and adding one would mean a dependency and a fresh set of
+    /// questions about what a model can make the client request.
+    fn url(self) -> Option<String> {
+        match self.image_url {
+            Some(ImageUrlWire::Url(u)) => Some(u),
+            Some(ImageUrlWire::Object { url }) => url,
+            None => self.url,
+        }
+        .filter(|u| u.starts_with("data:"))
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -116,6 +162,8 @@ struct Delta {
     reasoning: Option<String>,
     #[serde(default)]
     tool_calls: Vec<ToolCallDelta>,
+    #[serde(default)]
+    images: Vec<ImageWire>,
 }
 
 #[derive(Deserialize)]
@@ -199,6 +247,18 @@ pub(crate) fn handle_chunk(payload: &str, on_event: OnEvent<'_>) -> Result<bool>
             && !on_event(StreamEvent::Text(t))
         {
             return Ok(false);
+        }
+        for img in choice
+            .delta
+            .images
+            .into_iter()
+            .chain(choice.message.unwrap_or_default().images)
+        {
+            if let Some(url) = img.url()
+                && !on_event(StreamEvent::Image(url))
+            {
+                return Ok(false);
+            }
         }
         for tc in choice.delta.tool_calls {
             let f = tc.function.unwrap_or_default();
@@ -385,8 +445,11 @@ impl Provider for OpenRouter {
     }
 }
 
-/// Turn `{"content": "...", "images": [...]}` into the OpenAI content-parts
-/// shape; messages without images are left alone.
+/// Put `images` on the wire. A user message becomes OpenAI content parts; an
+/// assistant message keeps its text and hands its images back in the shape
+/// they arrived in, which is what a provider expects to see for a picture it
+/// generated — the OpenAI schema has no image content part for an assistant.
+/// Messages without images are left alone.
 fn attach_images(body: &mut Value) {
     let Some(msgs) = body.get_mut("messages").and_then(|m| m.as_array_mut()) else {
         return;
@@ -395,7 +458,20 @@ fn attach_images(body: &mut Value) {
         let Some(images) = m.get("images").and_then(|i| i.as_array()).cloned() else {
             continue;
         };
-        let text = m
+        if images.is_empty() {
+            continue;
+        }
+        let assistant = m.get("role").and_then(Value::as_str) == Some("assistant");
+        let Some(o) = m.as_object_mut() else { continue };
+        if assistant {
+            let wire: Vec<Value> = images
+                .into_iter()
+                .map(|url| serde_json::json!({"type": "image_url", "image_url": {"url": url}}))
+                .collect();
+            o.insert("images".into(), Value::Array(wire));
+            continue;
+        }
+        let text = o
             .get("content")
             .and_then(|c| c.as_str())
             .unwrap_or("")
@@ -407,10 +483,8 @@ fn attach_images(body: &mut Value) {
         for url in images {
             parts.push(serde_json::json!({"type": "image_url", "image_url": {"url": url}}));
         }
-        if let Some(o) = m.as_object_mut() {
-            o.insert("content".into(), Value::Array(parts));
-            o.remove("images");
-        }
+        o.insert("content".into(), Value::Array(parts));
+        o.remove("images");
     }
 }
 
@@ -496,6 +570,59 @@ mod tests {
         assert_eq!(parts[0]["text"], "look");
         assert_eq!(parts[1]["image_url"]["url"], "data:image/png;base64,AA==");
         assert!(body["messages"][1].get("images").is_none());
+    }
+
+    #[test]
+    fn an_assistant_keeps_its_images_as_an_array() {
+        let mut body = serde_json::json!({"messages": [
+            {"role": "user", "content": "draw a cat"},
+            {"role": "assistant", "content": "here", "images": ["data:image/png;base64,AA=="]},
+            {"role": "assistant", "content": "", "images": ["data:image/png;base64,BB=="]},
+            {"role": "user", "content": "empty", "images": []},
+        ]});
+        attach_images(&mut body);
+        // Text stays a string and the images ride beside it, the way the
+        // provider sent them back.
+        assert_eq!(body["messages"][1]["content"], "here");
+        let imgs = body["messages"][1]["images"].as_array().unwrap();
+        assert_eq!(imgs.len(), 1);
+        assert_eq!(imgs[0]["type"], "image_url");
+        assert_eq!(imgs[0]["image_url"]["url"], "data:image/png;base64,AA==");
+        // An image-only answer keeps its empty content.
+        assert_eq!(body["messages"][2]["content"], "");
+        // A user message with no images is not rewritten into empty parts.
+        assert_eq!(body["messages"][3]["content"], "empty");
+    }
+
+    #[test]
+    fn generated_images_arrive_as_events() {
+        const IMAGES: &str = concat!(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Here you go.\"}}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"images\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,AAAA\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"images\":[{\"type\":\"image_url\",\"image_url\":\"data:image/png;base64,BBBB\"}]}}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"images\":[{\"url\":\"https://example.com/a.png\"},{}]}}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{},\"message\":{\"images\":[{\"image_url\":{\"url\":\"data:image/png;base64,AAAA\"}}]},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let mut acc = Accumulator::default();
+        let cancel = AtomicBool::new(false);
+        read_stream(IMAGES.as_bytes(), &cancel, &mut |e| {
+            acc.apply(&e);
+            true
+        })
+        .unwrap();
+        assert_eq!(acc.content, "Here you go.");
+        // Both shapes of url are read, the remote one is dropped, and the
+        // repeat on `message` does not become a second copy.
+        assert_eq!(
+            acc.images,
+            vec![
+                "data:image/png;base64,AAAA".to_string(),
+                "data:image/png;base64,BBBB".to_string()
+            ]
+        );
+        assert_eq!(acc.finish_reason.as_deref(), Some("stop"));
+        assert_eq!(acc.into_message().images.len(), 2);
     }
 
     #[test]
