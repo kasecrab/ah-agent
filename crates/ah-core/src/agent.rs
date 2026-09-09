@@ -1502,6 +1502,37 @@ mod tests {
     }
 
     #[test]
+    fn the_user_echo_moves_a_picture_off_the_assistant_message() {
+        let url = "data:image/png;base64,AA==".to_string();
+        let mut plain = Message::assistant("here it is");
+        plain.images = vec![url.clone()];
+        // An assistant message with tool calls is left alone: its tool results
+        // have to follow it, and a message wedged in between is an error.
+        let mut with_call = Message::assistant("");
+        with_call.images = vec![url.clone()];
+        with_call.tool_calls = vec![ToolCall {
+            id: "c1".into(),
+            kind: "function".into(),
+            function: ToolFunction {
+                name: "bash".into(),
+                arguments: "{}".into(),
+            },
+        }];
+        let mut all = vec![
+            Message::user("draw"),
+            plain,
+            with_call,
+            Message::tool_result("c1", "ok"),
+        ];
+        move_assistant_images_to_user(&mut all);
+        assert!(all[1].images.is_empty());
+        assert_eq!(all[2].role, Role::User);
+        assert_eq!(all[2].images, vec![url.clone()]);
+        assert_eq!(all[3].images, vec![url]);
+        assert_eq!(all[4].role, Role::Tool);
+    }
+
+    #[test]
     fn a_prompt_counts_an_image_as_tokens_not_as_base64() {
         let mut with = Message::assistant("hi");
         with.images = vec!["ah-image:s/1-0.png".into()];
