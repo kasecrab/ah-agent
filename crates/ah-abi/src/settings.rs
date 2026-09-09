@@ -22,6 +22,7 @@ pub struct Settings {
     pub context: ContextSettings,
     pub agents: AgentSettings,
     pub voice: VoiceSettings,
+    pub images: ImageSettings,
     /// Plugin-private or forward-compatible keys. Preserved through merges.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -843,10 +844,105 @@ impl VoiceSettings {
             return (self.phrase_ms, self.max_chunk_ms, self.max_inflight);
         };
         (
-            if self.phrase_ms == d.phrase_ms { phrase } else { self.phrase_ms },
-            if self.max_chunk_ms == d.max_chunk_ms { chunk } else { self.max_chunk_ms },
-            if self.max_inflight == d.max_inflight { inflight } else { self.max_inflight },
+            if self.phrase_ms == d.phrase_ms {
+                phrase
+            } else {
+                self.phrase_ms
+            },
+            if self.max_chunk_ms == d.max_chunk_ms {
+                chunk
+            } else {
+                self.max_chunk_ms
+            },
+            if self.max_inflight == d.max_inflight {
+                inflight
+            } else {
+                self.max_inflight
+            },
         )
+    }
+}
+
+/// Images the model generates: whether to ask for them, where they land, and
+/// how many go back with the next request.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ImageSettings {
+    /// When to ask a model for pictures. `auto` asks only models the
+    /// catalogue says draw, `always` asks regardless — for a catalogue that
+    /// has not caught up, or a proxy of your own — and `off` never asks.
+    pub output: ImageOutput,
+    /// Where generated images are written. Empty means one directory per
+    /// session under the data directory.
+    pub dir: String,
+    /// How many of the most recent generated images go back to the model with
+    /// the next request. Editing a picture needs at least one; 0 is the only
+    /// value that never disturbs the provider's prompt cache.
+    pub history: u32,
+    /// Shape of a resent image. `assistant` hands it back on the message it
+    /// came from, which is what OpenRouter expects; `user` re-attaches it to a
+    /// message after it, for a provider that refuses assistant images.
+    pub echo: ImageEcho,
+    /// How pictures are drawn. `auto` uses the kitty or iTerm2 protocol when
+    /// the terminal speaks one; `off`, and any terminal that speaks neither,
+    /// gets a one-line chip instead.
+    pub inline: ImageInline,
+    /// Tallest an inline picture gets, in rows. Also capped at two thirds of
+    /// the window, so a picture always leaves room for the conversation.
+    pub max_rows: u16,
+    /// Widest an inline picture gets, in columns; 0 means the transcript width.
+    pub max_cols: u16,
+    /// Terminal cell size in pixels as `"9x18"`, for terminals that will not
+    /// report one. Empty asks the terminal.
+    pub cell_px: String,
+    /// Command that opens a saved image. `{path}` is substituted, or the path
+    /// is appended. Empty tries `xdg-open`, `open`, then `start`.
+    pub open_cmd: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageOutput {
+    #[default]
+    Auto,
+    Always,
+    Off,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageEcho {
+    #[default]
+    Assistant,
+    User,
+    Off,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageInline {
+    #[default]
+    Auto,
+    Kitty,
+    Iterm2,
+    Off,
+}
+
+impl Default for ImageSettings {
+    fn default() -> Self {
+        Self {
+            output: ImageOutput::Auto,
+            dir: String::new(),
+            // Image models edit: "now make it night" is unusable without the
+            // picture it refers to.
+            history: 1,
+            echo: ImageEcho::Assistant,
+            inline: ImageInline::Auto,
+            max_rows: 20,
+            max_cols: 0,
+            cell_px: String::new(),
+            open_cmd: String::new(),
+        }
     }
 }
 

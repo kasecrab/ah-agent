@@ -285,6 +285,36 @@ A plugin with the `statusline` hook receives the rendered text and can replace
 it, either with one string drawn in the bar's colour or with coloured pieces of
 its own (`ah docs plugins`).
 
+## [images]
+
+Pictures a model draws. Ask an image-capable model for one in plain language —
+there is no separate command, and `ah models` marks them `T→TI`. Generated
+images are written to disk; the conversation stores the path, never the bytes.
+
+Inline drawing needs a terminal that speaks the kitty graphics protocol (kitty,
+Ghostty, WezTerm, Warp) or the iTerm2 one. Anywhere else — tmux, screen, VS
+Code, Alacritty — a picture shows as a one-line chip and Ctrl-O opens it.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `output` | `"auto"` | `auto` asks only models the catalogue says draw; `always` asks anyway; `off` never asks |
+| `dir` | `""` | where images land; empty = `<data dir>/images/<session>/` |
+| `history` | `1` | recent generated images resent with the next request; 0 never resends one |
+| `echo` | `"assistant"` | shape of a resent image: `assistant`, or `user` for a provider that refuses assistant images |
+| `inline` | `"auto"` | `auto` detects kitty/iTerm2; force `kitty`, `iterm2`, or `off` for chips only |
+| `max_rows` | `20` | tallest inline picture, in rows; also capped at two thirds of the window |
+| `max_cols` | `0` | widest inline picture, in columns; 0 = the transcript width |
+| `cell_px` | `""` | cell size as `"9x18"` for terminals that will not report one; empty asks the terminal |
+| `open_cmd` | `""` | command that opens a saved image; `{path}` is substituted, else appended; empty tries `xdg-open`, `open`, `start` |
+
+`history` is the one knob that costs money. Providers cache a prompt by its
+exact prefix, so when an image ages out of the window the bytes at that
+position change once — from a picture to a line of text naming its file — and
+the rest of that one request is priced as a miss. At `1` the change is a
+message or two from the end; at `0` an image never enters a prompt at all and
+the prefix is never disturbed. The placeholder text never changes afterwards,
+so this is paid once per image, not once per turn.
+
 ## [permissions]
 
 | Key | Default | Meaning |
