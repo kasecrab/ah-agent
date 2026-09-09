@@ -176,7 +176,10 @@ impl Session {
         self.name = (!name.is_empty()).then(|| name.to_string());
     }
 
-    pub fn push(&mut self, m: Message) {
+    pub fn push(&mut self, mut m: Message) {
+        // Recorded speech is a side channel to the transcriber. It has no
+        // business in the conversation, and none at all in a file on disk.
+        m.audio.clear();
         if let Some(f) = self.file.as_mut()
             && let Ok(s) = serde_json::to_string(&m)
         {

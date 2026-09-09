@@ -27,6 +27,11 @@ pub struct Message {
     /// Attached images as `data:` URLs. Providers send them as content parts.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<String>,
+    /// Attached audio as `data:` URLs. Only dictation builds these, and the
+    /// message it builds is never kept: it goes straight to the provider and
+    /// is dropped, so recorded speech never reaches a session file.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audio: Vec<String>,
 }
 
 impl Message {
@@ -38,6 +43,7 @@ impl Message {
             tool_call_id: None,
             reasoning: None,
             images: Vec::new(),
+            audio: Vec::new(),
         }
     }
     pub fn system(c: impl Into<String>) -> Self {
@@ -52,6 +58,11 @@ impl Message {
     pub fn user_with_images(c: impl Into<String>, images: Vec<String>) -> Self {
         let mut m = Self::new(Role::User, c);
         m.images = images;
+        m
+    }
+    pub fn user_with_audio(c: impl Into<String>, audio: Vec<String>) -> Self {
+        let mut m = Self::new(Role::User, c);
+        m.audio = audio;
         m
     }
     pub fn tool_result(call_id: impl Into<String>, c: impl Into<String>) -> Self {

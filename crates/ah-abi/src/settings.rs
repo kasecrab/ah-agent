@@ -21,6 +21,7 @@ pub struct Settings {
     pub permissions: Permissions,
     pub context: ContextSettings,
     pub agents: AgentSettings,
+    pub voice: VoiceSettings,
     /// Plugin-private or forward-compatible keys. Preserved through merges.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -367,6 +368,10 @@ pub struct Keys {
     pub paste_image: Vec<String>,
     /// Show or hide the plan line above the input.
     pub toggle_plan: Vec<String>,
+    /// Arm and disarm dictation.
+    pub voice: Vec<String>,
+    /// Held to listen while dictation is armed.
+    pub talk: Vec<String>,
 }
 
 impl Default for Keys {
@@ -398,6 +403,8 @@ impl Default for Keys {
             line_end: v(&["ctrl-e", "end"]),
             paste_image: v(&["ctrl-v"]),
             toggle_plan: v(&["alt-p"]),
+            voice: v(&["alt-v"]),
+            talk: v(&["space"]),
         }
     }
 }
@@ -722,6 +729,110 @@ pub struct AgentDef {
     pub timeout_ms: u64,
     /// Merge patch applied over the child's settings, after everything above.
     pub settings: Value,
+}
+
+/// Dictation. Speech is cut into phrases locally and each one is transcribed
+/// by an OpenRouter model that takes audio input, so there is no second key
+/// and no local model. Nothing is ever sent on its own: the words land in the
+/// input box and wait for Enter.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VoiceSettings {
+    /// Offer `/voice` at all. Off, the microphone is never opened.
+    pub enabled: bool,
+    /// Model that does the transcribing; empty asks on first use. Only models
+    /// that accept audio input are offered.
+    pub model: String,
+    /// `fast`, `balanced` or `cheap`: one choice for `phrase_ms`,
+    /// `max_chunk_ms` and `max_inflight`. Anything set by hand wins over it.
+    pub mode: String,
+    /// Words the model would otherwise get wrong: project names, identifiers,
+    /// people. Sent with every phrase, so keep it short.
+    pub prompt_append: String,
+    /// Spoken language; empty lets the model decide.
+    pub language: String,
+    /// `auto` watches what the terminal reports and picks the best it can:
+    /// hold to talk where key releases arrive, otherwise a toggle.
+    pub hotkey_mode: String,
+    /// Silence after the last key repeat that counts as a release, for
+    /// terminals that report no release event.
+    pub release_grace_ms: u64,
+    /// Longest a toggled microphone stays on. Holding a key needs no limit.
+    pub max_listen_secs: u64,
+    /// Input device name; empty takes the system default.
+    pub device: String,
+    /// Command that prints raw signed 16-bit little-endian mono PCM on
+    /// stdout, replacing the built-in capture. Read from the user config or
+    /// the environment only, never from a project file.
+    pub capture_cmd: String,
+    /// Keep the device open while armed. Opening it costs a moment, which
+    /// would otherwise eat the first syllable of every phrase.
+    pub keep_open: bool,
+    /// Capture rate; 0 asks for 16000 and resamples whatever the device gives.
+    pub sample_rate: u32,
+    /// Audio kept before the phrase starts, so nothing is clipped.
+    pub ring_ms: u64,
+    /// Silence that ends a phrase.
+    pub phrase_ms: u64,
+    /// Longest phrase before it is cut anyway, at the quietest moment near
+    /// the end.
+    pub max_chunk_ms: u64,
+    /// Phrases transcribed at the same time.
+    pub max_inflight: usize,
+    /// Audio kept from before speech was detected.
+    pub preroll_ms: u64,
+    /// How far above the noise floor counts as speech.
+    pub speech_ratio: f32,
+    /// Drop what models invent over silence: stock phrases and repeat loops.
+    pub filter: bool,
+    /// Stop a dictation once it has cost this much. 0 does not watch.
+    pub budget_usd: f64,
+    /// Show what the dictation has cost so far next to the timer.
+    pub show_cost: bool,
+    /// Draw the input level. It is the only part that redraws on a clock.
+    pub meter: bool,
+}
+
+impl Default for VoiceSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            model: String::new(),
+            mode: String::from("balanced"),
+            prompt_append: String::new(),
+            language: String::new(),
+            hotkey_mode: String::from("auto"),
+            release_grace_ms: 350,
+            max_listen_secs: 300,
+            device: String::new(),
+            capture_cmd: String::new(),
+            keep_open: true,
+            sample_rate: 0,
+            ring_ms: 2000,
+            phrase_ms: 400,
+            max_chunk_ms: 3500,
+            max_inflight: 2,
+            preroll_ms: 300,
+            speech_ratio: 3.0,
+            filter: true,
+            budget_usd: 0.0,
+            show_cost: false,
+            meter: false,
+        }
+    }
+}
+
+impl VoiceSettings {
+    /// `mode` as the three numbers it stands for, or `None` when the name is
+    /// not one of the presets.
+    pub fn preset(&self) -> Option<(u64, u64, usize)> {
+        match self.mode.as_str() {
+            "fast" => Some((300, 2000, 3)),
+            "balanced" => Some((400, 3500, 2)),
+            "cheap" => Some((700, 8000, 1)),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -165,6 +165,50 @@ theme Claude Code uses, so both look the same in the same terminal.
 Every action is a list of key strings; see `ah docs keys` for the syntax and
 the full default table.
 
+## [voice]
+
+Dictation. `/voice` arms it, the `talk` key (Space) is held to listen, and the
+words land in the input box in grey and turn white when the phrase is done.
+Nothing is ever sent on its own; Enter still sends.
+
+Transcribing is a normal OpenRouter request against a model that takes audio
+input, so there is no second key and no local model — and the audio does leave
+the machine. `/voice model` lists the models that qualify with their audio
+price.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | offer `/voice` at all; off never opens the microphone |
+| `model` | `""` | transcribing model; empty asks on first use |
+| `mode` | `"balanced"` | `fast`, `balanced` or `cheap`: one choice for the three dials below |
+| `prompt_append` | `""` | words the model would get wrong: project names, identifiers, people |
+| `language` | `""` | spoken language; empty lets the model decide |
+| `hotkey_mode` | `"auto"` | `auto`, `push_to_talk` or `toggle`; `auto` uses what the terminal reports |
+| `release_grace_ms` | `350` | silence after the last key repeat that counts as a release |
+| `max_listen_secs` | `300` | longest a toggled microphone stays on; holding a key needs no limit |
+| `device` | `""` | input device name; empty takes the system default |
+| `capture_cmd` | `""` | command printing raw s16le mono PCM on stdout; user config or environment only |
+| `keep_open` | `true` | hold the device open while armed, so no first syllable is lost |
+| `sample_rate` | `0` | capture rate; 0 asks for 16000 and resamples what the device gives |
+| `ring_ms` | `2000` | audio kept in the capture buffer |
+| `phrase_ms` | `400` | silence that ends a phrase |
+| `max_chunk_ms` | `3500` | longest phrase before it is cut at the quietest moment near the end |
+| `max_inflight` | `2` | phrases transcribed at the same time |
+| `preroll_ms` | `300` | audio kept from before speech was detected |
+| `speech_ratio` | `3.0` | how far above the noise floor counts as speech |
+| `filter` | `true` | drop stock phrases and repeat loops models invent over silence |
+| `budget_usd` | `0.0` | stop a dictation once it has cost this much; 0 does not watch |
+| `show_cost` | `false` | show what the dictation has cost next to the timer |
+| `meter` | `false` | draw the input level; the only part that redraws on a clock |
+
+`mode` sets `phrase_ms`, `max_chunk_ms` and `max_inflight` together: `fast` is
+`300 / 2000 / 3`, `balanced` `400 / 3500 / 2`, `cheap` `700 / 8000 / 1`. Any of
+the three set by hand wins over the preset. Shorter phrases reach the screen
+sooner and cost more, because each one is its own request.
+
+`capture_cmd` is a shell command, so it is read from `~/.config/ah/config.toml`
+or `AH_VOICE_CAPTURE_CMD` only. A project's `.ah/config.toml` cannot set it.
+
 ## [tools]
 
 | Key | Default | Meaning |

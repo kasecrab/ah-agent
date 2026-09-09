@@ -301,13 +301,17 @@ impl Provider for OpenRouter {
     fn stream(&self, req: &ChatRequest, cancel: &AtomicBool, on_event: OnEvent<'_>) -> Result<()> {
         let mut body = serde_json::to_value(req)?;
         attach_images(&mut body);
+        let audio_bytes = attach_audio(&mut body);
         body["stream"] = Value::Bool(true);
         body["usage"] = serde_json::json!({ "include": true });
+        // Never the body: one dictated phrase is a few hundred KB of the
+        // user's voice in base64, and the log is a file on disk.
         crate::debug!(
-            "request model={} messages={} tools={}",
+            "request model={} messages={} tools={} audio={}B",
             req.model,
             req.messages.len(),
-            req.tools.len()
+            req.tools.len(),
+            audio_bytes
         );
 
         // The request and every read happen on their own thread: a socket read
@@ -410,6 +414,70 @@ fn attach_images(body: &mut Value) {
     }
 }
 
+/// Turn `{"content": "...", "audio": ["data:audio/wav;base64,..."]}` into
+/// OpenAI `input_audio` parts. Returns how many base64 bytes were attached,
+/// which is all anything is allowed to say about them.
+fn attach_audio(body: &mut Value) -> usize {
+    let Some(msgs) = body.get_mut("messages").and_then(|m| m.as_array_mut()) else {
+        return 0;
+    };
+    let mut bytes = 0;
+    for m in msgs {
+        let Some(audio) = m.get("audio").and_then(|a| a.as_array()).cloned() else {
+            continue;
+        };
+        let text = m
+            .get("content")
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .to_string();
+        let mut parts = match m.get("content").and_then(|c| c.as_array()) {
+            Some(existing) => existing.clone(),
+            None => {
+                let mut v = Vec::new();
+                if !text.is_empty() {
+                    v.push(serde_json::json!({"type": "text", "text": text}));
+                }
+                v
+            }
+        };
+        for url in audio {
+            let Some(url) = url.as_str() else { continue };
+            let (format, data) = split_audio_url(url);
+            bytes += data.len();
+            parts.push(serde_json::json!({
+                "type": "input_audio",
+                "input_audio": {"data": data, "format": format}
+            }));
+        }
+        if let Some(o) = m.as_object_mut() {
+            o.insert("content".into(), Value::Array(parts));
+            o.remove("audio");
+        }
+    }
+    bytes
+}
+
+/// `data:audio/wav;base64,AAAA` splits into `("wav", "AAAA")`. Anything that
+/// is not a data URL is passed through as bare wav payload, which is what a
+/// caller that already has base64 would hand over.
+fn split_audio_url(url: &str) -> (&str, &str) {
+    let Some(rest) = url.strip_prefix("data:") else {
+        return ("wav", url);
+    };
+    let Some((meta, data)) = rest.split_once(',') else {
+        return ("wav", url);
+    };
+    let mime = meta.split(';').next().unwrap_or("");
+    let format = match mime.rsplit_once('/') {
+        Some((_, "mpeg")) => "mp3",
+        Some((_, "x-wav" | "wave")) => "wav",
+        Some((_, sub)) if !sub.is_empty() => sub,
+        _ => "wav",
+    };
+    (format, data)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -428,6 +496,46 @@ mod tests {
         assert_eq!(parts[0]["text"], "look");
         assert_eq!(parts[1]["image_url"]["url"], "data:image/png;base64,AA==");
         assert!(body["messages"][1].get("images").is_none());
+    }
+
+    #[test]
+    fn audio_becomes_input_audio_parts() {
+        let mut body = serde_json::json!({"messages": [
+            {"role": "user", "content": "transcribe", "audio": ["data:audio/wav;base64,QUJD"]},
+        ]});
+        let n = attach_audio(&mut body);
+        assert_eq!(n, 4);
+        let parts = body["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["text"], "transcribe");
+        assert_eq!(parts[1]["type"], "input_audio");
+        assert_eq!(parts[1]["input_audio"]["data"], "QUJD");
+        assert_eq!(parts[1]["input_audio"]["format"], "wav");
+        assert!(body["messages"][0].get("audio").is_none());
+    }
+
+    #[test]
+    fn audio_rides_beside_images_on_one_message() {
+        let mut body = serde_json::json!({"messages": [
+            {"role": "user", "content": "both",
+             "images": ["data:image/png;base64,AA=="],
+             "audio": ["data:audio/wav;base64,QQ=="]},
+        ]});
+        attach_images(&mut body);
+        attach_audio(&mut body);
+        let parts = body["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0]["text"], "both");
+        assert_eq!(parts[1]["type"], "image_url");
+        assert_eq!(parts[2]["type"], "input_audio");
+    }
+
+    #[test]
+    fn audio_formats_come_from_the_mime_type() {
+        assert_eq!(split_audio_url("data:audio/wav;base64,AA"), ("wav", "AA"));
+        assert_eq!(split_audio_url("data:audio/mpeg;base64,AA"), ("mp3", "AA"));
+        assert_eq!(split_audio_url("data:audio/flac;base64,AA"), ("flac", "AA"));
+        assert_eq!(split_audio_url("QUJD"), ("wav", "QUJD"));
     }
 
     const FIXTURE: &str = concat!(

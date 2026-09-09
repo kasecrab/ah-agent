@@ -19,6 +19,10 @@ pub struct ModelInfo {
     pub prompt_per_m: f64,
     #[serde(default)]
     pub completion_per_m: f64,
+    /// USD per million audio input tokens. Dictation is billed here, and the
+    /// spread between models is wide enough that picking blind is expensive.
+    #[serde(default)]
+    pub audio_per_m: f64,
     #[serde(default)]
     pub tools: bool,
     #[serde(default)]
@@ -78,7 +82,7 @@ pub fn modality_icons(input: &[String], output: &[String]) -> String {
 }
 
 /// Bumped when `ModelInfo` gains fields; older caches are refetched.
-const CACHE_VERSION: u32 = 3;
+const CACHE_VERSION: u32 = 4;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Cache {
@@ -150,6 +154,10 @@ pub fn fetch(base_url: &str, api_key: Option<&str>) -> Result<Vec<ModelInfo>> {
                 context_length: m["context_length"].as_u64().unwrap_or(0),
                 prompt_per_m: price("prompt"),
                 completion_per_m: price("completion"),
+                audio_per_m: {
+                    let a = price("input_audio");
+                    if a > 0.0 { a } else { price("audio") }
+                },
                 tools: has("tools"),
                 reasoning: has("reasoning") || has("include_reasoning"),
                 input_modalities: strings(&m["architecture"]["input_modalities"]),
