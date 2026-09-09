@@ -72,23 +72,27 @@ pub fn dock(
     left: Vec<Span<'static>>,
     plan: &Plan,
     jobs: usize,
+    agents: usize,
     show_plan: bool,
     width_cells: usize,
     pal: &Palette,
 ) -> Option<Line<'static>> {
-    let chip: Vec<Span<'static>> = if jobs > 0 {
-        vec![
-            Span::styled(
-                format!(" {jobs} Bash "),
-                Style::default()
-                    .bg(pal.job)
-                    .fg(ratatui::style::Color::Black),
-            ),
-            Span::raw(" "),
-        ]
-    } else {
-        Vec::new()
-    };
+    let black = ratatui::style::Color::Black;
+    let mut chip: Vec<Span<'static>> = Vec::new();
+    if agents > 0 {
+        chip.push(Span::styled(
+            format!(" {agents} Agent "),
+            Style::default().bg(pal.agent).fg(black),
+        ));
+        chip.push(Span::raw(" "));
+    }
+    if jobs > 0 {
+        chip.push(Span::styled(
+            format!(" {jobs} Bash "),
+            Style::default().bg(pal.job).fg(black),
+        ));
+        chip.push(Span::raw(" "));
+    }
     let room = width_cells.saturating_sub(width(&left) + width(&chip) + 2);
     let text = (show_plan && room >= 8)
         .then(|| brief(plan, room))
@@ -191,19 +195,19 @@ mod tests {
     fn the_row_disappears_when_there_is_nothing_left_to_say() {
         let pal = Palette::from_theme(&Theme::default());
         let mut p = plan();
-        assert!(dock(vec![], &p, 0, true, 80, &pal).is_some());
+        assert!(dock(vec![], &p, 0, 0, true, 80, &pal).is_some());
         p.set_status(&[2], Status::Done, "").unwrap();
         p.set_status(&[1], Status::Done, "").unwrap();
-        assert!(dock(vec![], &p, 0, true, 80, &pal).is_none());
-        assert!(dock(vec![], &p, 0, false, 80, &pal).is_none());
-        assert!(dock(vec![], &Plan::default(), 0, true, 80, &pal).is_none());
+        assert!(dock(vec![], &p, 0, 0, true, 80, &pal).is_none());
+        assert!(dock(vec![], &p, 0, 0, false, 80, &pal).is_none());
+        assert!(dock(vec![], &Plan::default(), 0, 0, true, 80, &pal).is_none());
     }
 
     #[test]
     fn the_turn_takes_the_left_and_the_rest_the_right_edge() {
         let pal = Palette::from_theme(&Theme::default());
         let left = vec![Span::raw("Working")];
-        let line = dock(left, &plan(), 2, true, 60, &pal).unwrap();
+        let line = dock(left, &plan(), 2, 0, true, 60, &pal).unwrap();
         assert_eq!(line.width(), 60);
         let text = line.to_string();
         assert!(text.starts_with("Working "), "{text}");
@@ -213,17 +217,26 @@ mod tests {
     #[test]
     fn running_jobs_get_a_chip_of_their_own() {
         let pal = Palette::from_theme(&Theme::default());
-        let line = dock(vec![], &Plan::default(), 2, true, 80, &pal).unwrap();
+        let line = dock(vec![], &Plan::default(), 2, 0, true, 80, &pal).unwrap();
         assert_eq!(line.to_string().trim(), "2 Bash");
+    }
+
+    #[test]
+    fn running_agents_get_a_chip_before_the_jobs() {
+        let pal = Palette::from_theme(&Theme::default());
+        let line = dock(vec![], &Plan::default(), 2, 3, true, 80, &pal).unwrap();
+        assert_eq!(line.to_string().trim(), "3 Agent   2 Bash");
+        let line = dock(vec![], &Plan::default(), 0, 1, true, 80, &pal).unwrap();
+        assert_eq!(line.to_string().trim(), "1 Agent");
     }
 
     #[test]
     fn a_narrow_row_keeps_the_jobs_and_drops_the_plan() {
         let pal = Palette::from_theme(&Theme::default());
-        let line = dock(vec![Span::raw("Working")], &plan(), 1, true, 24, &pal).unwrap();
+        let line = dock(vec![Span::raw("Working")], &plan(), 1, 0, true, 24, &pal).unwrap();
         assert_eq!(line.to_string().trim_end(), "Working          1 Bash");
         // With a little more room the plan comes back, without the task name.
-        let line = dock(vec![Span::raw("Working")], &plan(), 1, true, 34, &pal).unwrap();
+        let line = dock(vec![Span::raw("Working")], &plan(), 1, 0, true, 34, &pal).unwrap();
         assert!(line.to_string().ends_with("1 Bash  plan 0/2"), "{line}");
     }
 

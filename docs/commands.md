@@ -76,6 +76,7 @@ name in, Enter runs it. Plugins can add commands (`ah docs plugins`).
 | `/statusline`, `/status` | tick what the status line shows; Space toggles a row, Esc closes; lasts the session, `statusline.items` in config keeps it |
 | `/reload` | re-read config files and reload plugins |
 | `/plan` | show the task list |
+| `/agents` | the agents the model started; Enter watches one, Ctrl-K stops it |
 | `/plugins` | active plugins |
 | `/tools` | tools offered to the model |
 | `/keys` | active key bindings |
@@ -94,6 +95,8 @@ name in, Enter runs it. Plugins can add commands (`ah docs plugins`).
 | `jobs` | `action` (`list`, `output`, `wait`, `kill`), `id`, optional `from_line`, `tail`, `timeout_ms`; background commands |
 | `plan` | `action` (`set`, `add`, `start`, `done`, `drop`, `update`, `list`), `tasks`, `ids`, `id`, `title`, `parent`, `needs`, `note`; the task list |
 | `ask_user` | `questions`: up to four, each with a `question`, an optional `header`, up to eight `options` (`label`, `description`) and `multi`; puts them to the user one at a time and returns what they said |
+| `agent` | `tasks`: one brief per agent, each with `task` and optionally `agent` (the type), `cwd` and `model`; plus `background` and `timeout_ms`. Starts agents that run on their own and hands back what each reports |
+| `agents` | `action` (`list`, `status`, `wait`, `kill`, `say`), `id`, `ids`, `all`, `timeout_ms`, `text`; looks after the agents this one started |
 
 `tools.enabled` and `tools.disabled` choose which are offered.
 
@@ -125,6 +128,57 @@ When several places match, the error lists their line numbers. When nothing
 matches, the error points at the closest lines in the file and the first line
 that differs, which is usually enough to fix the call without reading the file
 again.
+
+## Subagents
+
+Work that is read-heavy — map an unfamiliar codebase, chase a symbol through
+fifty files, read a build log — costs the conversation more than it is worth:
+everything that had to be read stays in the window afterwards. The model hands
+that kind of job to an agent instead. An agent is a whole loop of its own, with
+its own conversation, model and tools, running on its own thread. It reads what
+it has to read and hands back one report; nothing else it did reaches the
+conversation.
+
+The model starts them with `agent`, one call for as many briefs as it wants to
+run at once:
+
+```json
+{"tasks": [
+  {"agent": "explorer", "task": "Find where SSE frames are parsed. Report file:line."},
+  {"agent": "explorer", "task": "Find where plugins are instantiated. Report file:line."}
+]}
+```
+
+An agent starts fresh and sees only its brief, so the brief has to stand on its
+own. It cannot ask anybody anything: `ask_user` is not among its tools, and a
+tool call that would need the user's approval is refused rather than put on
+screen. What an agent may do is settled in `config.toml`, by the type it is
+started as — `ah docs config` covers `[agents]` and the types.
+
+By default `agent` waits and returns each report. With `background: true` it
+returns the ids at once, and a wait that runs out leaves the agents running
+rather than stopping them — the same bargain `bash` makes with a slow command.
+Either way the model hears `[agent] agent 3 (explorer) done …` on its next
+request, and if nothing is running at that moment ah starts a turn so it can
+read the report and say what happened (`agents.wake = false` turns that off).
+
+The `agents` tool looks after them: `list`, `status` for how far one has got,
+`wait`, `kill`, and `say` to give a running agent something more to go on.
+Waiting costs nothing until something happens.
+
+In the TUI a magenta `2 Agent` chip sits beside the jobs chip. With an empty
+input, Right steps into the first agent and Left steps back out: the transcript
+is replaced by what that agent is doing, and what you type goes to it instead
+of to the main conversation. A finished agent takes it as a follow-up and picks
+its work back up, keeping everything it learned. Esc goes back to the
+conversation, which is untouched — stepping into an agent watches it, it does
+not interrupt anything. `/agents` lists them all; Enter watches one, Ctrl-K
+stops one.
+
+Agents cost more tokens than doing the work in one conversation, not fewer.
+What they buy is a conversation that stays about the work instead of filling
+with what had to be read, several jobs running at once, and cheap models on the
+jobs that do not need an expensive one.
 
 ## Background jobs
 

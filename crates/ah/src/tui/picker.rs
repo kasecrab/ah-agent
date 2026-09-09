@@ -38,6 +38,8 @@ pub enum Kind {
     },
     /// Background shell jobs. Enter opens the output view.
     Jobs,
+    /// Agents the model started. Enter watches one.
+    Agents,
     /// What the status line shows. Space or Enter turns a row on or off.
     Statusline,
     /// List returned by a plugin slash command. The command runs again with

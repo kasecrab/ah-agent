@@ -1,5 +1,6 @@
 //! Terminal UI. Threads: render loop, input reader, engine. Idle = blocked on a channel.
 
+mod agents;
 mod ask;
 mod highlight;
 mod input;
@@ -48,6 +49,8 @@ enum Msg {
     Input(Event),
     /// A background job printed something or ended.
     Jobs,
+    /// An agent got somewhere or finished.
+    Agents,
     /// The task list changed.
     Plan,
     Engine(UiEvent),
@@ -57,6 +60,7 @@ enum Msg {
 
 /// Built-in slash commands, alphabetical: `(name, description, takes_args)`.
 const COMMANDS: &[(&str, &str, bool)] = &[
+    ("agents", "list the agents the model started", false),
     ("ask", "ask before tool calls", false),
     ("clear", "clear the conversation", false),
     (
@@ -201,6 +205,8 @@ struct Binds {
     toggle_tools: Vec<Chord>,
     toggle_reasoning: Vec<Chord>,
     cycle_model: Vec<Chord>,
+    prev_agent: Vec<Chord>,
+    next_agent: Vec<Chord>,
     history_prev: Vec<Chord>,
     history_next: Vec<Chord>,
     delete_word: Vec<Chord>,
@@ -232,6 +238,8 @@ impl Binds {
             toggle_tools: p(&k.toggle_tools),
             toggle_reasoning: p(&k.toggle_reasoning),
             cycle_model: p(&k.cycle_model),
+            prev_agent: p(&k.prev_agent),
+            next_agent: p(&k.next_agent),
             history_prev: p(&k.history_prev),
             history_next: p(&k.history_next),
             delete_word: p(&k.delete_word),
@@ -310,6 +318,9 @@ struct App {
     completion: Option<Completion>,
     picker: Option<Picker>,
     job_view: Option<jobs::View>,
+    /// The agent being watched, if the user has stepped into one. `None` is
+    /// the main conversation.
+    agent_view: Option<agents::View>,
     plan_view: Option<plan::View>,
     usage_pane: Option<usage::Pane>,
     stats: Stats,
@@ -455,6 +466,7 @@ fn run_inner(
         completion: None,
         picker: None,
         job_view: None,
+        agent_view: None,
         plan_view: None,
         usage_pane: None,
         stats: Stats::default(),
@@ -530,6 +542,10 @@ fn run_inner(
         let jobs_tx = ui_tx.clone();
         ah_core::jobs::table().set_waker(Box::new(move || {
             let _ = jobs_tx.send(Msg::Jobs);
+        }));
+        let agents_tx = ui_tx.clone();
+        ah_core::agents::table().set_waker(Box::new(move || {
+            let _ = agents_tx.send(Msg::Agents);
         }));
         let plan_tx = ui_tx.clone();
         ah_core::plan::store().set_waker(Box::new(move || {
@@ -902,6 +918,11 @@ impl App {
             self.slash(cmd);
             return;
         }
+        // While an agent is being watched, what is typed is said to it.
+        if let Some(id) = self.agent_view.as_ref().map(|v| v.id) {
+            self.say_to_agent(id, text);
+            return;
+        }
         if self.busy {
             let max = self.settings().layout.queue_max;
             if max == 0 {
@@ -1066,6 +1087,7 @@ impl App {
                 self.update_completion();
             }
             Msg::Jobs => self.jobs_changed(),
+            Msg::Agents => self.agents_changed(),
             Msg::Plan => self.dirty = true,
             Msg::Engine(ev) => self.handle_engine(ev),
             Msg::Usage(res) => {
@@ -1629,6 +1651,11 @@ impl App {
                         Some(name) => self.use_favorite(name),
                         None => {}
                     },
+                    Kind::Agents => {
+                        if let Some(id) = chosen.and_then(|c| c.parse().ok()) {
+                            self.watch_agent(id);
+                        }
+                    }
                     Kind::Jobs => {
                         if let Some(id) = chosen.and_then(|c| c.parse().ok()) {
                             self.open_job_view(id);
@@ -1799,6 +1826,7 @@ impl App {
         };
         match (&p.kind, c) {
             (Kind::Jobs, 'k') => self.kill_selected_job(),
+            (Kind::Agents, 'k') => self.stop_selected_agent(),
             (Kind::Statusline, ' ') => {
                 let Some(id) = p.current().map(|r| r.id.clone()) else {
                     return;
@@ -2518,6 +2546,30 @@ impl App {
         }
     }
 
+    /// An agent got somewhere or finished. Its own steps are never pushed into
+    /// the transcript — only that it ended, and only once.
+    fn agents_changed(&mut self) {
+        let table = ah_core::agents::table();
+        table.caught_up();
+        for n in table.notices(ah_core::agents::Audience::Ui) {
+            self.push(Block::Notice(n));
+        }
+        if !self.busy
+            && self.settings().agents.wake
+            && table.unheard(ah_core::agents::Audience::Model(0))
+        {
+            self.busy = true;
+            self.busy_start = Some(Instant::now());
+            self.set_state(State::Thinking);
+            let _ = self.tx.send(EngineCmd::Wake);
+        }
+        // The chip counts them, and an open agent view follows one live.
+        self.dirty = true;
+        if matches!(self.picker.as_ref().map(|p| &p.kind), Some(Kind::Agents)) {
+            self.refresh_agents_picker();
+        }
+    }
+
     fn open_jobs_picker(&mut self) {
         let all = ah_core::jobs::table().all();
         if all.is_empty() {
@@ -2549,6 +2601,128 @@ impl App {
     fn open_job_view(&mut self, id: u32) {
         self.picker = None;
         self.job_view = Some(jobs::View::new(id));
+        self.dirty = true;
+    }
+
+    /// Step into an agent: the transcript shows what it is doing and what the
+    /// input box says goes to it instead of the main conversation.
+    fn watch_agent(&mut self, id: u32) {
+        self.picker = None;
+        self.agent_view = Some(agents::View::new(id));
+        self.follow = true;
+        self.dirty = true;
+    }
+
+    /// The agents worth stepping into, oldest first: everything the main
+    /// conversation started that is still in the table.
+    fn watchable_agents(&self) -> Vec<u32> {
+        ah_core::agents::table()
+            .owned_by(0)
+            .iter()
+            .map(|c| c.id)
+            .collect()
+    }
+
+    /// Walk between the main conversation and the agents. Off the end either
+    /// way is the main conversation again.
+    fn cycle_agent(&mut self, forward: bool) {
+        let ids = self.watchable_agents();
+        if ids.is_empty() {
+            self.push(Block::Notice(
+                "no agents yet · the model starts them when a job is worth handing over".into(),
+            ));
+            return;
+        }
+        let at = self
+            .agent_view
+            .as_ref()
+            .and_then(|v| ids.iter().position(|id| *id == v.id));
+        let next = match (at, forward) {
+            (None, true) => Some(0),
+            (None, false) => Some(ids.len() - 1),
+            (Some(i), true) => (i + 1 < ids.len()).then_some(i + 1),
+            (Some(i), false) => i.checked_sub(1),
+        };
+        match next {
+            Some(i) => self.watch_agent(ids[i]),
+            // Past the last one is the way back to the main conversation.
+            None => {
+                self.agent_view = None;
+                self.dirty = true;
+            }
+        }
+    }
+
+    /// Send what the user typed to the agent they are watching. A finished one
+    /// picks its work back up with it.
+    fn say_to_agent(&mut self, id: u32, text: String) {
+        let Some(child) = ah_core::agents::table().get(id) else {
+            self.push(Block::Notice(format!("agent {id} is gone")));
+            self.agent_view = None;
+            return;
+        };
+        let concurrent = self.settings().agents.max_concurrent;
+        if child.state().over() {
+            let _ = ah_core::agents::follow_up(&child, &text, concurrent);
+            self.push(Block::Notice(format!("agent {id} picked its work back up")));
+        } else {
+            child.say(text);
+            self.push(Block::Notice(format!(
+                "agent {id} will read that before its next step"
+            )));
+        }
+        self.dirty = true;
+    }
+
+    fn open_agents_picker(&mut self) {
+        let all = ah_core::agents::table().owned_by(0);
+        if all.is_empty() {
+            self.push(Block::Notice(
+                "no agents · the model starts them with the agent tool when work is worth \
+                 handing over"
+                    .into(),
+            ));
+            return;
+        }
+        let rows = agents::rows(&all, &self.pal);
+        self.picker = Some(Picker::new(
+            Kind::Agents,
+            "agents",
+            "Enter watches · Ctrl-K stops · Esc closes",
+            rows,
+        ));
+        self.dirty = true;
+    }
+
+    fn refresh_agents_picker(&mut self) {
+        let all = ah_core::agents::table().owned_by(0);
+        let rows = agents::rows(&all, &self.pal);
+        if let Some(p) = self.picker.as_mut() {
+            let selected = p.selected;
+            p.rows = rows;
+            p.refilter();
+            p.selected = selected.min(p.results.len().saturating_sub(1));
+        }
+        self.dirty = true;
+    }
+
+    fn stop_selected_agent(&mut self) {
+        let id: Option<u32> = self
+            .picker
+            .as_ref()
+            .and_then(|p| p.current())
+            .and_then(|r| r.id.parse().ok());
+        if let Some(id) = id {
+            self.stop_agent(id);
+            self.refresh_agents_picker();
+        }
+    }
+
+    fn stop_agent(&mut self, id: u32) {
+        if let Some(child) = ah_core::agents::table().get(id) {
+            child.cancel();
+            self.push(Block::Notice(format!("stopping agent {id}")));
+        }
         self.dirty = true;
     }
 
@@ -2777,10 +2951,14 @@ impl App {
                 self.quit = true;
             }
         } else if keys::any_match(&b.cancel, &k) {
-            if self.busy {
-                self.cancel_turn();
-            } else if !self.editor.is_empty() {
+            if !self.editor.is_empty() {
                 self.editor.clear();
+            } else if self.agent_view.is_some() {
+                // Leaving an agent leaves it running; it is not the turn.
+                self.agent_view = None;
+                self.dirty = true;
+            } else if self.busy {
+                self.cancel_turn();
             } else if !self.follow {
                 self.follow = true;
             }
@@ -2827,6 +3005,10 @@ impl App {
             self.editor.home();
         } else if keys::any_match(&b.line_end, &k) {
             self.editor.end();
+        } else if keys::any_match(&b.next_agent, &k) && self.editor.is_empty() {
+            self.cycle_agent(true);
+        } else if keys::any_match(&b.prev_agent, &k) && self.editor.is_empty() {
+            self.cycle_agent(false);
         } else if keys::any_match(&b.history_next, &k) && self.editor.is_empty() {
             self.open_jobs_picker();
         } else if keys::any_match(&b.history_prev, &k)
@@ -2989,6 +3171,7 @@ impl App {
             "init" => self.init_instructions(),
             "statusline" | "status" => self.open_statusline_picker(),
             "plan" => self.open_plan_view(),
+            "agents" => self.open_agents_picker(),
             "usage" => {
                 self.usage_pane = Some(usage::Pane::new());
                 self.fetch_usage();
@@ -3204,6 +3387,7 @@ impl App {
             },
             &ah_core::plan::store().snapshot(),
             ah_core::jobs::table().running(),
+            ah_core::agents::table().running(),
             layout.show_plan,
             area.width.saturating_sub(1) as usize,
             &pal,
@@ -3232,7 +3416,20 @@ impl App {
             f.render_widget(Paragraph::new(line), dock_area);
         }
 
-        self.draw_transcript(f, transcript_area, &pal, layout.transcript_max_width);
+        // Watching an agent takes the transcript's place: the main
+        // conversation is one step to the left, and comes back untouched.
+        let watched = self
+            .agent_view
+            .as_ref()
+            .and_then(|v| ah_core::agents::table().get(v.id));
+        match (self.agent_view.as_mut(), watched) {
+            (Some(view), Some(child)) => view.draw(f, transcript_area, &pal, &child),
+            (Some(_), None) => {
+                self.agent_view = None;
+                self.draw_transcript(f, transcript_area, &pal, layout.transcript_max_width);
+            }
+            _ => self.draw_transcript(f, transcript_area, &pal, layout.transcript_max_width),
+        }
         if !self.queue.is_empty() {
             self.draw_queue(f, queue_area, &pal, layout.paste_collapse_lines);
         }
@@ -3267,7 +3464,10 @@ impl App {
         }
 
         // Input box.
-        let placeholder = if self.busy && self.settings().layout.queue_max > 0 {
+        let watching = self.agent_view.as_ref().map(|v| v.id);
+        let placeholder = if watching.is_some() {
+            "Type to tell this agent more; Esc goes back"
+        } else if self.busy && self.settings().layout.queue_max > 0 {
             "Type the next message; Enter queues it"
         } else {
             "Type a message, /help for commands"
