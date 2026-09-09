@@ -125,6 +125,7 @@ theme Claude Code uses, so both look the same in the same terminal.
 | `syn_builtin` | `"cyan"` | built-in functions and primitive types (`str`, `string`, `print`) |
 | `syn_attr` | `"cyan"` | keys in JSON, TOML and YAML |
 | `job` | `"green"` | background of the running-jobs chip on the row above the input |
+| `agent` | `"magenta"` | background of the running-agents chip beside it |
 | `diff_add` | `"green"` | added lines in file diffs |
 | `diff_del` | `"red"` | removed lines |
 | `border_style` | `"lines"` | `none`, `lines` (rules above and below the input), `plain`, `rounded`, `double`, `thick` |
@@ -168,7 +169,7 @@ the full default table.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `enabled` | `["ask_user", "bash", "read_file", "write_file", "edit_file", "jobs", "plan"]` | built-in tools offered to the model |
+| `enabled` | `["ask_user", "bash", "read_file", "write_file", "edit_file", "jobs", "plan", "agent", "agents"]` | built-in tools offered to the model |
 | `disabled` | `[]` | tools removed, including plugin tools by name |
 | `max_output_bytes` | `32768` | larger tool output is truncated head and tail |
 | `bash_timeout_ms` | `120000` | `bash` tool time limit |
@@ -285,6 +286,65 @@ ask for any tool call on top of this.
 
 See `ah docs sessions` for what compaction does to the transcript and the
 session file.
+
+## [agents]
+
+Subagents: child agent loops the model starts with the `agent` tool, each with
+its own conversation, model and tools. See `ah docs commands` for the tools
+themselves.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | offer the `agent` and `agents` tools |
+| `max_concurrent` | `4` | children running at once; the rest queue |
+| `max_total` | `32` | children a session may start |
+| `max_depth` | `1` | 1 means children cannot start children of their own |
+| `max_spawn` | `8` | tasks accepted in one `agent` call |
+| `max_requests` | `40` | requests a child may make before it has to report |
+| `max_context_bytes` | `262144` | conversation a child is allowed; children never compact |
+| `timeout_ms` | `600000` | how long `agent` waits before leaving the children in the background |
+| `kill_grace_ms` | `2000` | time a child gets to stop politely |
+| `tools` | `["read_file", "bash", "jobs"]` | tools a child gets when its type names none |
+| `model` | `""` | model for children whose type names none; empty inherits the session's |
+| `effort` | `""` | reasoning effort for those children; empty inherits |
+| `report_bytes` | `8192` | longest report a child hands back; the middle is dropped |
+| `log_lines` | `200` | tool lines kept per child for the agent view |
+| `keep` | `16` | finished children kept, with their conversation, for follow-ups |
+| `wake` | `true` | when a background child ends while the model is idle, start a turn so it can read the report |
+| `allow_model_arg` | `false` | let the model name a model per task instead of taking the type's |
+| `stack_bytes` | `0` | thread stack per child; 0 uses the system default |
+| `defs` | `{}` | the agent types, by name |
+
+### Agent types
+
+An agent type is a `[agents.defs.<name>]` table. The model reads the
+`description` of every type and picks between them, so write it for the model.
+
+```toml
+[agents.defs.explorer]
+description  = "Finds where something lives and reports paths with line numbers."
+prompt       = "You are a code explorer. Report file:line, nothing else."
+tools        = ["read_file", "bash"]
+model        = "fast"        # a favorite name or a model id; empty inherits
+effort       = "low"
+max_requests = 20
+timeout_ms   = 300000
+
+[agents.defs.worker]
+description = "Implements a bounded change and reports the files it touched."
+tools       = ["read_file", "bash", "write_file", "edit_file", "jobs"]
+```
+
+`prompt` replaces the system prompt for that child; `settings` is a merge patch
+applied over everything else, for anything without its own key.
+
+A child gets only the tools its type lists, so the default types cannot change
+a file: writing is something you grant in this file, not something the model
+decides at run time. `permissions.deny` always applies to children too, and
+`plan` and `ask_user` are always removed — the plan belongs to the session, and
+a child has nobody to ask. Children also run without plugins: a plugin that
+gates tools does not see a child's calls, which is the other reason the default
+type list is read-only.
 
 ### Prompt caching
 

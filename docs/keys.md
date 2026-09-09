@@ -39,6 +39,8 @@ everywhere.
 | `toggle_tools` | `["ctrl-t"]` | expand or collapse tool output and compaction summaries |
 | `toggle_reasoning` | `["ctrl-r"]` | expand or collapse thinking blocks |
 | `cycle_model` | `["shift-tab"]` | switch to the next favorite model |
+| `prev_agent` | `["left"]` | with an empty input, look at the previous agent; from the first one back to the main conversation |
+| `next_agent` | `["right"]` | with an empty input, look at the next running agent |
 | `history_prev` | `["up", "ctrl-p"]` | earlier prompt; inside a multi-line draft moves the cursor first; with an empty input pulls back the last queued message |
 | `history_next` | `["down", "ctrl-n"]` | later prompt; with an empty input opens the background job list |
 | `delete_word` | `["ctrl-w", "ctrl-backspace", "ctrl-h", "alt-backspace"]` | delete the word before the cursor, or a whole chip |

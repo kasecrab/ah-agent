@@ -20,6 +20,7 @@ pub struct Settings {
     pub statusline: StatusLine,
     pub permissions: Permissions,
     pub context: ContextSettings,
+    pub agents: AgentSettings,
     /// Plugin-private or forward-compatible keys. Preserved through merges.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -179,6 +180,8 @@ pub struct Theme {
     pub syn_attr: String,
     /// Background of the running-jobs chip above the input.
     pub job: String,
+    /// Background of the running-agents chip beside it.
+    pub agent: String,
     /// Added and removed lines in file diffs.
     pub diff_add: String,
     pub diff_del: String,
@@ -225,6 +228,7 @@ impl Default for Theme {
             syn_builtin: "cyan".into(),
             syn_attr: "cyan".into(),
             job: "green".into(),
+            agent: "magenta".into(),
             diff_add: "green".into(),
             diff_del: "red".into(),
             border_style: BorderStyle::Lines,
@@ -347,6 +351,9 @@ pub struct Keys {
     pub toggle_reasoning: Vec<String>,
     /// Switch to the next favorite model.
     pub cycle_model: Vec<String>,
+    /// Walk between the main conversation and the running agents.
+    pub prev_agent: Vec<String>,
+    pub next_agent: Vec<String>,
     pub history_prev: Vec<String>,
     pub history_next: Vec<String>,
     pub delete_word: Vec<String>,
@@ -380,6 +387,8 @@ impl Default for Keys {
             toggle_tools: v(&["ctrl-t"]),
             toggle_reasoning: v(&["ctrl-r"]),
             cycle_model: v(&["shift-tab"]),
+            prev_agent: v(&["left"]),
+            next_agent: v(&["right"]),
             history_prev: v(&["up", "ctrl-p"]),
             history_next: v(&["down", "ctrl-n"]),
             delete_word: v(&["ctrl-w", "ctrl-backspace", "ctrl-h", "alt-backspace"]),
@@ -440,6 +449,8 @@ impl Default for ToolSettings {
                 "edit_file",
                 "jobs",
                 "plan",
+                "agent",
+                "agents",
             ]
             .iter()
             .map(|s| String::from(*s))
@@ -608,6 +619,109 @@ impl Default for ContextSettings {
             plan_reminder_every: 4,
         }
     }
+}
+
+/// Subagents: child agent loops the model starts with the `agent` tool. Each
+/// runs on its own thread with its own conversation, model and tools, and
+/// hands back one report.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentSettings {
+    /// Offer the `agent` and `agents` tools at all.
+    pub enabled: bool,
+    /// Children running at the same time. The rest queue.
+    pub max_concurrent: u32,
+    /// Children a session may start.
+    pub max_total: u32,
+    /// 1 lets the model start children; a child at the limit has no `agent`
+    /// tool, so it cannot start any of its own.
+    pub max_depth: u16,
+    /// Tasks accepted in one `agent` call.
+    pub max_spawn: usize,
+    /// Requests a child may make before it has to stop and report.
+    pub max_requests: u32,
+    /// Conversation size a child is allowed, in bytes. Children never compact;
+    /// one that fills this stops and reports what it has.
+    pub max_context_bytes: u64,
+    /// How long `agent` waits before leaving the children in the background.
+    pub timeout_ms: u64,
+    /// Time a child gets to stop politely before it is left to its own devices.
+    pub kill_grace_ms: u64,
+    /// Tools a child is offered when its definition names none. `plan` and
+    /// `ask_user` are always removed: the plan belongs to the session, and a
+    /// child has nobody to ask.
+    pub tools: Vec<String>,
+    /// Model for children whose definition names none; empty inherits.
+    pub model: String,
+    /// Reasoning effort for those children; empty inherits.
+    pub effort: String,
+    /// Longest report a child can hand back. The middle is dropped.
+    pub report_bytes: usize,
+    /// Tool lines kept per child for the agent view.
+    pub log_lines: usize,
+    /// Finished children kept, with their conversation, for follow-ups.
+    pub keep: usize,
+    /// When a background child ends while the model is idle, start a turn so
+    /// it can read the report and say what happened.
+    pub wake: bool,
+    /// Let the model name a model per task instead of taking the definition's.
+    pub allow_model_arg: bool,
+    /// Thread stack for a child; 0 uses the system default.
+    pub stack_bytes: usize,
+    /// Agent types the model can choose between, by name.
+    pub defs: BTreeMap<String, AgentDef>,
+}
+
+impl Default for AgentSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_concurrent: 4,
+            max_total: 32,
+            max_depth: 1,
+            max_spawn: 8,
+            max_requests: 40,
+            max_context_bytes: 256 * 1024,
+            timeout_ms: 600_000,
+            kill_grace_ms: 2000,
+            tools: ["read_file", "bash", "jobs"]
+                .iter()
+                .map(|s| String::from(*s))
+                .collect(),
+            model: String::new(),
+            effort: String::new(),
+            report_bytes: 8192,
+            log_lines: 200,
+            keep: 16,
+            wake: true,
+            allow_model_arg: false,
+            stack_bytes: 0,
+            defs: BTreeMap::new(),
+        }
+    }
+}
+
+/// One agent type. The model picks between these by name, so `description` is
+/// what it reads when it decides.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct AgentDef {
+    /// What this type is for, shown to the model in the tool description.
+    pub description: String,
+    /// System prompt for the child; empty keeps the session's.
+    pub prompt: String,
+    /// Model id or favorite name; empty falls back to `agents.model`.
+    pub model: String,
+    /// Reasoning effort; empty falls back to `agents.effort`.
+    pub effort: String,
+    /// Tools this type is offered; empty falls back to `agents.tools`.
+    pub tools: Vec<String>,
+    /// Requests this type may make; 0 falls back to `agents.max_requests`.
+    pub max_requests: u32,
+    /// Wait before backgrounding; 0 falls back to `agents.timeout_ms`.
+    pub timeout_ms: u64,
+    /// Merge patch applied over the child's settings, after everything above.
+    pub settings: Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
