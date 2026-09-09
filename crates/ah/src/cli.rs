@@ -120,15 +120,20 @@ impl AgentIo for PrintIo {
                 } else {
                     String::new()
                 };
+                // What the agents spent is theirs, not this loop's; it is part
+                // of what the turn cost all the same.
+                let agents = ah_core::agents::table().take_spent();
+                let agents = (agents.cost > 0.0).then(|| format!(" +${:.4} agents", agents.cost));
                 let _ = writeln!(
                     err,
-                    "\x1b[90m[{} req, {} tools, ↑{}{} ↓{} ${:.4}]\x1b[0m",
+                    "\x1b[90m[{} req, {} tools, ↑{}{} ↓{} ${:.4}{}]\x1b[0m",
                     s.requests,
                     s.tool_calls,
                     s.usage.prompt_tokens,
                     cached,
                     s.usage.completion_tokens,
-                    s.usage.cost
+                    s.usage.cost,
+                    agents.unwrap_or_default()
                 );
             }
             _ => {}

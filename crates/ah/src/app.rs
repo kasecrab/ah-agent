@@ -426,9 +426,6 @@ impl Engine {
         if let Ok(s) = &res {
             self.total_usage.add(&s.usage);
         }
-        // Subagents spend on their own account; fold it in so the status line
-        // and /usage count the whole turn, not just this loop.
-        self.total_usage.add(&ah_core::agents::table().take_spent());
         self.session.save_plan(&ah_core::plan::store().snapshot());
         res
     }

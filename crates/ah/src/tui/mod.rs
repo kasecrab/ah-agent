@@ -2551,6 +2551,14 @@ impl App {
     fn agents_changed(&mut self) {
         let table = ah_core::agents::table();
         table.caught_up();
+        // Agents spend on their own account. It belongs to the session total
+        // and to /usage, but not to the context gauge: it is not this
+        // conversation that grew.
+        let spent = table.take_spent();
+        if spent.total_tokens > 0 || spent.cost > 0.0 {
+            self.usage.add(&spent);
+            self.stats.add_usage("agents", &spent);
+        }
         for n in table.notices(ah_core::agents::Audience::Ui) {
             self.push(Block::Notice(n));
         }
