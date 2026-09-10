@@ -69,6 +69,9 @@ pub enum Link {
 pub enum Error {
     Config(String),
     Connect(String),
+    /// The socket was asked to shut down between two steps of the dial. Not a
+    /// failure: nobody is waiting for this connection any more.
+    Stopped,
 }
 
 impl std::fmt::Display for Error {
@@ -76,6 +79,7 @@ impl std::fmt::Display for Error {
         match self {
             Error::Config(m) => write!(f, "{m}"),
             Error::Connect(m) => write!(f, "cannot reach Deepgram: {m}"),
+            Error::Stopped => write!(f, "stopped while connecting"),
         }
     }
 }
@@ -92,6 +96,10 @@ pub struct Live {
     flush: Arc<AtomicBool>,
     connected: Arc<AtomicBool>,
     failed: Arc<AtomicBool>,
+    /// Asked to stop. The channel only reaches the thread between ticks; this
+    /// is what the dial itself looks at, because the dial is where the thread
+    /// spends whole seconds at a time.
+    stopping: Arc<AtomicBool>,
 }
 
 impl Live {
@@ -109,16 +117,18 @@ impl Live {
         let flush = Arc::new(AtomicBool::new(false));
         let connected = Arc::new(AtomicBool::new(false));
         let failed = Arc::new(AtomicBool::new(false));
+        let stopping = Arc::new(AtomicBool::new(false));
         let (stop_tx, stop_rx) = mpsc::channel::<()>();
-        let (l, fl, c, f) = (
+        let (l, fl, c, f, st) = (
             listening.clone(),
             flush.clone(),
             connected.clone(),
             failed.clone(),
+            stopping.clone(),
         );
         let thread = std::thread::Builder::new()
             .name("ah-voice-dg".into())
-            .spawn(move || run(cfg, audio, l, fl, c, f, stop_rx, on))
+            .spawn(move || run(cfg, audio, l, fl, c, f, st, stop_rx, on))
             .map_err(|e| Error::Connect(e.to_string()))?;
         Ok(Self {
             stop: Some(stop_tx),
@@ -127,7 +137,16 @@ impl Live {
             flush,
             connected,
             failed,
+            stopping,
         })
+    }
+
+    /// Ask the socket to close without waiting for it. Returns at once, even
+    /// if the thread is in the middle of a handshake: it is the next step of
+    /// the dial, or the next tick, that notices.
+    pub fn shutdown(&self) {
+        self.listening.store(false, Ordering::Release);
+        self.stopping.store(true, Ordering::Release);
     }
 
     /// The talk key went down, or came up.
@@ -159,7 +178,7 @@ impl Live {
 
 impl Drop for Live {
     fn drop(&mut self) {
-        self.listening.store(false, Ordering::Release);
+        self.shutdown();
         drop(self.stop.take());
         if let Some(t) = self.thread.take() {
             let _ = t.join();
@@ -170,6 +189,16 @@ impl Drop for Live {
 /// How long a read waits before the loop looks at the audio again. This is
 /// the tick the whole socket runs on.
 const TICK: Duration = Duration::from_millis(20);
+/// Longest a TCP connect may take. A voice socket that cannot be reached in
+/// this is no use for dictation anyway, and the loop dials again on its own.
+const DIAL: Duration = Duration::from_secs(5);
+/// Longest any single read or write of the TLS and upgrade handshake may
+/// take. Without it the handshake is the one place with no timeout at all,
+/// and a stalled one holds the thread — and whoever joins it — indefinitely.
+const HANDSHAKE: Duration = Duration::from_secs(5);
+/// Longest the closing frames may take on the way out. Nobody is waiting for
+/// what Deepgram says back, only for the socket to have been told.
+const CLOSING: Duration = Duration::from_millis(150);
 /// Deepgram drops a silent socket; this is well inside that.
 const KEEPALIVE: Duration = Duration::from_secs(5);
 /// After a failure, wait this long before dialling again, doubling to a cap.
@@ -184,6 +213,7 @@ fn run(
     flush: Arc<AtomicBool>,
     connected: Arc<AtomicBool>,
     failed: Arc<AtomicBool>,
+    stopping: Arc<AtomicBool>,
     stop: mpsc::Receiver<()>,
     on: impl Fn(Event),
 ) {
@@ -197,6 +227,9 @@ fn run(
     let mut bytes: Vec<u8> = Vec::with_capacity(cfg.sample_rate as usize * 2);
 
     while let Err(RecvTimeoutError::Timeout) = stop.recv_timeout(TICK) {
+        if stopping.load(Ordering::Acquire) {
+            break;
+        }
         let want = listening.load(Ordering::Acquire);
 
         // Hold the socket open after the key comes up: the next phrase then
@@ -225,7 +258,13 @@ fn run(
                 audio.keep_last(0);
                 continue;
             }
-            match connect(&cfg) {
+            if stopping.load(Ordering::Acquire) {
+                break;
+            }
+            match connect(&cfg, &stopping) {
+                // Asked to stop between two steps of the dial. Say nothing:
+                // this is a shutdown, not a connection that went wrong.
+                Err(Error::Stopped) => break,
                 Ok(ws) => {
                     socket = Some(ws);
                     connected.store(true, Ordering::Release);
@@ -320,6 +359,11 @@ fn run(
         }
     }
     if let Some(mut ws) = socket.take() {
+        // These are blocking writes on a TLS socket. Deepgram is told the
+        // stream is over as a courtesy, so it gets a courtesy's worth of time.
+        if let MaybeTlsStream::Rustls(s) = ws.get_ref() {
+            let _ = s.sock.set_write_timeout(Some(CLOSING));
+        }
         let _ = ws.send(Message::text("{\"type\":\"CloseStream\"}"));
         let _ = ws.close(None);
         let _ = ws.flush();
@@ -367,7 +411,18 @@ fn parse(text: &str) -> Vec<Event> {
     }
 }
 
-fn connect(cfg: &Config) -> Result<WebSocket<MaybeTlsStream<TcpStream>>, Error> {
+/// Dial Deepgram, in steps, checking between each whether anybody still
+/// wants the connection.
+///
+/// Every step here can block for seconds, and whoever drops the `Live` waits
+/// for this to return. So each one is bounded, and `stopping` is read at each
+/// boundary. The one thing that cannot be bounded from here is the name
+/// lookup: `to_socket_addrs` takes no timeout, and the resolver's own is the
+/// only limit on it.
+fn connect(
+    cfg: &Config,
+    stopping: &AtomicBool,
+) -> Result<WebSocket<MaybeTlsStream<TcpStream>>, Error> {
     let mut url = format!(
         "wss://api.deepgram.com/v1/listen\
          ?model={}&encoding=linear16&sample_rate={}&channels=1\
@@ -403,27 +458,44 @@ fn connect(cfg: &Config) -> Result<WebSocket<MaybeTlsStream<TcpStream>>, Error> 
         .body(())
         .map_err(|e| Error::Config(e.to_string()))?;
 
+    let sock = tcp(stopping)?;
+    if stopping.load(Ordering::Acquire) {
+        return Err(Error::Stopped);
+    }
+    // The handshake reads and writes on this socket before tungstenite hands
+    // it back, so the bound has to be in place before it starts. A stall
+    // surfaces as `Interrupted`, which `describe` already has words for.
+    let _ = sock.set_read_timeout(Some(HANDSHAKE));
+    let _ = sock.set_write_timeout(Some(HANDSHAKE));
+
     let connector = tungstenite::Connector::Rustls(tls_config());
-    let (ws, _resp) = tungstenite::client_tls_with_config(request, tcp()?, None, Some(connector))
+    let (ws, _resp) = tungstenite::client_tls_with_config(request, sock, None, Some(connector))
         .map_err(|e| Error::Connect(describe(e)))?;
+    if stopping.load(Ordering::Acquire) {
+        return Err(Error::Stopped);
+    }
     if let MaybeTlsStream::Rustls(s) = ws.get_ref() {
         // The read timeout is what makes one blocking socket serve both
-        // directions without a second thread.
+        // directions without a second thread. The handshake's generous one is
+        // replaced here, now that every read is expected to come up empty.
         let _ = s.sock.set_read_timeout(Some(TICK));
+        let _ = s.sock.set_write_timeout(Some(HANDSHAKE));
         let _ = s.sock.set_nodelay(true);
     }
     Ok(ws)
 }
 
-fn tcp() -> Result<TcpStream, Error> {
+fn tcp(stopping: &AtomicBool) -> Result<TcpStream, Error> {
     use std::net::ToSocketAddrs;
     let addr = ("api.deepgram.com", 443)
         .to_socket_addrs()
         .map_err(|e| Error::Connect(e.to_string()))?
         .next()
         .ok_or_else(|| Error::Connect("api.deepgram.com does not resolve".into()))?;
-    TcpStream::connect_timeout(&addr, Duration::from_secs(10))
-        .map_err(|e| Error::Connect(e.to_string()))
+    if stopping.load(Ordering::Acquire) {
+        return Err(Error::Stopped);
+    }
+    TcpStream::connect_timeout(&addr, DIAL).map_err(|e| Error::Connect(e.to_string()))
 }
 
 /// A 401 arrives as a plain HTTP response, not a socket error, so say what it

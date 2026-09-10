@@ -161,7 +161,9 @@ pub enum Act {
     /// A hold has been recognised. `undo` is how many keystrokes already went
     /// into the input box while it was still ambiguous, and have to come back
     /// out before the words arrive.
-    Start { undo: usize },
+    Start {
+        undo: usize,
+    },
     Stop,
     Nothing,
     /// Not a hold, or not yet: let the key through and type it.
@@ -280,7 +282,9 @@ impl Talk {
                 && self.saw_release
                 && self.down
                 && self.pending > 0
-                && self.last.is_some_and(|l| now.saturating_duration_since(l) >= self.dwell)
+                && self
+                    .last
+                    .is_some_and(|l| now.saturating_duration_since(l) >= self.dwell)
             {
                 self.gap = self.first_gap;
                 let undo = std::mem::take(&mut self.pending);
@@ -911,7 +915,10 @@ mod tests {
         let mut t = kitty();
         let t0 = Instant::now();
         assert_eq!(t.press(t0, false), Act::Type);
-        assert_eq!(t.tick(t0 + Duration::from_millis(DWELL - 40), false), Act::Nothing);
+        assert_eq!(
+            t.tick(t0 + Duration::from_millis(DWELL - 40), false),
+            Act::Nothing
+        );
         assert_eq!(
             t.tick(t0 + Duration::from_millis(DWELL + 10), false),
             Act::Start { undo: 1 },
