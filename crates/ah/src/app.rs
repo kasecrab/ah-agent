@@ -114,6 +114,9 @@ pub enum EngineCmd {
     Settings(Box<Settings>, Value),
     /// Drop and reload all plugins with the current settings.
     Reload,
+    /// The startup load. Same work as `Reload` without rebuilding a provider
+    /// the constructor has already built, and the UI reports it silently.
+    LoadPlugins,
     Clear,
     /// Switch to a stored session by id.
     Resume(String),
@@ -129,12 +132,19 @@ pub enum EngineCmd {
 pub enum UiEvent {
     Agent(AgentEvent),
     PluginsLoaded {
+        /// The startup load rather than a `/reload`: it replaces the layers the
+        /// cache guessed, and says nothing if the guess was right.
+        first: bool,
         reports: Vec<LoadReport>,
         /// `(plugin name, patch)` in apply order: manifest patches then `on_load`.
         patches: Vec<(String, Value)>,
         commands: Vec<(String, SlashCommandSpec)>,
     },
     PluginLogs(Vec<(String, LogLevel, String)>),
+    /// Whether a provider could be built from the settings now in force. Sent
+    /// after every settings change, because a plugin may be what supplies the
+    /// key, and at startup it has not been asked yet.
+    KeyState(bool),
     Statusline(Box<StatuslineOut>),
     /// Result of a plugin slash command: output, command name, stage.
     Slash(Box<SlashCommandOut>, String, SlashStage),
@@ -352,7 +362,31 @@ impl Engine {
         let reports = host.reports.clone();
         let commands = host.commands();
         self.host = Some(host);
+        // Keyed on the settings the plugins were shown, not the patched ones.
+        ah_core::plugins::cache::write(
+            &self.settings,
+            &self.settings_value,
+            &cwd,
+            reports.iter().filter(|r| r.ok).count() as u32,
+            &patches,
+            &commands,
+        );
         (reports, patches, commands)
+    }
+
+    /// Load plugins and report them, on the engine thread so no frame waits.
+    fn serve_plugins(&mut self, tx: &Sender<UiEvent>, first: bool) {
+        let (reports, patches, commands) = self.load_plugins();
+        let _ = tx.send(UiEvent::PluginsLoaded {
+            first,
+            reports,
+            patches,
+            commands,
+        });
+        let logs = self.take_plugin_logs();
+        if !logs.is_empty() {
+            let _ = tx.send(UiEvent::PluginLogs(logs));
+        }
     }
 
     pub fn apply_settings(&mut self, settings: Settings, value: Value) {
@@ -538,19 +572,14 @@ impl Engine {
                         let _ = tx.send(UiEvent::Statusline(Box::new(s)));
                     }
                 }
-                EngineCmd::Settings(s, v) => self.apply_settings(*s, v),
+                EngineCmd::Settings(s, v) => {
+                    self.apply_settings(*s, v);
+                    let _ = tx.send(UiEvent::KeyState(self.has_key()));
+                }
+                EngineCmd::LoadPlugins => self.serve_plugins(&tx, true),
                 EngineCmd::Reload => {
                     self.rebuild_provider();
-                    let (reports, patches, commands) = self.load_plugins();
-                    let _ = tx.send(UiEvent::PluginsLoaded {
-                        reports,
-                        patches,
-                        commands,
-                    });
-                    let logs = self.take_plugin_logs();
-                    if !logs.is_empty() {
-                        let _ = tx.send(UiEvent::PluginLogs(logs));
-                    }
+                    self.serve_plugins(&tx, false);
                 }
                 EngineCmd::Compact(focus) => {
                     let _ = tx.send(UiEvent::Busy(true));

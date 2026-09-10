@@ -332,6 +332,11 @@ struct App {
     /// while one is being written.
     compact_progress: Option<(working::Progress, Instant)>,
     plugin_status: Option<StatuslineOut>,
+    /// The missing-key error is worth saying once, not on every settings change.
+    key_warned: bool,
+    /// Where the opening line sits, so the real plugin count can replace the
+    /// cache's guess without a second line appearing under it.
+    banner_at: Option<usize>,
     plugin_commands: Vec<(String, SlashCommandSpec)>,
     plugin_count: u32,
     pending_perm: Option<(ToolCall, String)>,
@@ -454,17 +459,29 @@ fn run_inner(
 ) -> Result<Option<String>, AnyError> {
     let cwd = app::resolve_cwd(o)?;
     let mut stack = app::load_settings(o)?;
-    let mut engine = Engine::new(&stack, cwd.clone(), resume, true)?;
-    let (reports, patches, commands) = engine.load_plugins();
-    for (name, p) in patches {
-        if let Err(e) = stack.push(Origin::Plugin(name.clone()), p) {
-            eprintln!("plugin {name}: bad settings patch: {e}");
+    // What last launch's plugins patched, if nothing they read has moved since.
+    // Applying it here means the first frame is already in the theme a plugin
+    // chose, while the modules themselves load on the engine thread.
+    let cached =
+        ah_core::plugins::cache::read(stack.settings(), stack.value(), &cwd.display().to_string());
+    let (plugin_count, plugin_commands) = match cached {
+        Some(c) => {
+            let mut ok = true;
+            for (name, p) in c.patches {
+                ok &= stack.push(Origin::Plugin(name), p).is_ok();
+            }
+            if ok {
+                (c.count, c.commands)
+            } else {
+                // A patch the settings no longer accept: drop the guess whole
+                // rather than run on half of it. The real load is moments away.
+                stack.retain(|o| !matches!(o, Origin::Plugin(_)))?;
+                (0, Vec::new())
+            }
         }
-    }
-    engine.apply_settings(stack.settings().clone(), stack.value().clone());
-    let has_key = engine.has_key();
-    let plugin_count = reports.iter().filter(|r| r.ok).count() as u32;
-    let early_logs = engine.take_plugin_logs();
+        None => (0, Vec::new()),
+    };
+    let engine = Engine::new(&stack, cwd.clone(), resume, true)?;
 
     // The screen belongs to the TUI, so the microphone's troubles go to the
     // log rather than to stderr, where they would land on the conversation.
@@ -498,6 +515,8 @@ fn run_inner(
             })
             .expect("spawn forwarder");
     }
+    // First in the queue, so an initial prompt still sees the plugins.
+    let _ = eng_tx.send(EngineCmd::LoadPlugins);
 
     let settings = stack.settings().clone();
     let mut app = App {
@@ -536,8 +555,10 @@ fn run_inner(
         cursor: None,
         compact_progress: None,
         plugin_status: None,
-        plugin_commands: commands,
+        plugin_commands,
         plugin_count,
+        key_warned: false,
+        banner_at: None,
         pending_perm: None,
         ask: None,
         always_allow: HashSet::new(),
@@ -588,21 +609,6 @@ fn run_inner(
     };
     app.refresh_window();
 
-    for r in &reports {
-        if !r.ok && r.message != "disabled" {
-            app.push(Block::Error(format!("plugin {}: {}", r.name, r.message)));
-        }
-    }
-    for (p, lvl, m) in early_logs {
-        if lvl <= LogLevel::Warn {
-            app.push(Block::Notice(format!("[{p}] {m}")));
-        }
-    }
-    if !has_key {
-        app.push(Block::Error(
-            "no API key. Run `ah login` (or set OPENROUTER_API_KEY), then /reload.".into(),
-        ));
-    }
     app.task = resumed
         .iter()
         .find(|m| m.role == Role::User)
@@ -613,13 +619,8 @@ fn run_inner(
     app.update_image_view();
     app.load_history(&resumed);
     if app.entries.is_empty() {
-        app.push(Block::Notice(format!(
-            "ah {} · {} · {} plugin{} · /help for commands",
-            env!("CARGO_PKG_VERSION"),
-            settings.model.id,
-            plugin_count,
-            if plugin_count == 1 { "" } else { "s" }
-        )));
+        app.banner_at = Some(app.entries.len());
+        app.push(Block::Notice(banner(&settings.model.id, plugin_count)));
     }
 
     // Input thread.
@@ -814,6 +815,18 @@ fn push_block(entries: &mut Vec<Entry>, b: Block) {
         entries.pop();
     }
     entries.push(Entry::new(b));
+}
+
+/// The opening line. Rebuilt once the real plugin load lands, in case the
+/// cache guessed a different count.
+fn banner(model: &str, plugins: u32) -> String {
+    format!(
+        "ah {} · {} · {} plugin{} · /help for commands",
+        env!("CARGO_PKG_VERSION"),
+        model,
+        plugins,
+        if plugins == 1 { "" } else { "s" }
+    )
 }
 
 fn is_plan(b: &Block) -> bool {
@@ -3068,6 +3081,7 @@ impl App {
                 self.dirty = true;
             }
             UiEvent::PluginsLoaded {
+                first,
                 reports,
                 patches,
                 commands,
@@ -3078,6 +3092,10 @@ impl App {
                     if !r.ok && r.message != "disabled" {
                         self.push(Block::Error(format!("plugin {}: {}", r.name, r.message)));
                     }
+                }
+                // Out with whatever the cache guessed; these are the real ones.
+                if let Err(e) = self.stack.retain(|o| !matches!(o, Origin::Plugin(_))) {
+                    self.push(Block::Error(format!("settings: {e}")));
                 }
                 let mut failed = None;
                 for (name, p) in patches {
@@ -3090,12 +3108,32 @@ impl App {
                 }
                 self.refresh_from_settings(&[]);
                 self.plugin_status = None;
-                self.push(Block::Notice(format!(
-                    "reloaded: {} plugin{} active",
-                    self.plugin_count,
-                    if self.plugin_count == 1 { "" } else { "s" }
-                )));
+                if first
+                    && let Some(i) = self.banner_at.take()
+                    && let Some(e) = self.entries.get_mut(i)
+                    && matches!(&e.block, Block::Notice(t) if t.starts_with("ah "))
+                {
+                    let model = self.stack.settings().model.id.clone();
+                    *e = Entry::new(Block::Notice(banner(&model, self.plugin_count)));
+                    self.dirty = true;
+                }
+                if !first {
+                    self.push(Block::Notice(format!(
+                        "reloaded: {} plugin{} active",
+                        self.plugin_count,
+                        if self.plugin_count == 1 { "" } else { "s" }
+                    )));
+                }
                 self.request_status();
+            }
+            UiEvent::KeyState(ok) => {
+                if !ok && !self.key_warned {
+                    self.key_warned = true;
+                    self.push(Block::Error(
+                        "no API key. Run `ah login` (or set OPENROUTER_API_KEY), then /reload."
+                            .into(),
+                    ));
+                }
             }
             UiEvent::PluginLogs(logs) => {
                 for (p, lvl, m) in logs {

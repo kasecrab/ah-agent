@@ -71,6 +71,38 @@ fn pack(ptr: i32, len: i32) -> (usize, usize) {
     (ptr as u32 as usize, len as u32 as usize)
 }
 
+/// Every `*.wasm` the settings point at, in load order. `load` walks this and
+/// the cache keys itself on it, so the two cannot disagree about which files a
+/// load would have read.
+pub fn discover(settings: &Settings, cwd: &str) -> Vec<PathBuf> {
+    if !settings.plugins.enabled {
+        return Vec::new();
+    }
+    let mut files: Vec<PathBuf> = Vec::new();
+    let mut dirs = crate::paths::plugin_dirs();
+    for p in &settings.plugins.paths {
+        let pb = crate::tools::resolve_path(Path::new(cwd), p);
+        if pb.is_dir() {
+            dirs.push(pb);
+        } else {
+            files.push(pb);
+        }
+    }
+    for d in dirs {
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        let mut found: Vec<PathBuf> = rd
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "wasm"))
+            .collect();
+        found.sort();
+        files.extend(found);
+    }
+    files
+}
+
 impl PluginHost {
     pub fn empty() -> Self {
         let mut cfg = wasmi::Config::default();
@@ -91,29 +123,7 @@ impl PluginHost {
         if !settings.plugins.enabled {
             return host;
         }
-        let mut files: Vec<PathBuf> = Vec::new();
-        let mut dirs = crate::paths::plugin_dirs();
-        for p in &settings.plugins.paths {
-            let pb = crate::tools::resolve_path(Path::new(cwd), p);
-            if pb.is_dir() {
-                dirs.push(pb);
-            } else {
-                files.push(pb);
-            }
-        }
-        for d in dirs {
-            let Ok(rd) = std::fs::read_dir(&d) else {
-                continue;
-            };
-            let mut found: Vec<PathBuf> = rd
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| p.extension().is_some_and(|e| e == "wasm"))
-                .collect();
-            found.sort();
-            files.extend(found);
-        }
-        for f in files {
+        for f in discover(settings, cwd) {
             host.load_file(&f, settings, settings_value, cwd);
         }
         host
@@ -809,5 +819,216 @@ impl Hooks for PluginHost {
             }
         }
         (patches, notices)
+    }
+}
+
+/// Last load's settings patches, kept on disk so the next launch can paint the
+/// right theme before a single module has been read.
+///
+/// A plugin's `on_load` output is a pure function of the wasm bytes, the
+/// settings it was shown and the working directory. Key on all three and a hit
+/// is exactly what this launch's load is about to produce; a miss just costs
+/// what every launch used to cost.
+pub mod cache {
+    use std::hash::{Hash, Hasher};
+    use std::path::{Path, PathBuf};
+
+    use ah_abi::{Settings, SlashCommandSpec};
+    use serde::{Deserialize, Serialize};
+    use serde_json::Value;
+
+    /// What a load produced, minus the reports: a stale error is worse than no
+    /// error, and the real load re-reports a few milliseconds later anyway.
+    #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+    #[serde(default)]
+    pub struct Cached {
+        key: String,
+        /// Plugins that loaded, for the startup banner.
+        pub count: u32,
+        /// `(plugin name, patch)` in apply order, as `load_plugins` returns them.
+        pub patches: Vec<(String, Value)>,
+        pub commands: Vec<(String, SlashCommandSpec)>,
+    }
+
+    fn file() -> PathBuf {
+        crate::paths::data_dir().join("plugin-cache.json")
+    }
+
+    /// Wasm identity plus the inputs `on_load` is shown. Mtime and length stand
+    /// in for the bytes: hashing 200 KB per launch would cost more than the
+    /// load this saves.
+    fn key(settings: &Settings, settings_value: &Value, cwd: &str) -> String {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        // A different binary may drive the same plugin to a different answer.
+        env!("CARGO_PKG_VERSION").hash(&mut h);
+        cwd.hash(&mut h);
+        for p in super::discover(settings, cwd) {
+            p.hash(&mut h);
+            match std::fs::metadata(&p) {
+                Ok(m) => {
+                    m.len().hash(&mut h);
+                    m.modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_nanos())
+                        .hash(&mut h);
+                }
+                // Unreadable now, unreadable at load: still a stable key.
+                Err(_) => 0u64.hash(&mut h),
+            }
+        }
+        // serde_json holds objects in a BTreeMap, so this text is stable.
+        serde_json::to_string(settings_value)
+            .unwrap_or_default()
+            .hash(&mut h);
+        format!("{:016x}", h.finish())
+    }
+
+    /// The cached load for these inputs, or `None` if anything has moved.
+    pub fn read(settings: &Settings, settings_value: &Value, cwd: &str) -> Option<Cached> {
+        read_at(&file(), settings, settings_value, cwd)
+    }
+
+    fn read_at(
+        path: &Path,
+        settings: &Settings,
+        settings_value: &Value,
+        cwd: &str,
+    ) -> Option<Cached> {
+        let text = std::fs::read_to_string(path).ok()?;
+        let c: Cached = serde_json::from_str(&text).ok()?;
+        (c.key == key(settings, settings_value, cwd)).then_some(c)
+    }
+
+    /// Record a load. Failure is silent: a cache that cannot be written costs
+    /// the next launch some milliseconds, nothing else.
+    pub fn write(
+        settings: &Settings,
+        settings_value: &Value,
+        cwd: &str,
+        count: u32,
+        patches: &[(String, Value)],
+        commands: &[(String, SlashCommandSpec)],
+    ) {
+        write_at(
+            &file(),
+            settings,
+            settings_value,
+            cwd,
+            count,
+            patches,
+            commands,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write_at(
+        path: &Path,
+        settings: &Settings,
+        settings_value: &Value,
+        cwd: &str,
+        count: u32,
+        patches: &[(String, Value)],
+        commands: &[(String, SlashCommandSpec)],
+    ) {
+        let c = Cached {
+            key: key(settings, settings_value, cwd),
+            count,
+            patches: patches.to_vec(),
+            commands: commands.to_vec(),
+        };
+        let Ok(text) = serde_json::to_string(&c) else {
+            return;
+        };
+        if let Some(d) = path.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        // Via a temporary: a half-written cache must never be read back.
+        let tmp = path.with_extension("json.tmp");
+        if std::fs::write(&tmp, text).is_ok() && std::fs::rename(&tmp, path).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn dir(tag: &str) -> PathBuf {
+            let d = std::env::temp_dir().join(format!("ah-pcache-{}-{tag}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(&d).unwrap();
+            d
+        }
+
+        /// Settings pointing at one wasm file, so the key has something to key on.
+        fn with(wasm: &Path) -> (Settings, Value) {
+            let mut s = Settings::default();
+            s.plugins.paths = vec![wasm.display().to_string()];
+            let v = serde_json::to_value(&s).unwrap();
+            (s, v)
+        }
+
+        fn patches() -> Vec<(String, Value)> {
+            vec![(
+                "themes".into(),
+                serde_json::json!({"theme": {"accent": "blue"}}),
+            )]
+        }
+
+        #[test]
+        fn what_was_written_comes_back() {
+            let d = dir("hit");
+            let wasm = d.join("themes.wasm");
+            std::fs::write(&wasm, b"\0asm").unwrap();
+            let (s, v) = with(&wasm);
+            let cache = d.join("cache.json");
+            let cmds = vec![("themes".to_string(), SlashCommandSpec::default())];
+            write_at(&cache, &s, &v, "/repo", 1, &patches(), &cmds);
+            let got = read_at(&cache, &s, &v, "/repo").expect("hit");
+            assert_eq!(got.count, 1);
+            assert_eq!(got.patches, patches());
+            assert_eq!(got.commands.len(), 1);
+        }
+
+        #[test]
+        fn a_touched_plugin_misses() {
+            let d = dir("mtime");
+            let wasm = d.join("themes.wasm");
+            std::fs::write(&wasm, b"\0asm").unwrap();
+            let (s, v) = with(&wasm);
+            let cache = d.join("cache.json");
+            write_at(&cache, &s, &v, "/repo", 1, &patches(), &[]);
+            assert!(read_at(&cache, &s, &v, "/repo").is_some());
+            // Longer bytes: a rebuild that landed in the same nanosecond.
+            std::fs::write(&wasm, b"\0asm\x01\x02\x03").unwrap();
+            assert!(read_at(&cache, &s, &v, "/repo").is_none());
+        }
+
+        #[test]
+        fn another_directory_or_setting_misses() {
+            let d = dir("inputs");
+            let wasm = d.join("themes.wasm");
+            std::fs::write(&wasm, b"\0asm").unwrap();
+            let (s, v) = with(&wasm);
+            let cache = d.join("cache.json");
+            write_at(&cache, &s, &v, "/repo", 1, &patches(), &[]);
+            assert!(read_at(&cache, &s, &v, "/other").is_none());
+            let mut other = s.clone();
+            other.model.id = "some/other-model".into();
+            let other_v = serde_json::to_value(&other).unwrap();
+            assert!(read_at(&cache, &other, &other_v, "/repo").is_none());
+        }
+
+        #[test]
+        fn a_corrupt_cache_is_simply_a_miss() {
+            let d = dir("corrupt");
+            let wasm = d.join("themes.wasm");
+            std::fs::write(&wasm, b"\0asm").unwrap();
+            let (s, v) = with(&wasm);
+            let cache = d.join("cache.json");
+            std::fs::write(&cache, "{ half a fi").unwrap();
+            assert!(read_at(&cache, &s, &v, "/repo").is_none());
+        }
     }
 }
