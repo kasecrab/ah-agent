@@ -3321,7 +3321,7 @@ impl App {
         let Some(view) = self.plan_view.as_mut() else {
             return;
         };
-        let total = ah_core::plan::store().snapshot().tasks.len();
+        let total = ah_core::plan::store().with(|p| p.tasks.len());
         let page = (self.size.1 as usize).saturating_sub(4).max(1);
         match (k.code, k.modifiers) {
             (KeyCode::Esc | KeyCode::Char('q'), _)
@@ -4226,15 +4226,21 @@ impl App {
             }
             left.extend(chip);
         }
-        let dock_line = plan::dock(
-            left,
-            &ah_core::plan::store().snapshot(),
-            ah_core::jobs::table().running(),
-            ah_core::agents::table().running(),
-            layout.show_plan,
-            area.width.saturating_sub(1) as usize,
-            &pal,
-        );
+        let running_jobs = ah_core::jobs::table().running();
+        let running_agents = ah_core::agents::table().running();
+        // Every frame passes through here, the animated ones included, so the
+        // plan is read where it lies rather than copied.
+        let dock_line = ah_core::plan::store().with(|p| {
+            plan::dock(
+                left,
+                p,
+                running_jobs,
+                running_agents,
+                layout.show_plan,
+                area.width.saturating_sub(1) as usize,
+                &pal,
+            )
+        });
         let dock_rows: u16 = dock_line.is_some() as u16;
 
         let [
@@ -4388,7 +4394,7 @@ impl App {
             v.draw(f, area, &pal, &job);
         }
         if let Some(v) = self.plan_view.as_mut() {
-            v.draw(f, area, &pal, &ah_core::plan::store().snapshot());
+            ah_core::plan::store().with(|p| v.draw(f, area, &pal, p));
         }
         if let Some(u) = &self.usage_pane {
             let icons = |id: &str| self.icons_for(id);

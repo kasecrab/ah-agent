@@ -85,14 +85,14 @@ fn plan(args: &Value) -> String {
     };
     // A task reads better by name than by number, when the plan has one.
     let tasks = |verb: &str| {
-        let plan = crate::plan::store().snapshot();
-        let named: Vec<String> = ids
-            .iter()
-            .map(|id| match plan.get(*id) {
-                Some(t) => format!("{id} {}", one_line(&t.title)),
-                None => id.to_string(),
-            })
-            .collect();
+        let named: Vec<String> = crate::plan::store().with(|plan| {
+            ids.iter()
+                .map(|id| match plan.get(*id) {
+                    Some(t) => format!("{id} {}", one_line(&t.title)),
+                    None => id.to_string(),
+                })
+                .collect()
+        });
         if named.is_empty() {
             verb.to_string()
         } else {

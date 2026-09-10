@@ -440,7 +440,12 @@ impl Engine {
         if let Ok(s) = &res {
             self.total_usage.add(&s.usage);
         }
-        self.session.save_plan(&ah_core::plan::store().snapshot());
+        // Copy the plan only when there is a new one to store, and never
+        // while holding its lock: the session write goes to disk.
+        let store = ah_core::plan::store();
+        if store.with(|p| *p != self.session.plan) {
+            self.session.save_plan(&store.snapshot());
+        }
         res
     }
 
@@ -682,7 +687,7 @@ pub fn context_label(tokens: u64, window: u64) -> String {
 
 /// `2/7` while a plan is unfinished, empty otherwise.
 fn plan_label() -> String {
-    let (done, total) = ah_core::plan::store().snapshot().counts();
+    let (done, total) = ah_core::plan::store().with(|p| p.counts());
     if total == 0 || done == total {
         return String::new();
     }
