@@ -181,7 +181,7 @@ price.
 | `enabled` | `true` | offer `/voice` at all; off never opens the microphone |
 | `provider` | `""` | `deepgram` (own key, live socket, words while you speak) or `openrouter` (the key `ah` already has); empty asks on the first `/voice` |
 | `model` | `""` | transcribing model; empty asks on first use. `nova-3` and friends on Deepgram, an audio-input model id on OpenRouter |
-| `idle_secs` | `120` | seconds an unused Deepgram socket is held before it is dropped and reopened on demand; 0 never drops it |
+| `idle_secs` | `0` | seconds an unused Deepgram socket is held before it is dropped and reopened on demand; 0 holds it for as long as dictation is armed. An open socket sending no audio is not billed |
 | `mode` | `"balanced"` | `fast`, `balanced` or `cheap`: one choice for the three dials below |
 | `prompt_append` | `""` | words the model would get wrong: project names, identifiers, people |
 | `language` | `""` | spoken language; empty lets the model decide |

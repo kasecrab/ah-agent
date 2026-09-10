@@ -357,6 +357,12 @@ struct App {
     /// Dictation, while it is armed. `None` is the whole cost of the feature
     /// being switched off: no thread, no buffer, no open device.
     voice: Option<voice::Session>,
+    /// A Deepgram socket dialled once the window was up, so the first phrase
+    /// does not wait a second and a half for a handshake.
+    warm: Option<voice::Warm>,
+    /// Whether that has been tried yet. Once, and never before the first
+    /// frame is on screen.
+    warmed: bool,
     stats: Stats,
     /// When the current reply started streaming reasoning.
     think_start: Option<Instant>,
@@ -543,6 +549,8 @@ fn run_inner(
         plan_view: None,
         usage_pane: None,
         voice: None,
+        warm: None,
+        warmed: false,
         stats: Stats::default(),
         think_start: None,
         task: String::new(),
@@ -1387,6 +1395,9 @@ impl App {
                     self.render(terminal)?;
                     self.last_draw = Instant::now();
                     self.dirty = false;
+                    // The window is up. Anything that touches the network
+                    // waits until here, so nothing can delay the first frame.
+                    self.warm_voice();
                 }
             }
             if self.quit {
@@ -3693,6 +3704,31 @@ impl App {
         }
     }
 
+    /// Dial Deepgram before anybody asks to dictate, so the first phrase does
+    /// not pay for the handshake — which was measured at well over a second.
+    ///
+    /// Only when the user has already settled on Deepgram and left a key
+    /// behind, and only once the window is up: nothing here may touch the
+    /// startup path, and `Warm::open` returns the moment its thread is
+    /// spawned, so a dead network cannot hold anything up.
+    fn warm_voice(&mut self) {
+        if self.warmed {
+            return;
+        }
+        self.warmed = true;
+        let cfg = self.settings().voice.clone();
+        if !cfg.enabled || !cfg.live() || self.voice.is_some() {
+            return;
+        }
+        if ah_core::auth::deepgram_key().is_none() {
+            return;
+        }
+        match voice::Warm::open(&cfg, self.self_tx.clone()) {
+            Ok(w) => self.warm = Some(w),
+            Err(e) => ah_core::debug!("voice: could not pre-connect: {e}"),
+        }
+    }
+
     fn arm_voice(&mut self, model: Option<String>) {
         let cfg = self.settings().voice.clone();
         if !cfg.enabled {
@@ -3792,12 +3828,15 @@ impl App {
         let route = format!("voice-{}", self.session_id);
         match voice::Session::arm(
             cfg,
-            model.clone(),
-            stt,
-            provider,
-            capture_cmd,
+            voice::Arm {
+                model: model.clone(),
+                stt,
+                provider,
+                capture_cmd,
+                route,
+                warm: self.warm.take(),
+            },
             self.self_tx.clone(),
-            route,
         ) {
             Ok(v) => {
                 let source = v.source().to_string();

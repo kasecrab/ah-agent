@@ -91,9 +91,16 @@ phrase boundaries itself, so nothing is cut here and nothing waits for a
 pause. Letting the talk key up asks for whatever is still held rather than
 waiting out the silence.
 
-The socket opens when you arm, not when you press the key, so no phrase pays
-for a handshake. It is kept for `voice.idle_secs` after you stop and dropped
-after that; the next phrase reopens it.
+The handshake takes well over a second, so it is never paid at the moment you
+start speaking. The socket is dialled as soon as `ah` has a window up, before
+`/voice` is even typed, whenever Deepgram is already the chosen provider and a
+key is already stored — and it is held for as long as dictation is armed. An
+open connection carrying only `KeepAlive` sends no audio and is not billed, so
+holding it costs nothing; `voice.idle_secs` drops it after that many idle
+seconds if you would rather it did not linger.
+
+Dialling never touches startup: it happens after the first frame is drawn, and
+on a thread, so a slow or missing network cannot delay the prompt appearing.
 
 On OpenRouter there is no streaming transcription protocol behind a chat
 model, so `ah` makes its own. A voice detector on this machine watches the level, cuts the

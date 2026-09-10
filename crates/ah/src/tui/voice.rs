@@ -19,6 +19,85 @@ use ah_voice::deepgram;
 
 use super::Msg;
 
+/// Everything opening a dictation session needs that is not a setting.
+pub struct Arm {
+    pub model: String,
+    /// The model answers on the transcription endpoint rather than as a chat.
+    pub stt: bool,
+    pub provider: Arc<OpenRouter>,
+    pub capture_cmd: String,
+    /// Sticky-routing key, so every phrase lands on one upstream.
+    pub route: String,
+    /// A socket dialled ahead of time, if there is one that fits.
+    pub warm: Option<Warm>,
+}
+
+/// A Deepgram socket dialled before anybody asked to dictate, so the first
+/// phrase does not pay for the handshake. It carries the ring the microphone
+/// will eventually fill, and the settings it was opened with, because a
+/// socket opened for one model is no use for another.
+pub struct Warm {
+    pub live: deepgram::Live,
+    producer: ah_voice::ring::Producer,
+    model: String,
+    language: String,
+    keyterms: Vec<String>,
+}
+
+impl Warm {
+    /// Open the socket. Returns as soon as the thread is spawned: the dialling
+    /// itself happens on that thread, so this never blocks the caller.
+    pub fn open(cfg: &VoiceSettings, tx: Sender<Msg>) -> Result<Self, String> {
+        let key = ah_core::auth::deepgram_key().ok_or("no Deepgram API key")?;
+        let model = cfg.model_for();
+        let keyterms = keyterms(cfg);
+        // Two seconds of headroom between the microphone thread and the
+        // socket thread, which is far more than either needs.
+        let (producer, consumer) =
+            ah_voice::ring::ring(ah_voice::resample::TARGET_RATE as usize * 2);
+        let live = deepgram::Live::open(
+            deepgram::Config {
+                api_key: key,
+                model: model.clone(),
+                language: cfg.language.clone(),
+                keyterms: keyterms.clone(),
+                sample_rate: ah_voice::resample::TARGET_RATE,
+                endpointing_ms: cfg.dials().0,
+                idle_secs: cfg.idle_secs,
+            },
+            consumer,
+            move |e| {
+                let _ = tx.send(Msg::Voice(Event::Live(e)));
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(Self {
+            live,
+            producer,
+            model,
+            language: cfg.language.clone(),
+            keyterms,
+        })
+    }
+
+    /// True when this socket was opened for what is being asked for now. A
+    /// changed model or language means the connection has to be redialled.
+    pub fn fits(&self, cfg: &VoiceSettings) -> bool {
+        self.model == cfg.model_for()
+            && self.language == cfg.language
+            && self.keyterms == keyterms(cfg)
+    }
+}
+
+/// `prompt_append` as the terms Deepgram should listen out for.
+fn keyterms(cfg: &VoiceSettings) -> Vec<String> {
+    cfg.prompt_append
+        .split(',')
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .collect()
+}
+
 /// What comes back from the worker and from the requests it starts.
 pub enum Event {
     /// A phrase was recorded and is ready to be transcribed.
@@ -217,15 +296,15 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn arm(
-        cfg: &VoiceSettings,
-        model: String,
-        stt: bool,
-        provider: Arc<OpenRouter>,
-        capture_cmd: String,
-        tx: Sender<Msg>,
-        route: String,
-    ) -> Result<Self, String> {
+    pub fn arm(cfg: &VoiceSettings, a: Arm, tx: Sender<Msg>) -> Result<Self, String> {
+        let Arm {
+            model,
+            stt,
+            provider,
+            capture_cmd,
+            route,
+            warm,
+        } = a;
         let (phrase_ms, max_chunk_ms, max_inflight) = cfg.dials();
         let audio = ah_voice::Config {
             device: cfg.device.clone(),
@@ -241,34 +320,13 @@ impl Session {
         // itself, so on that route the audio is streamed rather than cut, and
         // the local voice detector never runs.
         let (live, out) = if cfg.live() {
-            let key = ah_core::auth::deepgram_key()
-                .ok_or("no Deepgram API key: run /voice and choose Deepgram again")?;
-            // Two seconds of headroom between the microphone thread and the
-            // socket thread, which is far more than either needs.
-            let (producer, consumer) =
-                ah_voice::ring::ring(ah_voice::resample::TARGET_RATE as usize * 2);
-            let live_tx = tx.clone();
-            let live = deepgram::Live::open(
-                deepgram::Config {
-                    api_key: key,
-                    model: model.clone(),
-                    language: cfg.language.clone(),
-                    keyterms: cfg
-                        .prompt_append
-                        .split(',')
-                        .map(|t| t.trim().to_string())
-                        .filter(|t| !t.is_empty())
-                        .collect(),
-                    sample_rate: ah_voice::resample::TARGET_RATE,
-                    endpointing_ms: phrase_ms,
-                    idle_secs: cfg.idle_secs,
-                },
-                consumer,
-                move |e| {
-                    let _ = live_tx.send(Msg::Voice(Event::Live(e)));
-                },
-            )
-            .map_err(|e| e.to_string())?;
+            // A socket dialled at startup is already up by now; one that does
+            // not match what is being asked for is no use and is dropped.
+            let warm = match warm {
+                Some(w) if w.fits(cfg) => w,
+                _ => Warm::open(cfg, tx.clone())?,
+            };
+            let Warm { live, producer, .. } = warm;
             (Some(live), ah_voice::Output::Live(producer))
         } else {
             let hand_tx = tx.clone();

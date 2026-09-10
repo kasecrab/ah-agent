@@ -747,9 +747,10 @@ pub struct VoiceSettings {
     /// Model that does the transcribing; empty asks on first use. What counts
     /// as a model depends on `provider`.
     pub model: String,
-    /// Seconds an idle Deepgram socket is held open before it is dropped and
-    /// reopened on the next phrase. Holding it costs nothing but a file
-    /// descriptor and saves the handshake; 0 never drops it.
+    /// Seconds an unused Deepgram socket is held open before it is dropped
+    /// and reopened on demand. An open connection sending no audio is not
+    /// billed, and the handshake costs over a second, so the default holds it
+    /// for as long as dictation is armed.
     pub idle_secs: u64,
     /// `fast`, `balanced` or `cheap`: one choice for `phrase_ms`,
     /// `max_chunk_ms` and `max_inflight`. Anything set by hand wins over it.
@@ -809,7 +810,7 @@ impl Default for VoiceSettings {
             enabled: true,
             provider: String::new(),
             model: String::new(),
-            idle_secs: 120,
+            idle_secs: 0,
             mode: String::from("balanced"),
             prompt_append: String::new(),
             language: String::new(),

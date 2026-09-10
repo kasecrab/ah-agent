@@ -199,8 +199,9 @@ fn run(
     while let Err(RecvTimeoutError::Timeout) = stop.recv_timeout(TICK) {
         let want = listening.load(Ordering::Acquire);
 
-        // Hold the socket open for a while after the key comes up: the next
-        // phrase then costs no handshake at all.
+        // Hold the socket open after the key comes up: the next phrase then
+        // costs no handshake at all. `idle_secs` of 0 holds it for as long as
+        // dictation is armed, which is the default because it is free.
         if !want && socket.is_some() && cfg.idle_secs > 0 {
             let idle = idle_since.elapsed().as_secs();
             if idle >= cfg.idle_secs && !flush.load(Ordering::Acquire) {
@@ -213,10 +214,11 @@ fn run(
         }
 
         if socket.is_none() {
-            if !want {
-                audio.keep_last(0);
-                continue;
-            }
+            // Dial as soon as there is a socket to have, not when somebody
+            // finally presses the key. The handshake costs well over a
+            // second, and paying it at the start of a phrase means losing
+            // the beginning of that phrase. It costs nothing to hold: an
+            // open connection carrying only KeepAlive is not billed.
             if let Some(at) = retry_at
                 && Instant::now() < at
             {
