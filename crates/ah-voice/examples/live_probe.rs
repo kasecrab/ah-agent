@@ -138,8 +138,7 @@ fn main() {
     println!("\nEnter starts listening, Enter again stops it. `q` then Enter quits.\n");
     let stdin = std::io::stdin();
     let mut lines = stdin.lock().lines();
-    loop {
-        let Some(Ok(line)) = lines.next() else { break };
+    while let Some(Ok(line)) = lines.next() {
         if line.trim() == "q" {
             break;
         }
