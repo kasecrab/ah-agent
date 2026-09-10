@@ -3603,6 +3603,9 @@ impl App {
             KeyEventKind::Repeat => v.repeat(),
             KeyEventKind::Release => v.release(),
         }
+        if let Some(e) = self.voice.as_ref().and_then(|v| v.mic_trouble()) {
+            self.push(Block::Error(format!("microphone: {e}")));
+        }
         if let Some(n) = self.voice.as_mut().and_then(|v| v.note.take()) {
             self.push(Block::Notice(n));
         }
@@ -3839,10 +3842,16 @@ impl App {
             self.self_tx.clone(),
         ) {
             Ok(v) => {
-                let source = v.source().to_string();
                 self.voice = Some(v);
+                let who = if cfg.live() {
+                    format!("{model} transcribes as you speak")
+                } else {
+                    format!("{model} transcribes")
+                };
+                // The microphone is not opened until the key goes down, so
+                // there is nothing to name as the recorder yet.
                 self.push(Block::Notice(format!(
-                    "dictation on: hold {} and speak. {model} transcribes, {source} records.                      Nothing is sent until you press Enter.",
+                    "dictation on: hold {} and speak. {who}. Nothing is sent until you press Enter.",
                     self.talk_key_name()
                 )));
             }

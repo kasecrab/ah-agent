@@ -172,9 +172,18 @@ By default `ah` opens the system input itself and asks for 16 kHz mono, which
 is what a transcriber wants and a sixth of the bytes of 48 kHz stereo. If the
 device refuses, `ah` takes what it offers and converts.
 
-The device is opened when you arm, not when you press the talk key: opening it
-takes long enough to swallow the first syllable of every phrase.
-`voice.keep_open = false` closes it between phrases and accepts that.
+The microphone is opened when the talk key goes down and closed when it comes
+up — never merely because dictation is armed. Opening it was measured at 23 ms,
+with the first sample 37 ms later, which is far too little to be worth holding
+a microphone open for. On a Bluetooth headset it matters more than the
+milliseconds: an open microphone pins the earpieces in their call profile, and
+that costs you playback quality for as long as it is held.
+
+`voice.keep_open = true` holds it open for as long as dictation is armed, if
+you would rather have those 60 ms back.
+
+Because nothing is opened until you speak, a missing or refused microphone is
+reported on the first hold rather than when you arm.
 
 Over ssh, in a container, or in a build without the `mic` feature, there is no
 device to open. `ah` then looks for `pw-record`, `parec`, `arecord`, `ffmpeg`

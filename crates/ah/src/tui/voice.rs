@@ -309,6 +309,7 @@ impl Session {
         let audio = ah_voice::Config {
             device: cfg.device.clone(),
             capture_cmd,
+            keep_open: cfg.keep_open,
             sample_rate: cfg.sample_rate,
             ring_ms: cfg.ring_ms,
             phrase_ms,
@@ -364,8 +365,10 @@ impl Session {
         })
     }
 
-    pub fn source(&self) -> &str {
-        self.dictation.source()
+    /// A microphone that would not open. Only found out about when the talk
+    /// key goes down, because that is the only time one is reached for.
+    pub fn mic_trouble(&self) -> Option<String> {
+        self.dictation.take_trouble()
     }
 
     pub fn listening(&self) -> bool {

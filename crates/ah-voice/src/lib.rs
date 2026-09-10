@@ -21,6 +21,7 @@ pub mod wav;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::Mutex;
 use std::time::Duration;
 
 /// One run of speech, encoded and ready to send.
@@ -40,6 +41,11 @@ pub struct Phrase {
 pub struct Config {
     pub device: String,
     pub capture_cmd: String,
+    /// Hold the device open for as long as dictation is armed, rather than
+    /// opening it for each hold. Opening costs a few tens of milliseconds, so
+    /// this is rarely worth it — and a microphone that is open is a
+    /// microphone that is on.
+    pub keep_open: bool,
     pub sample_rate: u32,
     pub ring_ms: u64,
     pub phrase_ms: u64,
@@ -58,41 +64,48 @@ pub enum Output {
     Live(ring::Producer),
 }
 
-/// An open microphone. Dropping it closes the device.
+/// Armed dictation. The device is not opened until the talk key goes down,
+/// and is closed again when it comes up: a microphone that is open is a
+/// microphone that is on, and on a Bluetooth headset it also holds the
+/// earpieces in their low-quality call profile the whole time.
 pub struct Dictation {
     stop: Option<mpsc::Sender<()>>,
     worker: Option<std::thread::JoinHandle<()>>,
     listening: Arc<AtomicBool>,
     level: Arc<AtomicU32>,
     phrases: Arc<AtomicU64>,
+    /// What recorded, and at what rate. Not known until the device has been
+    /// opened for the first time.
+    heard: Arc<Mutex<Heard>>,
+}
+
+#[derive(Default, Clone)]
+struct Heard {
     source: String,
     rate: u32,
+    /// A device that would not open, to be said once and then forgotten.
+    trouble: Option<String>,
 }
 
 impl Dictation {
-    /// Open the device and start the worker.
+    /// Start the worker. The microphone stays shut until `listen(true)`.
     pub fn arm(cfg: &Config, out: Output) -> Result<Self, capture::Error> {
-        let opened = capture::open(&capture::Request {
-            device: cfg.device.clone(),
-            command: cfg.capture_cmd.clone(),
-            rate: cfg.sample_rate,
-            ring_ms: cfg.ring_ms,
-        })?;
-        let source = opened.source.clone();
-        let device_rate = opened.rate;
-        let channels = opened.channels;
         let listening = Arc::new(AtomicBool::new(false));
         let level = Arc::new(AtomicU32::new(0));
         let phrases = Arc::new(AtomicU64::new(0));
+        let heard = Arc::new(Mutex::new(Heard::default()));
         let (stop_tx, stop_rx) = mpsc::channel::<()>();
 
         let cfg = cfg.clone();
-        let (l, lv, ph) = (listening.clone(), level.clone(), phrases.clone());
+        let (l, lv, ph, hd) = (
+            listening.clone(),
+            level.clone(),
+            phrases.clone(),
+            heard.clone(),
+        );
         let worker = std::thread::Builder::new()
             .name("ah-voice".into())
-            .spawn(move || {
-                run(opened, device_rate, channels, cfg, l, lv, ph, stop_rx, out);
-            })
+            .spawn(move || run(cfg, l, lv, ph, hd, stop_rx, out))
             .map_err(|e| capture::Error::Device(e.to_string()))?;
 
         Ok(Self {
@@ -101,8 +114,7 @@ impl Dictation {
             listening,
             level,
             phrases,
-            source,
-            rate: device_rate,
+            heard,
         })
     }
 
@@ -126,14 +138,23 @@ impl Dictation {
         self.phrases.load(Ordering::Relaxed)
     }
 
-    /// What is doing the recording, for the status line and the log.
-    pub fn source(&self) -> &str {
-        &self.source
+    /// What is doing the recording. Empty until the first hold, because
+    /// nothing has been opened before then.
+    pub fn source(&self) -> String {
+        self.heard.lock().map(|h| h.source.clone()).unwrap_or_default()
     }
 
-    /// The device's own rate, before anything is resampled.
+    /// The device's own rate, before anything is resampled. 0 until the first
+    /// hold.
     pub fn device_rate(&self) -> u32 {
-        self.rate
+        self.heard.lock().map(|h| h.rate).unwrap_or(0)
+    }
+
+    /// A device that would not open, said once. The microphone is only
+    /// reached for when the key goes down, so this is where a missing one is
+    /// found out about.
+    pub fn take_trouble(&self) -> Option<String> {
+        self.heard.lock().ok().and_then(|mut h| h.trouble.take())
     }
 }
 
@@ -152,19 +173,23 @@ impl Drop for Dictation {
 const BUSY: Duration = Duration::from_millis(10);
 const QUIET: Duration = Duration::from_millis(200);
 
+/// One open device, and everything derived from its rate.
+struct Mic {
+    opened: capture::Opened,
+    resampler: resample::Resampler,
+    channels: u16,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run(
-    opened: capture::Opened,
-    device_rate: u32,
-    channels: u16,
     cfg: Config,
     listening: Arc<AtomicBool>,
     level: Arc<AtomicU32>,
     phrases: Arc<AtomicU64>,
+    heard: Arc<Mutex<Heard>>,
     stop: mpsc::Receiver<()>,
     out: Output,
 ) {
-    let mut resampler = resample::Resampler::new(device_rate);
     let mut chunker = vad::Chunker::new(vad::Config {
         rate: resample::TARGET_RATE,
         phrase_ms: cfg.phrase_ms,
@@ -174,84 +199,121 @@ fn run(
         min_speech_ms: 250,
     });
     // Allocated once. The audio path never grows a buffer after this point.
-    let mut raw: Vec<i16> = Vec::with_capacity(device_rate as usize);
-    let mut mono: Vec<i16> = Vec::with_capacity(device_rate as usize);
+    let mut raw: Vec<i16> = Vec::with_capacity(resample::TARGET_RATE as usize);
+    let mut mono: Vec<i16> = Vec::with_capacity(resample::TARGET_RATE as usize);
     let mut pcm: Vec<i16> = Vec::with_capacity(resample::TARGET_RATE as usize);
     let mut chunks: Vec<vad::Chunk> = Vec::new();
-    // Enough of the device's own samples to cover the run-up to a phrase.
-    let preroll = (device_rate as u64 * channels as u64 * cfg.preroll_ms / 1000) as usize;
-    let mut was_listening = false;
+    let mut mic: Option<Mic> = None;
     let mut seq = 0u64;
+
+    let hand_over = |c: vad::Chunk, seq: &mut u64| {
+        if let Output::Phrases(hand) = &out {
+            *seq += 1;
+            phrases.fetch_add(1, Ordering::Relaxed);
+            hand(Phrase {
+                seq: *seq,
+                wav: wav::encode(&c.pcm, resample::TARGET_RATE),
+                rate: resample::TARGET_RATE,
+                speech_ms: c.speech_ms,
+            });
+        }
+    };
 
     loop {
         let on = listening.load(Ordering::Acquire);
-        if !on && !was_listening {
-            // Keep only the run-up. Nothing is decoded, nothing is measured.
-            opened.audio.keep_last(preroll);
-            match stop.recv_timeout(QUIET) {
-                Err(RecvTimeoutError::Timeout) => continue,
-                _ => break,
+
+        // The key went down and there is no device yet. This is the only
+        // place a microphone is ever reached for.
+        if on && mic.is_none() {
+            match capture::open(&capture::Request {
+                device: cfg.device.clone(),
+                command: cfg.capture_cmd.clone(),
+                rate: cfg.sample_rate,
+                ring_ms: cfg.ring_ms,
+            }) {
+                Ok(opened) => {
+                    crate::log(&format!(
+                        "recording with {} at {} Hz, {} channel(s)",
+                        opened.source, opened.rate, opened.channels
+                    ));
+                    if let Ok(mut h) = heard.lock() {
+                        h.source = opened.source.clone();
+                        h.rate = opened.rate;
+                    }
+                    let resampler = resample::Resampler::new(opened.rate);
+                    let channels = opened.channels;
+                    mic = Some(Mic {
+                        opened,
+                        resampler,
+                        channels,
+                    });
+                }
+                Err(e) => {
+                    // Nothing to record with. Say so once and stop trying, or
+                    // every tick would be another failed open.
+                    if let Ok(mut h) = heard.lock() {
+                        h.trouble = Some(e.to_string());
+                    }
+                    listening.store(false, Ordering::Release);
+                    match stop.recv_timeout(QUIET) {
+                        Err(RecvTimeoutError::Timeout) => continue,
+                        _ => break,
+                    }
+                }
             }
         }
 
-        raw.clear();
-        opened.audio.drain(&mut raw);
-        if !raw.is_empty() {
-            mono.clear();
-            resample::downmix(&raw, channels, &mut mono);
-            pcm.clear();
-            resampler.process(&mono, &mut pcm);
-            if let Some(l) = peak(&pcm) {
-                level.store(l.to_bits(), Ordering::Relaxed);
-            }
-            match &out {
-                // Somebody downstream is listening continuously and decides
-                // for itself where a phrase ends, so nothing is cut here.
-                Output::Live(to) => to.write(&pcm),
-                Output::Phrases(hand) => {
-                    chunks.clear();
-                    chunker.push(&pcm, true, &mut chunks);
-                    for c in chunks.drain(..) {
-                        seq += 1;
-                        phrases.fetch_add(1, Ordering::Relaxed);
-                        hand(Phrase {
-                            seq,
-                            wav: wav::encode(&c.pcm, resample::TARGET_RATE),
-                            rate: resample::TARGET_RATE,
-                            speech_ms: c.speech_ms,
-                        });
+        if let Some(m) = mic.as_mut() {
+            raw.clear();
+            m.opened.audio.drain(&mut raw);
+            if !raw.is_empty() {
+                mono.clear();
+                resample::downmix(&raw, m.channels, &mut mono);
+                pcm.clear();
+                m.resampler.process(&mono, &mut pcm);
+                if let Some(l) = peak(&pcm) {
+                    level.store(l.to_bits(), Ordering::Relaxed);
+                }
+                match &out {
+                    // Somebody downstream is listening continuously and
+                    // decides for itself where a phrase ends, so nothing is
+                    // cut here.
+                    Output::Live(to) => to.write(&pcm),
+                    Output::Phrases(_) => {
+                        chunks.clear();
+                        chunker.push(&pcm, true, &mut chunks);
+                        for c in chunks.drain(..) {
+                            hand_over(c, &mut seq);
+                        }
                     }
                 }
             }
         }
 
         if !on {
-            // The key came up: hand over whatever was still open, then go
-            // back to sleep.
-            if let Output::Phrases(hand) = &out
-                && let Some(c) = chunker.flush()
-            {
-                seq += 1;
-                phrases.fetch_add(1, Ordering::Relaxed);
-                hand(Phrase {
-                    seq,
-                    wav: wav::encode(&c.pcm, resample::TARGET_RATE),
-                    rate: resample::TARGET_RATE,
-                    speech_ms: c.speech_ms,
-                });
+            // The key came up: hand over whatever phrase was still open, then
+            // shut the microphone unless it was asked to stay.
+            if let Some(c) = chunker.flush() {
+                hand_over(c, &mut seq);
             }
             level.store(0f32.to_bits(), Ordering::Relaxed);
-            was_listening = false;
-            continue;
+            if !cfg.keep_open && let Some(m) = mic.take() {
+                m.opened.close();
+            }
+            match stop.recv_timeout(QUIET) {
+                Err(RecvTimeoutError::Timeout) => continue,
+                _ => break,
+            }
         }
-        was_listening = true;
 
         match stop.recv_timeout(BUSY) {
             Err(RecvTimeoutError::Timeout) => {}
             _ => break,
         }
     }
-    opened.close();
+    if let Some(m) = mic.take() {
+        m.opened.close();
+    }
 }
 
 fn peak(pcm: &[i16]) -> Option<f32> {
@@ -309,6 +371,7 @@ mod tests {
         Config {
             device: String::new(),
             capture_cmd: cmd,
+            keep_open: false,
             sample_rate: 16_000,
             ring_ms: 4000,
             phrase_ms: 400,

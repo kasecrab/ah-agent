@@ -776,8 +776,10 @@ pub struct VoiceSettings {
     /// stdout, replacing the built-in capture. Read from the user config or
     /// the environment only, never from a project file.
     pub capture_cmd: String,
-    /// Keep the device open while armed. Opening it costs a moment, which
-    /// would otherwise eat the first syllable of every phrase.
+    /// Hold the microphone open for as long as dictation is armed, rather
+    /// than opening it for each hold. Opening costs a few tens of
+    /// milliseconds, and a microphone that is open is a microphone that is
+    /// on, so this is off.
     pub keep_open: bool,
     /// Capture rate; 0 asks for 16000 and resamples whatever the device gives.
     pub sample_rate: u32,
@@ -819,7 +821,7 @@ impl Default for VoiceSettings {
             max_listen_secs: 300,
             device: String::new(),
             capture_cmd: String::new(),
-            keep_open: true,
+            keep_open: false,
             sample_rate: 0,
             ring_ms: 2000,
             phrase_ms: 400,

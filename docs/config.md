@@ -190,7 +190,7 @@ price.
 | `max_listen_secs` | `300` | longest a toggled microphone stays on; holding a key needs no limit |
 | `device` | `""` | input device name; empty takes the system default |
 | `capture_cmd` | `""` | command printing raw s16le mono PCM on stdout; user config or environment only |
-| `keep_open` | `true` | hold the device open while armed, so no first syllable is lost |
+| `keep_open` | `false` | hold the microphone open for as long as dictation is armed, rather than opening it for each hold |
 | `sample_rate` | `0` | capture rate; 0 asks for 16000 and resamples what the device gives |
 | `ring_ms` | `2000` | audio kept in the capture buffer |
 | `phrase_ms` | `400` | silence that ends a phrase |
