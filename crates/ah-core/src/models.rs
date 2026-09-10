@@ -302,12 +302,16 @@ pub fn context_window(id: &str) -> Option<u64> {
 
 /// Subsequence fuzzy score: higher is better, `None` when `query` chars do not
 /// all appear in order. Rewards prefix, word-boundary and contiguous matches.
+///
+/// This runs once per row of the catalogue on every keystroke of the model
+/// picker — six hundred rows a letter — so it allocates nothing and walks each
+/// string once. Model ids and typed queries are almost always ASCII, which is
+/// eleven times cheaper to compare than decoding characters and folding their
+/// case, so that case has its own path and the general one is the fallback.
 pub fn fuzzy_score(query: &str, candidate: &str) -> Option<u32> {
     if query.is_empty() {
         return Some(1);
     }
-    let q: Vec<char> = query.chars().flat_map(|c| c.to_lowercase()).collect();
-    let c: Vec<char> = candidate.chars().flat_map(|c| c.to_lowercase()).collect();
     // all space-separated terms must match
     if query.contains(' ') {
         let mut total = 0;
@@ -316,21 +320,57 @@ pub fn fuzzy_score(query: &str, candidate: &str) -> Option<u32> {
         }
         return Some(total);
     }
+    if query.is_ascii() && candidate.is_ascii() {
+        return ascii_score(query.as_bytes(), candidate.as_bytes());
+    }
+    let mut q = query.chars().flat_map(char::to_lowercase).peekable();
     let mut score: u32 = 0;
-    let mut qi = 0;
-    let mut prev: Option<usize> = None;
-    for (i, ch) in c.iter().enumerate() {
-        if qi < q.len() && *ch == q[qi] {
+    let mut prev_ch: Option<char> = None;
+    let mut prev_match: Option<usize> = None;
+    let mut len: usize = 0;
+    for (i, ch) in candidate.chars().flat_map(char::to_lowercase).enumerate() {
+        len = i + 1;
+        if q.peek() == Some(&ch) {
+            score += 10;
+            match prev_ch {
+                None => score += 30,
+                // word boundary (after '/', '-', '.', ':')
+                Some(p) if !p.is_alphanumeric() => score += 20,
+                _ => {}
+            }
+            if prev_match == Some(i.wrapping_sub(1)) {
+                score += 15; // contiguous
+            }
+            prev_match = Some(i);
+            q.next();
+        }
+        prev_ch = Some(ch);
+    }
+    if q.peek().is_some() {
+        return None;
+    }
+    Some(score.saturating_sub((len as u32).min(200) / 4))
+}
+
+/// [`fuzzy_score`] over bytes. Same scoring, byte for character, which holds
+/// because ASCII case folding never changes a byte's length or whether it is
+/// alphanumeric.
+fn ascii_score(q: &[u8], c: &[u8]) -> Option<u32> {
+    let mut score: u32 = 0;
+    let mut qi = 0usize;
+    let mut prev_match: Option<usize> = None;
+    for (i, &ch) in c.iter().enumerate() {
+        if qi < q.len() && ch.eq_ignore_ascii_case(&q[qi]) {
             score += 10;
             if i == 0 {
                 score += 30;
-            } else if !c[i - 1].is_alphanumeric() {
-                score += 20; // word boundary (after '/', '-', '.', ':')
+            } else if !c[i - 1].is_ascii_alphanumeric() {
+                score += 20;
             }
-            if prev == Some(i.wrapping_sub(1)) {
-                score += 15; // contiguous
+            if prev_match == Some(i.wrapping_sub(1)) {
+                score += 15;
             }
-            prev = Some(i);
+            prev_match = Some(i);
             qi += 1;
         }
     }
@@ -341,10 +381,20 @@ pub fn fuzzy_score(query: &str, candidate: &str) -> Option<u32> {
 }
 
 /// Rank `items` by fuzzy score of `key(item)` against `query`.
-pub fn rank<'a, T>(query: &str, items: &'a [T], key: impl Fn(&T) -> String) -> Vec<&'a T> {
+///
+/// The key may be borrowed from the item, so a caller with the text already in
+/// hand pays nothing to look at it.
+pub fn rank<'a, T, K: AsRef<str>>(
+    query: &str,
+    items: &'a [T],
+    key: impl Fn(&'a T) -> K,
+) -> Vec<&'a T> {
     let mut scored: Vec<(u32, &T)> = items
         .iter()
-        .filter_map(|it| fuzzy_score(query, &key(it)).map(|s| (s, it)))
+        .filter_map(|it| {
+            let k = key(it);
+            fuzzy_score(query, k.as_ref()).map(|s| (s, it))
+        })
         .collect();
     scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
     scored.into_iter().map(|(_, t)| t).collect()
@@ -446,13 +496,44 @@ mod tests {
     }
 
     #[test]
+    fn the_byte_path_and_the_character_path_agree() {
+        // Both paths, same answers: the fast one is only sound while this holds.
+        let candidates = [
+            "anthropic/claude-sonnet-4.5",
+            "black-forest-labs/flux.2-pro",
+            "openai/GPT-5-Image",
+            "a",
+            "",
+            "x/y-z.0:1",
+        ];
+        for c in candidates {
+            for q in ["c", "cl", "claude", "F2", "gpt5", "z0", "", "xyz", "q"] {
+                let ascii = fuzzy_score(q, c);
+                // The same strings with a non-ASCII character appended take
+                // the general path; the score differs by that character, but
+                // whether they match must not.
+                let wide = fuzzy_score(q, &format!("{c}é"));
+                assert_eq!(
+                    ascii.is_some(),
+                    wide.is_some(),
+                    "{q:?} against {c:?} matched on one path only"
+                );
+            }
+        }
+        // A query that is not ASCII still works, on the general path.
+        assert!(fuzzy_score("é", "café").is_some());
+        assert!(fuzzy_score("É", "café").is_some(), "case folds");
+        assert_eq!(fuzzy_score("z", "café"), None);
+    }
+
+    #[test]
     fn rank_orders() {
         let items = vec![
             "quit".to_string(),
             "reload".to_string(),
             "sequence".to_string(),
         ];
-        let r = rank("q", &items, |s| s.clone());
+        let r = rank("q", &items, |s: &String| s.as_str());
         assert_eq!(r[0], "quit");
     }
 }

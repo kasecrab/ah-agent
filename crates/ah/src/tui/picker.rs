@@ -1,6 +1,8 @@
 //! Fuzzy list overlay shared by `/model`, `/resume`, `/effort`, `/favorite`,
 //! `/rename` and `/skills`.
 
+use std::cmp::Reverse;
+
 use ah_core::models;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
@@ -99,6 +101,9 @@ pub struct Picker {
     /// What is typed is a secret: show its length, not its characters, and
     /// never let it onto the screen where a screenshot would keep it.
     pub secret: bool,
+    /// Scored candidates, kept between keystrokes so filtering a catalogue of
+    /// six hundred models allocates nothing after the first letter.
+    scratch: Vec<(u32, usize)>,
 }
 
 impl Picker {
@@ -115,18 +120,26 @@ impl Picker {
             hint: String::new(),
             hotkeys: false,
             secret: false,
+            scratch: Vec::new(),
         };
         p.refilter();
         p
     }
 
     pub fn refilter(&mut self) {
-        let idx: Vec<usize> = (0..self.rows.len()).collect();
-        let rows = &self.rows;
-        self.results = models::rank(&self.query, &idx, |&i| rows[i].search.clone())
-            .into_iter()
-            .copied()
-            .collect();
+        // Scored in place rather than through `models::rank`, which would want
+        // a vector of indices and a key string per row every time a letter is
+        // typed. Both buffers here are reused.
+        self.scratch.clear();
+        for (i, row) in self.rows.iter().enumerate() {
+            if let Some(score) = models::fuzzy_score(&self.query, &row.search) {
+                self.scratch.push((score, i));
+            }
+        }
+        // Stable, so rows of equal score keep the order they were given in.
+        self.scratch.sort_by_key(|(score, _)| Reverse(*score));
+        self.results.clear();
+        self.results.extend(self.scratch.iter().map(|(_, i)| *i));
         self.selected = 0;
     }
 
