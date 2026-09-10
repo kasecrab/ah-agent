@@ -78,7 +78,7 @@ name in, Enter runs it. Plugins can add commands (`ah docs plugins`).
 | `/statusline`, `/status` | tick what the status line shows; Space toggles a row, Esc closes; lasts the session, `statusline.items` in config keeps it |
 | `/reload` | re-read config files and reload plugins |
 | `/plan` | show the task list |
-| `/agents` | the agents the model started; Enter watches one, Ctrl-K stops it |
+| `/jobs` | the background shell commands; Enter follows one, `k` stops it |
 | `/plugins` | active plugins |
 | `/tools` | tools offered to the model |
 | `/keys` | active key bindings |
@@ -168,14 +168,23 @@ The `agents` tool looks after them: `list`, `status` for how far one has got,
 `wait`, `kill`, and `say` to give a running agent something more to go on.
 Waiting costs nothing until something happens.
 
-In the TUI a magenta `2 Agent` chip sits beside the jobs chip. With an empty
-input, Right steps into the first agent and Left steps back out: the transcript
-is replaced by what that agent is doing, and what you type goes to it instead
-of to the main conversation. A finished agent takes it as a follow-up and picks
-its work back up, keeping everything it learned. Esc goes back to the
-conversation, which is untouched — stepping into an agent watches it, it does
-not interrupt anything. `/agents` lists them all; Enter watches one, Ctrl-K
-stops one.
+In the TUI everything running sits in a strip under the status bar, one row
+each: the background jobs when there are any, then `main`, then one row per
+agent with what it is doing, how long it has been at it and what it has
+written. `●` marks the one the input is bound to. The strip is only there while
+something is running, and an agent's row goes as soon as it reports.
+
+With an empty input, Down moves the keys from the input into the strip and
+along it, Up moves back out of the top, Enter binds the input and the
+transcript to the highlighted row, Ctrl-K stops the agent it is on, and Esc
+leaves the strip alone. Bound to an agent, the transcript shows what that agent
+is doing and what you type is passed to it — it reads the message before its
+next step. Going back to `main` leaves the agent running; the conversation is
+untouched, because stepping into an agent watches it rather than interrupting
+anything.
+
+An agent's own background commands never appear in the conversation. They are
+in that agent's view, with the rest of what it did.
 
 Agents cost more tokens than doing the work in one conversation, not fewer.
 What they buy is a conversation that stays about the work instead of filling

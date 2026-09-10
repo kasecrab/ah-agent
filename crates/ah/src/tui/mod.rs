@@ -10,6 +10,7 @@ mod keys;
 mod markdown;
 mod picker;
 mod plan;
+mod switch;
 mod theme;
 mod transcript;
 mod usage;
@@ -66,7 +67,7 @@ enum Msg {
 
 /// Built-in slash commands, alphabetical: `(name, description, takes_args)`.
 const COMMANDS: &[(&str, &str, bool)] = &[
-    ("agents", "list the agents the model started", false),
+    ("jobs", "list the background shell commands", false),
     ("ask", "ask before tool calls", false),
     ("clear", "clear the conversation", false),
     (
@@ -227,8 +228,6 @@ struct Binds {
     toggle_tools: Vec<Chord>,
     toggle_reasoning: Vec<Chord>,
     cycle_model: Vec<Chord>,
-    prev_agent: Vec<Chord>,
-    next_agent: Vec<Chord>,
     history_prev: Vec<Chord>,
     history_next: Vec<Chord>,
     delete_word: Vec<Chord>,
@@ -263,8 +262,6 @@ impl Binds {
             toggle_tools: p(&k.toggle_tools),
             toggle_reasoning: p(&k.toggle_reasoning),
             cycle_model: p(&k.cycle_model),
-            prev_agent: p(&k.prev_agent),
-            next_agent: p(&k.next_agent),
             history_prev: p(&k.history_prev),
             history_next: p(&k.history_next),
             delete_word: p(&k.delete_word),
@@ -352,6 +349,9 @@ struct App {
     /// The agent being watched, if the user has stepped into one. `None` is
     /// the main conversation.
     agent_view: Option<agents::View>,
+    /// Which row of the strip under the status bar the keys are on, while the
+    /// strip has them. `None` leaves them with the input.
+    switch: Option<usize>,
     plan_view: Option<plan::View>,
     usage_pane: Option<usage::Pane>,
     /// Dictation, while it is armed. `None` is the whole cost of the feature
@@ -539,6 +539,7 @@ fn run_inner(
         picker: None,
         job_view: None,
         agent_view: None,
+        switch: None,
         plan_view: None,
         usage_pane: None,
         voice: None,
@@ -2390,11 +2391,6 @@ impl App {
                         Some(name) => self.use_favorite(name),
                         None => {}
                     },
-                    Kind::Agents => {
-                        if let Some(id) = chosen.and_then(|c| c.parse().ok()) {
-                            self.watch_agent(id);
-                        }
-                    }
                     Kind::Jobs => {
                         if let Some(id) = chosen.and_then(|c| c.parse().ok()) {
                             self.open_job_view(id);
@@ -2570,7 +2566,6 @@ impl App {
         };
         match (&p.kind, c) {
             (Kind::Jobs, 'k') => self.kill_selected_job(),
-            (Kind::Agents, 'k') => self.stop_selected_agent(),
             (Kind::Statusline, ' ') => {
                 let Some(id) = p.current().map(|r| r.id.clone()) else {
                     return;
@@ -3330,11 +3325,19 @@ impl App {
             self.set_state(State::Thinking);
             let _ = self.tx.send(EngineCmd::Wake);
         }
-        // The chip counts them, and an open agent view follows one live.
-        self.dirty = true;
-        if matches!(self.picker.as_ref().map(|p| &p.kind), Some(Kind::Agents)) {
-            self.refresh_agents_picker();
+        // A finished agent is not something to watch or step into: its report
+        // is already in the conversation. Fall back to it, and keep the keys
+        // on a row that still exists.
+        if let Some(id) = self.agent_view.as_ref().map(|v| v.id)
+            && table.get(id).is_none_or(|c| !c.running())
+        {
+            self.agent_view = None;
         }
+        if let Some(i) = self.switch {
+            let rows = switch::rows().len();
+            self.switch = (rows > 0).then(|| i.min(rows - 1));
+        }
+        self.dirty = true;
     }
 
     fn open_jobs_picker(&mut self) {
@@ -3382,113 +3385,75 @@ impl App {
 
     /// The agents worth stepping into, oldest first: everything the main
     /// conversation started that is still in the table.
-    fn watchable_agents(&self) -> Vec<u32> {
-        ah_core::agents::table()
-            .owned_by(0)
-            .iter()
-            .map(|c| c.id)
-            .collect()
-    }
-
-    /// Walk between the main conversation and the agents. Off the end either
-    /// way is the main conversation again.
-    fn cycle_agent(&mut self, forward: bool) {
-        let ids = self.watchable_agents();
-        if ids.is_empty() {
-            self.push(Block::Notice(
-                "no agents yet · the model starts them when a job is worth handing over".into(),
-            ));
+    /// Move the keys through the strip: from the input into the first row,
+    /// along it, and out of the top back to the input.
+    fn switch_move(&mut self, by: i32) {
+        let rows = switch::rows();
+        if rows.is_empty() {
+            self.switch = None;
             return;
         }
-        let at = self
-            .agent_view
-            .as_ref()
-            .and_then(|v| ids.iter().position(|id| *id == v.id));
-        let next = match (at, forward) {
-            (None, true) => Some(0),
-            (None, false) => Some(ids.len() - 1),
-            (Some(i), true) => (i + 1 < ids.len()).then_some(i + 1),
-            (Some(i), false) => i.checked_sub(1),
+        self.switch = match (self.switch, by) {
+            (None, d) if d > 0 => Some(0),
+            (None, _) => Some(rows.len() - 1),
+            (Some(i), d) if d > 0 => Some((i + 1).min(rows.len() - 1)),
+            (Some(0), _) => None,
+            (Some(i), _) => Some(i - 1),
         };
-        match next {
-            Some(i) => self.watch_agent(ids[i]),
-            // Past the last one is the way back to the main conversation.
-            None => {
+        self.dirty = true;
+    }
+
+    /// Bind the input and the transcript to the highlighted row.
+    fn switch_pick(&mut self) {
+        let rows = switch::rows();
+        let Some(row) = self.switch.and_then(|i| rows.get(i)) else {
+            self.switch = None;
+            return;
+        };
+        match row.target {
+            switch::Target::Jobs => {
+                self.switch = None;
+                self.open_jobs_picker();
+            }
+            switch::Target::Main => {
                 self.agent_view = None;
+                self.switch = None;
                 self.dirty = true;
             }
+            switch::Target::Agent(id) => {
+                self.switch = None;
+                self.watch_agent(id);
+            }
+        }
+    }
+
+    /// Stop the agent the keys are on.
+    fn stop_highlighted(&mut self) {
+        let rows = switch::rows();
+        if let Some(switch::Target::Agent(id)) =
+            self.switch.and_then(|i| rows.get(i)).map(|r| r.target)
+        {
+            self.stop_agent(id);
         }
     }
 
     /// Send what the user typed to the agent they are watching. A finished one
     /// picks its work back up with it.
+    /// What is typed while an agent is bound goes to that agent, and the
+    /// acknowledgement goes into its view, not into the conversation.
     fn say_to_agent(&mut self, id: u32, text: String) {
-        let Some(child) = ah_core::agents::table().get(id) else {
-            self.push(Block::Notice(format!("agent {id} is gone")));
+        let Some(child) = ah_core::agents::table().get(id).filter(|c| c.running()) else {
+            self.push(Block::Notice(format!("agent {id} has finished")));
             self.agent_view = None;
             return;
         };
-        let concurrent = self.settings().agents.max_concurrent;
-        if child.state().over() {
-            let _ = ah_core::agents::follow_up(&child, &text, concurrent);
-            self.push(Block::Notice(format!("agent {id} picked its work back up")));
-        } else {
-            child.say(text);
-            self.push(Block::Notice(format!(
-                "agent {id} will read that before its next step"
-            )));
-        }
+        child.say(text);
         self.dirty = true;
-    }
-
-    fn open_agents_picker(&mut self) {
-        let all = ah_core::agents::table().owned_by(0);
-        if all.is_empty() {
-            self.push(Block::Notice(
-                "no agents · the model starts them with the agent tool when work is worth \
-                 handing over"
-                    .into(),
-            ));
-            return;
-        }
-        let rows = agents::rows(&all, &self.pal);
-        self.picker = Some(Picker::new(
-            Kind::Agents,
-            "agents",
-            "Enter watches · Ctrl-K stops · Esc closes",
-            rows,
-        ));
-        self.dirty = true;
-    }
-
-    fn refresh_agents_picker(&mut self) {
-        let all = ah_core::agents::table().owned_by(0);
-        let rows = agents::rows(&all, &self.pal);
-        if let Some(p) = self.picker.as_mut() {
-            let selected = p.selected;
-            p.rows = rows;
-            p.refilter();
-            p.selected = selected.min(p.results.len().saturating_sub(1));
-        }
-        self.dirty = true;
-    }
-
-    fn stop_selected_agent(&mut self) {
-        let id: Option<u32> = self
-            .picker
-            .as_ref()
-            .and_then(|p| p.current())
-            .and_then(|r| r.id.parse().ok());
-        if let Some(id) = id {
-            self.stop_agent(id);
-            self.refresh_agents_picker();
-        }
     }
 
     fn stop_agent(&mut self, id: u32) {
         if let Some(child) = ah_core::agents::table().get(id) {
             child.cancel();
-            self.push(Block::Notice(format!("stopping agent {id}")));
         }
         self.dirty = true;
     }
@@ -4014,6 +3979,10 @@ impl App {
                 self.push(Block::Notice("dictation dropped".into()));
             } else if !self.editor.is_empty() {
                 self.editor.clear();
+            } else if self.switch.is_some() {
+                // Leaving the strip picks nothing; the input keeps what it had.
+                self.switch = None;
+                self.dirty = true;
             } else if self.agent_view.is_some() {
                 // Leaving an agent leaves it running; it is not the turn.
                 self.agent_view = None;
@@ -4025,6 +3994,8 @@ impl App {
             }
         } else if keys::any_match(&b.newline, &k) {
             self.editor.insert_char('\n');
+        } else if keys::any_match(&b.submit, &k) && self.switch.is_some() {
+            self.switch_pick();
         } else if keys::any_match(&b.submit, &k) {
             self.submit_editor();
         } else if keys::any_match(&b.paste_image, &k) {
@@ -4070,12 +4041,18 @@ impl App {
             self.editor.home();
         } else if keys::any_match(&b.line_end, &k) {
             self.editor.end();
-        } else if keys::any_match(&b.next_agent, &k) && self.editor.is_empty() {
-            self.cycle_agent(true);
-        } else if keys::any_match(&b.prev_agent, &k) && self.editor.is_empty() {
-            self.cycle_agent(false);
-        } else if keys::any_match(&b.history_next, &k) && self.editor.is_empty() {
-            self.open_jobs_picker();
+        } else if keys::any_match(&b.history_next, &k)
+            && self.editor.is_empty()
+            && (self.switch.is_some() || !switch::rows().is_empty())
+        {
+            self.switch_move(1);
+        } else if keys::any_match(&b.history_prev, &k) && self.switch.is_some() {
+            self.switch_move(-1);
+        } else if self.switch.is_some()
+            && k.code == KeyCode::Char('k')
+            && k.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            self.stop_highlighted();
         } else if keys::any_match(&b.history_prev, &k)
             && self.editor.is_empty()
             && !self.queue.is_empty()
@@ -4342,7 +4319,7 @@ impl App {
             "init" => self.init_instructions(),
             "statusline" | "status" => self.open_statusline_picker(),
             "plan" => self.open_plan_view(),
-            "agents" => self.open_agents_picker(),
+            "jobs" => self.open_jobs_picker(),
             "usage" => {
                 self.usage_pane = Some(usage::Pane::new());
                 self.fetch_usage();
@@ -4535,7 +4512,14 @@ impl App {
 
         let border = if pal.has_borders() { 2 } else { 0 };
         let side = if pal.has_side_borders() { 2 } else { 0 };
-        let prefix_w = unicode_width::UnicodeWidthStr::width(pal.input_prefix.as_str()) as u16;
+        // Bound to an agent, the glyph says which one: the placeholder that says
+        // so is gone as soon as anything is typed.
+        let watching = self.agent_view.as_ref().map(|v| v.id);
+        let lead_prefix = match watching {
+            Some(id) => format!("a{id} {}", pal.input_prefix),
+            None => pal.input_prefix.clone(),
+        };
+        let prefix_w = unicode_width::UnicodeWidthStr::width(lead_prefix.as_str()) as u16;
         let input_width = area.width.saturating_sub(side + prefix_w) as usize;
         let ghost = self.voice_pending();
         let (rows, cursor_rc) = self.editor.layout_pending(input_width.max(1), &ghost);
@@ -4565,22 +4549,21 @@ impl App {
             }
             left.extend(chip);
         }
-        let running_jobs = ah_core::jobs::table().running();
-        let running_agents = ah_core::agents::table().running();
         // Every frame passes through here, the animated ones included, so the
         // plan is read where it lies rather than copied.
         let dock_line = ah_core::plan::store().with(|p| {
             plan::dock(
                 left,
                 p,
-                running_jobs,
-                running_agents,
                 layout.show_plan,
                 area.width.saturating_sub(1) as usize,
                 &pal,
             )
         });
         let dock_rows: u16 = dock_line.is_some() as u16;
+        // What else is running, under the status bar. Nothing running, no strip.
+        let switch_rows_v = switch::rows();
+        let switch_rows = (switch_rows_v.len() as u16).min(8);
 
         let [
             transcript_area,
@@ -4590,6 +4573,7 @@ impl App {
             dock_area,
             input_area,
             status_area,
+            switch_area,
         ] = Layout::vertical([
             Constraint::Min(1),
             Constraint::Length(perm_rows),
@@ -4598,10 +4582,25 @@ impl App {
             Constraint::Length(dock_rows),
             Constraint::Length(input_rows + border),
             Constraint::Length(status_rows),
+            Constraint::Length(switch_rows),
         ])
         .areas(area);
         if let Some(line) = dock_line {
             f.render_widget(Paragraph::new(line), dock_area);
+        }
+        if switch_rows > 0 {
+            let active = match self.agent_view.as_ref() {
+                Some(v) => switch::Target::Agent(v.id),
+                None => switch::Target::Main,
+            };
+            let lines = switch::lines(
+                &switch_rows_v,
+                active,
+                self.switch,
+                switch_area.width as usize,
+                &pal,
+            );
+            f.render_widget(Paragraph::new(lines), switch_area);
         }
 
         // Watching an agent takes the transcript's place: the main
@@ -4652,7 +4651,6 @@ impl App {
         }
 
         // Input box.
-        let watching = self.agent_view.as_ref().map(|v| v.id);
         let talk = self.talk_key_name();
         let dictating = format!("Hold {talk} and speak; Enter sends");
         let placeholder = if self.voice.is_some() {
@@ -4672,7 +4670,10 @@ impl App {
         let first_row = cursor_rc
             .0
             .saturating_sub(inner.height.saturating_sub(1) as usize);
-        let prefix_style = pal.bold(pal.accent);
+        let prefix_style = match watching {
+            Some(_) => pal.bold(pal.agent),
+            None => pal.bold(pal.accent),
+        };
         let pad = " ".repeat(prefix_w as usize);
         let mut visible: Vec<Line> = rows
             .iter()
@@ -4681,7 +4682,7 @@ impl App {
             .take(inner.height as usize)
             .map(|(i, r)| {
                 let lead = if i == 0 {
-                    pal.input_prefix.clone()
+                    lead_prefix.clone()
                 } else {
                     pad.clone()
                 };
@@ -4698,7 +4699,7 @@ impl App {
             .collect();
         if self.editor.is_empty() && ghost.is_empty() {
             visible = vec![Line::from(vec![
-                Span::styled(pal.input_prefix.clone(), prefix_style),
+                Span::styled(lead_prefix.clone(), prefix_style),
                 Span::styled(placeholder, pal.dim()),
             ])];
         }
@@ -4878,7 +4879,7 @@ impl App {
         let at = (self.settings().layout.animation_ms > 0 && self.ask.is_none())
             .then(|| start.elapsed());
         working::line(
-            self.header(),
+            &self.header(),
             start.elapsed().as_secs(),
             at,
             self.compact_progress.map(|(p, started)| working::Progress {
@@ -4890,12 +4891,20 @@ impl App {
     }
 
     /// What the turn is busy with, as one word.
-    fn header(&self) -> &'static str {
+    fn header(&self) -> String {
+        // A turn stuck inside the agent tool is not working, it is waiting.
+        let waiting = ah_core::agents::table().waiting();
+        if self.state == State::Tool && waiting > 0 {
+            return match waiting {
+                1 => "Waiting for an agent".into(),
+                n => format!("Waiting for {n} agents"),
+            };
+        }
         match self.state {
-            State::Tool => "Running",
-            State::Compacting => "Compacting",
-            State::Asking => "Waiting for you",
-            _ => "Working",
+            State::Tool => "Running".into(),
+            State::Compacting => "Compacting".into(),
+            State::Asking => "Waiting for you".into(),
+            _ => "Working".into(),
         }
     }
 
@@ -5187,6 +5196,17 @@ fn highlight_selection(f: &mut Frame, area: Rect, sel: Selection) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_working_line_says_what_it_is_waiting_for() {
+        // Nothing is waiting yet: a tool call is a tool call.
+        assert_eq!(ah_core::agents::table().waiting(), 0);
+        {
+            let _held = ah_core::agents::table().waiting_on(2);
+            assert_eq!(ah_core::agents::table().waiting(), 2);
+        }
+        assert_eq!(ah_core::agents::table().waiting(), 0);
+    }
 
     #[test]
     fn a_status_item_comes_back_where_it_belongs() {

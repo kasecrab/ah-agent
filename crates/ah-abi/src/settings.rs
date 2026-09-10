@@ -353,9 +353,6 @@ pub struct Keys {
     pub toggle_reasoning: Vec<String>,
     /// Switch to the next favorite model.
     pub cycle_model: Vec<String>,
-    /// Walk between the main conversation and the running agents.
-    pub prev_agent: Vec<String>,
-    pub next_agent: Vec<String>,
     pub history_prev: Vec<String>,
     pub history_next: Vec<String>,
     pub delete_word: Vec<String>,
@@ -395,8 +392,6 @@ impl Default for Keys {
             toggle_tools: v(&["ctrl-t"]),
             toggle_reasoning: v(&["ctrl-r"]),
             cycle_model: v(&["shift-tab"]),
-            prev_agent: v(&["left"]),
-            next_agent: v(&["right"]),
             history_prev: v(&["up", "ctrl-p"]),
             history_next: v(&["down", "ctrl-n"]),
             delete_word: v(&["ctrl-w", "ctrl-backspace", "ctrl-h", "alt-backspace"]),

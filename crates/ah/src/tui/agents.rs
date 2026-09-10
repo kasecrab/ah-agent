@@ -1,7 +1,5 @@
 //! The agent list, and the view that watches one work.
 
-use std::sync::Arc;
-
 use ah_core::agents::{Child, State};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -10,7 +8,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 
 use super::jobs::elapsed;
-use super::picker::Row;
 use super::theme::Palette;
 
 pub fn state_text(child: &Child) -> String {
@@ -21,38 +18,6 @@ pub fn state_text(child: &Child) -> String {
         State::Stopped => "stopped".into(),
         State::Cancelled => "stopped".into(),
     }
-}
-
-fn style(child: &Child, pal: &Palette) -> Style {
-    match child.state() {
-        State::Queued => pal.dim(),
-        State::Running => Style::default().fg(pal.agent),
-        State::Done => Style::default().fg(pal.fg),
-        State::Stopped | State::Cancelled => Style::default().fg(pal.error),
-    }
-}
-
-/// One row per agent, newest first.
-pub fn rows(kids: &[Arc<Child>], pal: &Palette) -> Vec<Row> {
-    let mut rows: Vec<Row> = kids
-        .iter()
-        .map(|c| {
-            let style = style(c, pal);
-            Row {
-                id: c.id.to_string(),
-                search: format!("{} {} {}", c.id, c.kind, c.task),
-                label: format!("{:>3}  {}  {}", c.id, c.kind, one_line(&c.task)),
-                style: Some(style),
-                cols: vec![
-                    (format!("{:<8}", state_text(c)).into(), style),
-                    (format!("{:>8}", elapsed(c.duration())).into(), pal.dim()),
-                    (format!("{:>4} req", c.requests()).into(), pal.dim()),
-                ],
-            }
-        })
-        .collect();
-    rows.reverse();
-    rows
 }
 
 fn one_line(s: &str) -> String {
@@ -145,14 +110,7 @@ impl View {
             format!("${:.4}", u.cost),
             child.model.clone(),
         ];
-        parts.push(
-            if child.running() {
-                "type to tell it more · Esc goes back · /agents stops it"
-            } else {
-                "type to set it off again · Esc goes back"
-            }
-            .into(),
-        );
+        parts.push("type to tell it more · Down picks another · Esc goes back".into());
         f.render_widget(
             Paragraph::new(Span::styled(format!(" {}", parts.join(" · ")), pal.dim())),
             foot,

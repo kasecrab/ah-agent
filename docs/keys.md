@@ -39,10 +39,8 @@ everywhere.
 | `toggle_tools` | `["ctrl-t"]` | expand or collapse tool output and compaction summaries |
 | `toggle_reasoning` | `["ctrl-r"]` | expand or collapse thinking blocks |
 | `cycle_model` | `["shift-tab"]` | switch to the next favorite model |
-| `prev_agent` | `["left"]` | with an empty input, look at the previous agent; from the first one back to the main conversation |
-| `next_agent` | `["right"]` | with an empty input, look at the next running agent |
-| `history_prev` | `["up", "ctrl-p"]` | earlier prompt; inside a multi-line draft moves the cursor first; with an empty input pulls back the last queued message |
-| `history_next` | `["down", "ctrl-n"]` | later prompt; with an empty input opens the background job list |
+| `history_prev` | `["up", "ctrl-p"]` | earlier prompt; inside a multi-line draft moves the cursor first; with an empty input pulls back the last queued message; in the strip moves up a row and out of the top |
+| `history_next` | `["down", "ctrl-n"]` | later prompt; with an empty input moves the keys into the strip under the status bar, and along it |
 | `delete_word` | `["ctrl-w", "ctrl-backspace", "ctrl-h", "alt-backspace"]` | delete the word before the cursor, or a whole chip |
 | `delete_line` | `["ctrl-u"]` | clear the input |
 | `yank` | `["ctrl-y"]` | put back what the last delete took |
@@ -84,6 +82,10 @@ quit = ["ctrl-q"]
   to the first question still without an answer and names it. Sending and
   leaving both ask first: Enter (or `y`) goes through with it, Esc goes back.
   Ctrl-C interrupts the turn without asking.
+- The strip under the status bar (background jobs, `main`, one row per running
+  agent): Down moves into it and along it, Up moves back out of the top, Enter
+  binds the input and the transcript to the row it is on, Ctrl-K stops the
+  agent it is on, Esc leaves it alone. It is only there while something runs.
 - Pickers (`/model`, `/resume`, `/favorite`, `/skills`): type to filter,
   Up/Down or Tab/Shift-Tab move, PgUp/PgDn page, Enter accepts, Esc closes,
   Ctrl-U clears the query, Ctrl-R refreshes the model list. In `/model`,

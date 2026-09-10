@@ -51,8 +51,6 @@ pub enum Kind {
     Jobs,
     /// Pictures the model drew. Enter opens one in the desktop viewer.
     Images,
-    /// Agents the model started. Enter watches one.
-    Agents,
     /// What the status line shows. Space or Enter turns a row on or off.
     Statusline,
     /// List returned by a plugin slash command. The command runs again with
