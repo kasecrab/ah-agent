@@ -743,6 +743,10 @@ pub struct AgentDef {
 pub struct VoiceSettings {
     /// Offer `/voice` at all. Off, the microphone is never opened.
     pub enabled: bool,
+    /// Whether dictation was left switched on. `/voice` writes this, so the
+    /// switch stays where it was put rather than being thrown again in every
+    /// new window.
+    pub armed: bool,
     /// Who transcribes: `openrouter` uses the key `ah` already has and any
     /// model that takes audio; `deepgram` opens a socket to Deepgram and
     /// needs a key of its own, which is the only way to get words back while
@@ -814,6 +818,7 @@ impl Default for VoiceSettings {
     fn default() -> Self {
         Self {
             enabled: true,
+            armed: false,
             provider: String::new(),
             model: String::new(),
             idle_secs: 0,

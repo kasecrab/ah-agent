@@ -3867,7 +3867,7 @@ impl App {
 
     /// The catalogue entry for `id`, loading the cache and, once, the list
     /// itself if this is a model it has never seen.
-    fn model_info(&mut self, id: &str) -> Option<ModelInfo> {
+    fn model_info(&mut self, id: &str, may_fetch: bool) -> Option<ModelInfo> {
         if self.catalogue.is_none()
             && let Some((m, _)) = models::load_cached()
         {
@@ -3882,6 +3882,11 @@ impl App {
         };
         if let Some(m) = found(&self.catalogue) {
             return Some(m);
+        }
+        if !may_fetch {
+            // Called while the window is coming up: the catalogue is worth a
+            // look but never worth a network round trip.
+            return None;
         }
         let key = ah_core::auth::api_key(self.settings().model.api_key.as_deref());
         let base = self.settings().model.base_url.clone();
@@ -3921,10 +3926,23 @@ impl App {
         }
         self.warmed = true;
         let cfg = self.settings().voice.clone();
-        if !cfg.enabled || !cfg.live() || self.voice.is_some() {
+        if !cfg.enabled || self.voice.is_some() {
             return;
         }
-        if ah_core::auth::deepgram_key().is_none() {
+        // Left switched on, so it comes back on. Arming opens no microphone —
+        // that waits for the talk key — so this costs one thread and the
+        // connection that would have been made anyway.
+        if cfg.armed {
+            self.arm_voice_inner(None, false);
+            if self.voice.is_some() {
+                return;
+            }
+            // It could not be armed from what is on disk. Say nothing: a
+            // window that opens with an error nobody asked for is worse than
+            // one where `/voice` has to be typed.
+            ah_core::debug!("voice: was left armed but could not be armed now");
+        }
+        if !cfg.live() || ah_core::auth::deepgram_key().is_none() {
             return;
         }
         match voice::Warm::open(&cfg, self.self_tx.clone()) {
@@ -3934,6 +3952,12 @@ impl App {
     }
 
     fn arm_voice(&mut self, model: Option<String>) {
+        self.arm_voice_inner(model, true);
+    }
+
+    /// `may_block` is false when the window is still coming up: nothing here
+    /// may reach the network on that path.
+    fn arm_voice_inner(&mut self, model: Option<String>, may_block: bool) {
         let cfg = self.settings().voice.clone();
         if !cfg.enabled {
             self.push(Block::Notice(
@@ -3953,7 +3977,7 @@ impl App {
                 return;
             }
             let model = model.unwrap_or_else(|| cfg.model_for());
-            self.start_voice(&cfg, model, false, None);
+            self.start_voice(&cfg, model, false, None, may_block);
             return;
         }
 
@@ -3976,10 +4000,12 @@ impl App {
         // route a phrase takes is the model's to decide, not a setting. The
         // catalogue is what says which, so a model set by hand in the config
         // is worth one lookup before the microphone opens.
-        let Some(info) = self.model_info(&model) else {
-            self.push(Block::Error(format!(
-                "{model} is not in the model catalogue; Ctrl-R in /voice model refreshes it"
-            )));
+        let Some(info) = self.model_info(&model, may_block) else {
+            if may_block {
+                self.push(Block::Error(format!(
+                    "{model} is not in the model catalogue; Ctrl-R in /voice model refreshes it"
+                )));
+            }
             return;
         };
         let stt = info.transcribes();
@@ -3995,7 +4021,7 @@ impl App {
                  voice.prompt_append is ignored while it is the voice model"
             )));
         }
-        self.start_voice(&cfg, model, stt, Some(provider));
+        self.start_voice(&cfg, model, stt, Some(provider), may_block);
     }
 
     /// Open the microphone and say what is listening to it.
@@ -4005,6 +4031,7 @@ impl App {
         model: String,
         stt: bool,
         provider: Option<std::sync::Arc<ah_core::provider::openrouter::OpenRouter>>,
+        asked_for: bool,
     ) {
         if self.voice_first_use() {
             self.push(Block::Notice(if cfg.live() {
@@ -4044,17 +4071,29 @@ impl App {
         ) {
             Ok(v) => {
                 self.voice = Some(v);
+                self.remember(serde_json::json!({"voice": {"armed": true}}));
                 let who = if cfg.live() {
                     format!("{model} transcribes as you speak")
                 } else {
                     format!("{model} transcribes")
                 };
+                // Worth one line even when nobody asked for it: while
+                // dictation is on the space bar belongs to it, and that is
+                // not something to discover by surprise.
                 // The microphone is not opened until the key goes down, so
                 // there is nothing to name as the recorder yet.
-                self.push(Block::Notice(format!(
-                    "dictation on: hold {} and speak. {who}. Nothing is sent until you press Enter.",
-                    self.talk_key_name()
-                )));
+                self.push(Block::Notice(if asked_for {
+                    format!(
+                        "dictation on: hold {} and speak. {who}. \
+                         Nothing is sent until you press Enter.",
+                        self.talk_key_name()
+                    )
+                } else {
+                    format!(
+                        "dictation is on, as you left it: hold {} to speak, /voice turns it off.",
+                        self.talk_key_name()
+                    )
+                }));
             }
             Err(e) => self.push(Block::Error(format!("dictation: {e}"))),
         }
@@ -4062,6 +4101,7 @@ impl App {
     }
 
     fn disarm_voice(&mut self) {
+        self.remember(serde_json::json!({"voice": {"armed": false}}));
         let Some(mut v) = self.voice.take() else {
             return;
         };

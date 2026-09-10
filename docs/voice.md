@@ -39,6 +39,13 @@ Nothing new to sign up for.
 is remembered in `~/.config/ah/state.toml`, so a new window already knows —
 which is also what lets it dial ahead of you.
 
+So is the switch itself. Dictation left on is on again in the next window, with
+no `/voice` to type; left off it stays off. Arming opens no microphone — that
+waits for the talk key — so a window that comes up armed costs one thread and
+the connection it would have made anyway. Bear in mind that while it is on the
+talk key belongs to dictation and will not type a space, except on a line
+beginning with `/`; the chip above the input says so for as long as it lasts.
+
 ## Where the audio goes
 
 Off the machine, on either route: to Deepgram, or to OpenRouter and on to
