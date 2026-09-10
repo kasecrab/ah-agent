@@ -664,6 +664,12 @@ fn run_inner(
     }
 
     let result = app.event_loop(terminal, &ui_rx);
+    // Before anything is dropped. `App` owns the microphone and the Deepgram
+    // socket, and dropping those joins their threads — one of which may be
+    // seconds into a handshake. The terminal is still in the alternate screen
+    // until this function returns, so a join here is a window that has stopped
+    // answering.
+    app.shutdown_voice();
     let _ = app.tx.send(EngineCmd::Quit);
     result?;
     Ok(app.resume_hint())
@@ -4012,6 +4018,18 @@ impl App {
 
     fn arm_voice(&mut self, model: Option<String>) {
         self.arm_voice_inner(model, true);
+    }
+
+    /// On the way out: tell the microphone and the socket to stop, and wait
+    /// for neither. What they do after this is their own business, and the
+    /// process ending closes the socket in any case.
+    fn shutdown_voice(&mut self) {
+        if let Some(w) = self.warm.take() {
+            w.detach();
+        }
+        if let Some(v) = self.voice.as_mut() {
+            v.detach();
+        }
     }
 
     /// `may_block` is false when the window is still coming up: nothing here

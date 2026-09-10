@@ -149,6 +149,22 @@ impl Live {
         self.stopping.store(true, Ordering::Release);
     }
 
+    /// Let go of the thread entirely, having asked it to stop.
+    ///
+    /// Dropping a `Live` normally joins, which is right while the program is
+    /// running: the socket is idle, the join costs nothing, and a redial must
+    /// not race the connection it replaces. On the way out it is wrong. The
+    /// thread may be several seconds into a handshake, and nothing is served
+    /// by making the terminal wait for a goodbye nobody reads. It finishes the
+    /// step it is in, says what it can, and exits — or the process ends first,
+    /// which closes the socket just as well.
+    pub fn detach(mut self) {
+        self.shutdown();
+        drop(self.stop.take());
+        // Dropped rather than joined. `Drop` then finds nothing left to do.
+        self.thread.take();
+    }
+
     /// The talk key went down, or came up.
     pub fn listen(&self, on: bool) {
         if on {

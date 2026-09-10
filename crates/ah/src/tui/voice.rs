@@ -80,6 +80,11 @@ impl Warm {
         })
     }
 
+    /// Give the socket up without waiting for it, for the way out.
+    pub fn detach(self) {
+        self.live.detach();
+    }
+
     /// True when this socket was opened for what is being asked for now. A
     /// changed model or language means the connection has to be redialled.
     pub fn fits(&self, cfg: &VoiceSettings) -> bool {
@@ -799,6 +804,16 @@ impl Session {
         self.live_said.clear();
         self.live_guess.clear();
         self.released = None;
+    }
+
+    /// Stop the microphone and give the socket up without waiting, for the way
+    /// out. Disarming mid-session still drops the socket properly; this is
+    /// only for the moment the window is closing.
+    pub fn detach(&mut self) {
+        self.dictation.listen(false);
+        if let Some(l) = self.live.take() {
+            l.detach();
+        }
     }
 }
 
