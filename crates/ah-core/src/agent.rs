@@ -109,6 +109,20 @@ pub fn summary_text(content: &str) -> Option<&str> {
     )
 }
 
+/// Times one turn pays to ask again after a reply ran out of room mid-call.
+const MAX_CUT_OFF: u32 = 2;
+/// Room to assume when the settings name none, and the ceiling to raise it to.
+const DEFAULT_ROOM: u32 = 8192;
+const MAX_ROOM: u32 = 65_536;
+
+/// The name of the first tool call whose arguments are not whole JSON, if any.
+fn unfinished_call(acc: &Accumulator) -> Option<String> {
+    acc.tool_calls
+        .iter()
+        .find(|c| serde_json::from_str::<Value>(&c.function.arguments).is_err())
+        .map(|c| c.function.name.clone())
+}
+
 /// Rough token count for text of `bytes` bytes.
 pub fn estimate_tokens(bytes: usize) -> u64 {
     (bytes / 4) as u64
@@ -624,6 +638,10 @@ impl<'a> Agent<'a> {
         let specs = self.tool_specs();
         let specs_bytes = tools_bytes(&specs);
         let cwd_str = self.cwd.display().to_string();
+        // Room for a request that ran out of it while writing a tool call, and
+        // how many times that has been paid for this turn.
+        let mut room: Option<u32> = None;
+        let mut cut_off = 0u32;
 
         loop {
             if self.cancel.load(Ordering::Relaxed) {
@@ -703,7 +721,7 @@ impl<'a> Agent<'a> {
                 model: self.settings.model.id.clone(),
                 messages: all,
                 tools: if text_out { specs.clone() } else { Vec::new() },
-                max_tokens: self.settings.model.max_tokens,
+                max_tokens: room.or(self.settings.model.max_tokens),
                 temperature: self.settings.model.temperature,
                 top_p: self.settings.model.top_p,
                 modalities: modalities.clone(),
@@ -752,6 +770,29 @@ impl<'a> Agent<'a> {
             summary.usage.add(&acc.usage);
             self.context_tokens = acc.usage.prompt_tokens + acc.usage.completion_tokens;
             io.emit(AgentEvent::Usage(acc.usage));
+
+            // A tool call that ran out of tokens halfway arrives as half a JSON
+            // object. The model cannot see that it was cut off, so handing it
+            // the parse error costs a turn and teaches it nothing: ask again
+            // with room to finish, and leave nothing of the attempt behind.
+            if cut_off < MAX_CUT_OFF
+                && acc.finish_reason.as_deref() == Some("length")
+                && let Some(call) = unfinished_call(&acc)
+            {
+                cut_off += 1;
+                let had = room
+                    .or(self.settings.model.max_tokens)
+                    .unwrap_or(DEFAULT_ROOM);
+                room = Some(had.saturating_mul(2).min(MAX_ROOM));
+                crate::debug!(
+                    "{call} ran out of room mid-call; asking again with {}",
+                    room.unwrap_or(0)
+                );
+                io.emit(AgentEvent::Notice(format!(
+                    "the reply ran out of room while writing a {call} call; asking again"
+                )));
+                continue;
+            }
             // Every image is a file by now. Dropping the base64 here keeps it
             // out of the message, out of the session line and out of `--json`.
             acc.images.clear();
@@ -2246,6 +2287,72 @@ mod tests {
             &cancel,
         );
         assert_eq!(agent.batch_len(&calls, 0), 1);
+    }
+
+    #[test]
+    fn a_call_cut_off_by_the_token_limit_is_asked_for_again() {
+        // First reply: a tool call whose arguments stop mid-object, ended by
+        // the token limit. Second: the same call, whole.
+        let cut = vec![
+            StreamEvent::ToolCallDelta {
+                index: 0,
+                id: Some("call_1".into()),
+                name: Some("read_file".into()),
+                arguments: "{\"path\": \"src/li".into(),
+            },
+            StreamEvent::Finish("length".into()),
+        ];
+        let whole = vec![
+            StreamEvent::ToolCallDelta {
+                index: 0,
+                id: Some("call_2".into()),
+                name: Some("read_file".into()),
+                arguments: "{\"path\": \"Cargo.toml\"}".into(),
+            },
+            StreamEvent::Finish("tool_calls".into()),
+        ];
+        let done = vec![StreamEvent::Text("read it".into())];
+        let provider = MockProvider::new(vec![cut, whole, done]);
+        let settings = Settings::default();
+        let registry = Registry::builtins(&settings.tools);
+        let mut hooks = NoHooks;
+        let cancel = AtomicBool::new(false);
+        let mut agent = Agent::new(
+            &provider,
+            &registry,
+            &mut hooks,
+            &settings,
+            std::env::current_dir().unwrap(),
+            &cancel,
+        );
+        agent.notices = false;
+        let io = RecordingIo::default();
+        let mut messages = vec![Message::user("read the manifest")];
+        let summary = agent.run_turn(&mut messages, &io).unwrap();
+
+        // Three requests: the cut one, the retry, and the reply after the tool.
+        assert_eq!(summary.requests, 3);
+        // Nothing of the cut attempt is left in the conversation, and the tool
+        // never saw the half-written arguments.
+        assert!(
+            !messages.iter().any(|m| m.content.contains("invalid JSON")),
+            "{messages:#?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .all(|m| m.tool_calls.iter().all(|c| c.id != "call_1")),
+            "{messages:#?}"
+        );
+        // The second request asks for more room than the first.
+        let asked: Vec<Option<u32>> = provider
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| r.max_tokens)
+            .collect();
+        assert!(asked[1] > asked[0], "{asked:?}");
     }
 
     #[test]

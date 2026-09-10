@@ -152,7 +152,13 @@ impl Registry {
         };
         let args: Value = match serde_json::from_str(&call.function.arguments) {
             Ok(v) => v,
-            Err(e) => return ToolResult::err(format!("invalid JSON arguments: {e}")),
+            Err(e) => {
+                return ToolResult::err(format!(
+                    "invalid JSON arguments ({} bytes): {e}. Send the call again; if the \
+                     arguments were cut off, make them shorter.",
+                    call.function.arguments.len()
+                ));
+            }
         };
         let mut res = self.tools[i].run(&args, ctx);
         res.output = truncate(&res.output, ctx.settings.max_output_bytes);
