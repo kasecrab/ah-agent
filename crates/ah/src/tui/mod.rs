@@ -309,6 +309,9 @@ struct App {
     queue: std::collections::VecDeque<(String, Vec<String>)>,
     /// Input modalities of the current model from the catalogue.
     modalities: models::Modalities,
+    /// Category the model picker was last left on. Text is what `/model` has
+    /// always shown, and everything else is one arrow key away.
+    model_tab: String,
     /// `TI→T` for the current model, empty when unknown.
     modality_icons: String,
     /// A catalogue fetch is in flight.
@@ -506,6 +509,7 @@ fn run_inner(
         editor: Editor::default(),
         queue: std::collections::VecDeque::new(),
         modalities: models::Modalities::default(),
+        model_tab: "text".to_string(),
         modality_icons: String::new(),
         fetching_models: false,
         scroll: 0,
@@ -1652,7 +1656,18 @@ impl App {
                     cols: vec![
                         (format!("{ctx:>6} "), pal.dim()),
                         (
-                            format!("${:>6.2}/${:<6.2}", m.prompt_per_m, m.completion_per_m),
+                            // A model that only draws prices nothing under
+                            // completion; showing that as $0.00 would read as
+                            // free.
+                            format!(
+                                "${:>6.2}/${:<6.2}",
+                                m.prompt_per_m,
+                                if m.completion_per_m > 0.0 {
+                                    m.completion_per_m
+                                } else {
+                                    m.image_out_per_m
+                                }
+                            ),
                             pal.dim(),
                         ),
                         (
@@ -1691,7 +1706,20 @@ impl App {
             Some(k) => format!("model for ★{k} · Enter select · Esc close · Ctrl-R refresh"),
             None => "model · Enter select · Esc close · Ctrl-R refresh".to_string(),
         };
+        let masks: Vec<u16> = self
+            .catalogue
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .map(|m| m.output.bits())
+            .collect();
         let mut p = Picker::new(Kind::Model { favorite }, &title, query, rows);
+        let tabs = model_tabs(&masks);
+        let active = tabs
+            .iter()
+            .position(|t| t.name == self.model_tab)
+            .unwrap_or(0);
+        p.set_tabs(tabs, masks, active);
         if query.is_empty() {
             p.selected = p
                 .results
@@ -1699,7 +1727,7 @@ impl App {
                 .position(|&i| p.rows[i].id == preselect)
                 .unwrap_or(0);
         }
-        p.hint = "$/M tokens in/out".into();
+        p.hint = "← → category · $/M tokens in/out".into();
         if stale {
             p.loading = true;
             if p.rows.is_empty() {
@@ -2243,8 +2271,17 @@ impl App {
         let Some(p) = self.picker.as_mut() else {
             return;
         };
+        let action = p.key(k);
+        // Left on a category, come back to it: a run spent making pictures
+        // should not reopen on text every time.
+        if matches!(p.kind, Kind::Model { .. })
+            && let Some(name) = p.tab_name()
+            && name != self.model_tab
+        {
+            self.model_tab = name.to_string();
+        }
         self.dirty = true;
-        match p.key(k) {
+        match action {
             Action::None => self.plugin_preview(),
             Action::Close => self.close_picker(),
             Action::Key(c) => self.picker_shortcut(c),
@@ -4250,6 +4287,21 @@ impl App {
                 self.push(Block::Notice(s));
             }
             "model" | "models" => {
+                // A leading category opens the picker on it: `/model image`,
+                // or `/model image flux` to arrive already searching.
+                let (tab, args) = match args.split_once(' ') {
+                    Some((first, rest)) => match model_tab_name(first) {
+                        Some(t) => (Some(t), rest.trim()),
+                        None => (None, args),
+                    },
+                    None => match model_tab_name(args) {
+                        Some(t) => (Some(t), ""),
+                        None => (None, args),
+                    },
+                };
+                if let Some(tab) = tab {
+                    self.model_tab = tab.to_string();
+                }
                 if args == "refresh" {
                     self.open_model_picker("", None, true);
                 } else if args.is_empty() {
@@ -4990,6 +5042,50 @@ fn toggled(items: &[String], id: &str) -> Vec<String> {
 
 /// The colour of one status item. The model leads, the numbers stay quiet, and
 /// the context fills up from calm to loud as it runs out.
+/// Shorter words for two categories whose names would crowd the tab row out
+/// of its counts. Both spellings work in `/model <category>`.
+fn tab_label(name: &str) -> &str {
+    match name {
+        "transcription" => "transcribe",
+        "embeddings" => "embed",
+        other => other,
+    }
+}
+
+/// The category a word names, in its canonical spelling.
+fn model_tab_name(word: &str) -> Option<&'static str> {
+    if word == "all" {
+        return Some("all");
+    }
+    models::MODALITIES
+        .iter()
+        .map(|(m, _)| *m)
+        .find(|m| *m == word || tab_label(m) == word)
+}
+
+/// Categories for the model picker: everything, then each output modality any
+/// model in the catalogue actually has, in the order the icons are shown.
+/// A modality nothing produces gets no tab, so an empty one is never offered.
+fn model_tabs(masks: &[u16]) -> Vec<picker::Tab> {
+    let present = masks.iter().fold(0u16, |acc, m| acc | m);
+    let mut tabs = vec![picker::Tab {
+        name: "all".into(),
+        label: "all".into(),
+        mask: 0,
+        count: 0,
+    }];
+    tabs.extend(models::MODALITIES.iter().filter_map(|(name, _)| {
+        let mask = models::Modalities::bit(name);
+        (present & mask != 0).then(|| picker::Tab {
+            name: (*name).to_string(),
+            label: tab_label(name).to_string(),
+            mask,
+            count: 0,
+        })
+    }));
+    tabs
+}
+
 fn status_style(item: &str, ctx: &StatusContext, pal: &Palette) -> Style {
     let color = match item {
         "favorite" => return pal.bold(pal.accent),
