@@ -19,12 +19,30 @@ belongs to it, so it does not type a space — except on a line that starts with
 `Esc` drops a phrase that has not been committed yet; `/voice` or `alt-v`
 disarms and gives the key back for good.
 
+## Who transcribes
+
+The first `/voice` asks, and remembers the answer in `voice.provider`.
+
+**Deepgram** opens a WebSocket and keeps it open while dictation is armed.
+Audio goes up as it is recorded and words come back while you are still
+speaking — a guess first, corrected in place, then settled. It needs a
+Deepgram key of its own, which `ah` asks for at a prompt that shows dots
+rather than characters and writes to `~/.config/ah/credentials.toml` at mode
+600. `DEEPGRAM_API_KEY` in the environment works instead. Billed by the minute
+of audio you actually send.
+
+**OpenRouter** uses the key `ah` already has and any model that takes audio.
+A phrase is sent when you pause, so words appear a second or so behind you.
+Nothing new to sign up for.
+
+`/voice` on its own switches between them by asking again.
+
 ## Where the audio goes
 
-To OpenRouter, and on to whichever provider serves the model you picked. This
-is the trade: there is no second account, no API key beyond the one `ah`
-already has, no model to download and nothing extra resident — and the
-recording leaves the machine. `ah` says so once, the first time you use it.
+Off the machine, on either route: to Deepgram, or to OpenRouter and on to
+whichever provider serves the model you picked. That is the trade for having
+no local model and nothing extra resident. `ah` says so once, the first time
+you use it.
 
 What it does not do is keep the audio. A dictated phrase is built, sent and
 dropped. It is never added to the conversation, never written to a session
@@ -34,8 +52,12 @@ file, and never logged — `AH_LOG` records the size of a clip and nothing else.
 
 ## Picking a model
 
-`/voice model` lists two kinds of model, and `ah` sends a phrase to whichever
-one the model itself calls for.
+On Deepgram, `/voice model` lists Deepgram's own: `nova-3` by default, with
+the older and the specialised ones under it. They are billed by the minute of
+audio rather than by the token.
+
+On OpenRouter it lists two kinds of model, and `ah` sends a phrase to
+whichever one the model itself calls for.
 
 **Chat models that hear** — Gemini, Voxtral small and the rest. The phrase goes
 to `/chat/completions` as an `input_audio` part. The reply streams, so the grey
@@ -62,8 +84,19 @@ OpenRouter leaves speech-to-text models out of its unfiltered model list, so
 
 ## How it stays quick
 
-There is no streaming transcription protocol behind a chat model, so `ah`
-makes its own. A voice detector on this machine watches the level, cuts the
+On Deepgram there is nothing to arrange: the socket is already open, audio
+flows as it is recorded, and the first words land in about a third of a
+second. The local voice detector does not run at all — Deepgram finds the
+phrase boundaries itself, so nothing is cut here and nothing waits for a
+pause. Letting the talk key up asks for whatever is still held rather than
+waiting out the silence.
+
+The socket opens when you arm, not when you press the key, so no phrase pays
+for a handshake. It is kept for `voice.idle_secs` after you stop and dropped
+after that; the next phrase reopens it.
+
+On OpenRouter there is no streaming transcription protocol behind a chat
+model, so `ah` makes its own. A voice detector on this machine watches the level, cuts the
 audio where you pause, and sends that phrase on its own while you carry on
 talking — up to `voice.max_inflight` at a time, on one connection that is
 opened when you arm and kept. Each reply streams, so the grey text grows word
@@ -88,14 +121,19 @@ way.
 
 ## What it costs, and how to see it
 
-Every phrase reports its real cost, so nothing has to be guessed:
+Deepgram bills by the minute of audio sent, and audio is only sent while the
+talk key is down — a socket sitting open with nobody talking into it costs
+nothing. `/usage` shows how much audio a session has sent.
+
+On OpenRouter every phrase reports its real cost, so nothing has to be
+guessed:
 
 - `voice.show_cost = true` puts a running figure next to the recording mark.
 - `/usage` gains a **voice** row: what dictation has cost this session and how
   many phrases it took.
 - `voice.budget_usd` stops a dictation once it crosses that much.
 
-Silence never becomes a request. A phrase has to hold at least a quarter of a
+Silence never becomes a request on the OpenRouter route. A phrase has to hold at least a quarter of a
 second of speech above the room's own noise floor before it is sent, so a
 cough, a door, or a held key in a quiet room costs nothing at all. When a model
 fills silence with a stock phrase anyway — "thanks for watching" and its
