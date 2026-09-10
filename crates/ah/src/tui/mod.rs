@@ -1838,10 +1838,9 @@ impl App {
     }
 
     fn pick_voice_provider(&mut self, name: &str) {
-        self.apply_patch(
-            Origin::Runtime("slash".into()),
-            serde_json::json!({"voice": {"provider": name}}),
-        );
+        // Asked once, then remembered: nobody should have to say who
+        // transcribes every time they open a window.
+        self.remember(serde_json::json!({"voice": {"provider": name}}));
         if self.voice.is_some() {
             self.disarm_voice();
         }
@@ -2338,10 +2337,7 @@ impl App {
                             (!query.is_empty() && query.contains('/')).then(|| query.clone())
                         });
                         if let Some(id) = id {
-                            self.apply_patch(
-                                Origin::Runtime("slash".into()),
-                                serde_json::json!({"voice": {"model": id.clone()}}),
-                            );
+                            self.remember(serde_json::json!({"voice": {"model": id.clone()}}));
                             if self.voice.is_some() {
                                 self.disarm_voice();
                             }
@@ -2376,10 +2372,7 @@ impl App {
                     }
                     Kind::VoiceDevice => {
                         if let Some(name) = chosen {
-                            self.apply_patch(
-                                Origin::Runtime("slash".into()),
-                                serde_json::json!({"voice": {"device": name}}),
-                            );
+                            self.remember(serde_json::json!({"voice": {"device": name}}));
                             if self.voice.is_some() {
                                 self.disarm_voice();
                                 self.arm_voice(None);
@@ -3714,6 +3707,17 @@ impl App {
     /// behind, and only once the window is up: nothing here may touch the
     /// startup path, and `Warm::open` returns the moment its thread is
     /// spawned, so a dead network cannot hold anything up.
+    /// Apply a settings patch and write it down, so the choice survives the
+    /// window being closed. Used for the handful of things a picker settles
+    /// once — who transcribes, with which model, through which microphone —
+    /// rather than for everything `/set` can reach.
+    fn remember(&mut self, patch: serde_json::Value) {
+        if let Err(e) = ah_core::settings::save_state(&patch) {
+            self.push(Block::Error(format!("could not save that choice: {e}")));
+        }
+        self.apply_patch(Origin::Runtime("slash".into()), patch);
+    }
+
     fn warm_voice(&mut self) {
         if self.warmed {
             return;
@@ -4264,10 +4268,7 @@ impl App {
                     }
                     return;
                 }
-                self.apply_patch(
-                    Origin::Runtime("slash".into()),
-                    serde_json::json!({"voice": {"model": id}}),
-                );
+                self.remember(serde_json::json!({"voice": {"model": id}}));
                 if self.voice.is_some() {
                     self.disarm_voice();
                 }

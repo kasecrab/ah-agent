@@ -35,7 +35,9 @@ of audio you actually send.
 A phrase is sent when you pause, so words appear a second or so behind you.
 Nothing new to sign up for.
 
-`/voice` on its own switches between them by asking again.
+`/voice` on its own switches between them by asking again. Whichever you pick
+is remembered in `~/.config/ah/state.toml`, so a new window already knows —
+which is also what lets it dial ahead of you.
 
 ## Where the audio goes
 

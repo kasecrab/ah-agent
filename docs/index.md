@@ -25,6 +25,7 @@ everything else. These pages are embedded in the binary. `ah docs` lists them an
 | `~/.config/ah/config.toml` | user configuration (`ah config init` writes the defaults with comments) |
 | `~/.config/ah/credentials.toml` | OpenRouter key stored by `ah login`, mode 600 |
 | `~/.config/ah/favorites.toml` | favorites managed by `/favorite` |
+| `~/.config/ah/state.toml` | choices a picker settled: the voice provider, model and microphone |
 | `~/.config/ah/plugins/*.wasm` | user plugins (`sources.json` beside them records git origins) |
 | `~/.config/ah/skills/` | user skills |
 | `./.ah/config.toml` | project configuration, merged over the user file |

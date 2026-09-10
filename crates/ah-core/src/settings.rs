@@ -59,6 +59,10 @@ impl SettingsStack {
         if user.is_file() {
             s.push_file(&user)?;
         }
+        let state = crate::paths::state_file();
+        if state.is_file() {
+            s.push_file(&state)?;
+        }
         let path = crate::paths::favorites_file();
         if path.is_file() {
             let text = std::fs::read_to_string(&path)?;
@@ -163,6 +167,26 @@ impl SettingsStack {
 
 /// Overwrite the favorites file with `favorites` (`key = "model"` or
 /// `key = { id = "model", effort = "high" }` lines).
+/// Fold `patch` into the remembered choices and write them back. Only what
+/// the patch names is touched; everything already remembered stays.
+pub fn save_state(patch: &Value) -> Result<()> {
+    let path = crate::paths::state_file();
+    let mut state = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| parse_toml_patch(&t).ok())
+        .unwrap_or(Value::Object(Default::default()));
+    merge_patch(&mut state, patch);
+    if let Some(d) = path.parent() {
+        std::fs::create_dir_all(d)?;
+    }
+    let text = toml::to_string_pretty(&state).map_err(|e| Error::Config(e.to_string()))?;
+    std::fs::write(
+        &path,
+        format!("# Written by ah. Choices it was asked to remember.\n# Anything here is overridden by ./.ah/config.toml.\n\n{text}"),
+    )?;
+    Ok(())
+}
+
 pub fn save_favorites(
     favorites: &std::collections::BTreeMap<String, ah_abi::Favorite>,
 ) -> Result<()> {
@@ -195,6 +219,38 @@ fn unset_markers(v: &mut Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_remembered_choice_survives_and_is_added_to() {
+        let dir = std::env::temp_dir().join(format!("ah-state-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        // SAFETY: single-threaded test, and the variable is put back below.
+        let old = std::env::var_os("AH_CONFIG_DIR");
+        unsafe { std::env::set_var("AH_CONFIG_DIR", &dir) };
+
+        save_state(&serde_json::json!({"voice": {"provider": "deepgram"}})).unwrap();
+        save_state(&serde_json::json!({"voice": {"model": "nova-3"}})).unwrap();
+        let s = SettingsStack::from_files().unwrap();
+        assert_eq!(s.settings().voice.provider, "deepgram");
+        assert_eq!(s.settings().voice.model, "nova-3", "the first choice was lost");
+
+        // A project file still wins over what was remembered.
+        let mut s2 = SettingsStack::from_files().unwrap();
+        s2.push(
+            Origin::File("/repo/.ah/config.toml".into()),
+            serde_json::json!({"voice": {"provider": "openrouter"}}),
+        )
+        .unwrap();
+        assert_eq!(s2.settings().voice.provider, "openrouter");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        unsafe {
+            match old {
+                Some(v) => std::env::set_var("AH_CONFIG_DIR", v),
+                None => std::env::remove_var("AH_CONFIG_DIR"),
+            }
+        }
+    }
 
     #[test]
     fn capture_cmd_is_refused_from_a_project_file() {

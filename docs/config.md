@@ -9,11 +9,17 @@ no null.
 
 1. built-in defaults (this page)
 2. `~/.config/ah/config.toml`
-3. `~/.config/ah/favorites.toml` (written by `/favorite`, merged under `model.favorites`)
-4. `./.ah/config.toml` in the working directory
-5. `settings_patch` from each plugin manifest, then patches returned by plugin hooks
-6. command line: `--model`, `--yolo`, `--ask`, `--max-tokens`, `--system`, `--set key=value`
-7. runtime: `/set`, `/yolo`, `/ask`, `/effort`, `/model`, `/reasoning` (not saved)
+3. `~/.config/ah/state.toml` (choices a picker settled and `ah` was asked to remember)
+4. `~/.config/ah/favorites.toml` (written by `/favorite`, merged under `model.favorites`)
+5. `./.ah/config.toml` in the working directory
+6. `settings_patch` from each plugin manifest, then patches returned by plugin hooks
+7. command line: `--model`, `--yolo`, `--ask`, `--max-tokens`, `--system`, `--set key=value`
+8. runtime: `/set`, `/yolo`, `/ask`, `/effort`, `/model`, `/reasoning` (not saved)
+
+`state.toml` is written by `ah`, never by hand, and holds only what a picker
+settled — who transcribes, with which model, through which microphone. Keeping
+it apart means `config.toml`, comments and all, is never rewritten under you,
+and a project's `.ah/config.toml` still wins over both.
 
 `ah config show` prints the merged result as TOML; `--origins` also lists the
 layers. `ah config path` prints file locations. `ah config init` writes a

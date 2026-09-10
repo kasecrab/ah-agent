@@ -37,6 +37,13 @@ pub fn favorites_file() -> PathBuf {
     config_dir().join("favorites.toml")
 }
 
+/// Choices `ah` was told to remember, as a settings patch. Written by the
+/// program, not by hand: keeping them out of `config.toml` means a file the
+/// user wrote, comments and all, is never rewritten under them.
+pub fn state_file() -> PathBuf {
+    config_dir().join("state.toml")
+}
+
 pub fn credentials_file() -> PathBuf {
     config_dir().join("credentials.toml")
 }
