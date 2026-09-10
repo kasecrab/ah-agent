@@ -3918,16 +3918,32 @@ impl App {
         if text.is_empty() {
             return;
         }
-        if !self.editor.text.is_empty() && !self.editor.text.ends_with([' ', '\n']) {
-            self.editor.insert_char(' ');
-        }
+        // The same separator the grey text was drawn with, so nothing moves.
+        let text = format!("{}{text}", self.voice_spacer());
         self.editor.insert_str(&text);
         self.dirty = true;
     }
 
     /// Grey text: spoken, transcribed, not committed yet.
     fn voice_pending(&self) -> String {
-        self.voice.as_ref().map(|v| v.pending()).unwrap_or_default()
+        let text = self.voice.as_ref().map(|v| v.pending()).unwrap_or_default();
+        if text.is_empty() {
+            return text;
+        }
+        // Shown exactly as it will be committed, separator and all, so the
+        // words do not shuffle sideways the moment they turn from grey to
+        // white.
+        format!("{}{text}", self.voice_spacer())
+    }
+
+    /// A space between what is already written and what is being said, when
+    /// the two would otherwise run together.
+    fn voice_spacer(&self) -> &'static str {
+        if self.editor.needs_space_at_cursor() {
+            " "
+        } else {
+            ""
+        }
     }
 
     /// The catalogue entry for `id`, loading the cache and, once, the list

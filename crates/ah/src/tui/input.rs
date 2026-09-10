@@ -475,6 +475,25 @@ mod tests {
     }
 
     #[test]
+    fn dictation_needs_a_space_only_when_it_would_run_into_something() {
+        let mut e = Editor::default();
+        assert!(!e.needs_space_at_cursor(), "nothing to run into");
+        e.insert_str("fix");
+        assert!(e.needs_space_at_cursor(), "would read as `fixthe auth`");
+        e.insert_char(' ');
+        assert!(!e.needs_space_at_cursor(), "there is already a space");
+        e.insert_str("the auth\n");
+        assert!(!e.needs_space_at_cursor(), "a new line is a gap of its own");
+        // Mid-text: what matters is the character before the cursor, not the
+        // end of the line.
+        e.insert_str("and then");
+        e.cursor = 4;
+        assert!(!e.needs_space_at_cursor(), "the cursor sits after a space");
+        e.cursor = 3;
+        assert!(e.needs_space_at_cursor());
+    }
+
+    #[test]
     fn dictation_shows_at_the_cursor_and_is_marked_apart() {
         let mut e = Editor::default();
         e.insert_str("fix ");
@@ -531,6 +550,19 @@ mod tests {
 // ---- paste chips ---------------------------------------------------------
 
 impl Editor {
+    /// Would text inserted at the cursor run straight into the character in
+    /// front of it? Dictation lands at the cursor, and words are not typed
+    /// with their own leading space the way a person types one.
+    pub fn needs_space_at_cursor(&self) -> bool {
+        if self.cursor == 0 {
+            return false;
+        }
+        self.text
+            .chars()
+            .nth(self.cursor - 1)
+            .is_some_and(|c| !c.is_whitespace())
+    }
+
     /// Insert pasted text. Long pastes become a chip like `[Pasted #1: 40 lines]`
     /// that expands back to the full text on submit.
     pub fn insert_paste(&mut self, s: &str, collapse_lines: usize) {
