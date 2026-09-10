@@ -568,7 +568,11 @@ fn images_body(req: &ChatRequest) -> Value {
         .filter(|u| u.starts_with("data:") || u.starts_with("http"))
         .map(|u| serde_json::json!({"type": "image_url", "image_url": {"url": u}}))
         .collect();
-    let mut body = serde_json::json!({"model": req.model, "prompt": prompt});
+    // PNG because that is what a terminal can draw: the kitty protocol takes
+    // PNG or raw pixels and nothing else, and a JPEG would arrive as a chip.
+    // Providers that cannot encode it hand back what they have anyway.
+    let mut body =
+        serde_json::json!({"model": req.model, "prompt": prompt, "output_format": "png"});
     if !refs.is_empty() {
         body["input_references"] = Value::Array(refs);
     }
@@ -787,6 +791,8 @@ mod tests {
         );
         let body = images_body(&req);
         assert_eq!(body["model"], "meta/muse-image");
+        // PNG, because a terminal cannot draw anything else.
+        assert_eq!(body["output_format"], "png");
         // The last thing the user asked, trimmed; the system prompt and the
         // rest of the conversation have nowhere to go on this endpoint.
         assert_eq!(body["prompt"], "now make it night");

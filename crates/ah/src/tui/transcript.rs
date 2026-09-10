@@ -67,6 +67,9 @@ pub struct View {
 pub struct ImageView {
     /// False when the terminal draws no pictures: only the chip is laid out.
     pub inline: bool,
+    /// What this terminal can draw, so a format it cannot decode is laid out
+    /// as a chip rather than sent and lost.
+    pub proto: super::image::Proto,
     /// Terminal cell size in pixels, `(0, 0)` when it would not say.
     pub cell_px: (u16, u16),
     pub max_cols: u16,
@@ -77,6 +80,7 @@ impl Default for ImageView {
     fn default() -> Self {
         Self {
             inline: false,
+            proto: super::image::Proto::None,
             cell_px: (0, 0),
             max_cols: 0,
             max_rows: 20,
@@ -90,7 +94,7 @@ pub fn image_layout(block: &Block, width: u16, view: &View) -> Option<ImageLayou
     let Block::Image(d) = block else {
         return None;
     };
-    if !view.image.inline {
+    if !view.image.inline || !view.image.proto.draws(&d.mime) {
         return None;
     }
     let cell = if view.image.cell_px.0 > 0 && view.image.cell_px.1 > 0 {
@@ -135,7 +139,8 @@ impl Entry {
                 | (view.wrap as u64) << 2
                 | (view.markdown as u64) << 3
                 | (view.code_highlight as u64) << 4
-                | (view.image.inline as u64) << 5,
+                | (view.image.inline as u64) << 5
+                | (view.image.proto as u64) << 6,
         );
         mix(&mut k, view.tool_output_lines as u64);
         mix(
@@ -621,12 +626,13 @@ fn render(block: &Block, width: usize, view: &View, pal: &Palette) -> Vec<Line<'
             // These rows only reserve the room and blank what was there, so
             // the transcript's line arithmetic does not depend on whether the
             // terminal actually painted anything.
-            if let Some(l) = image_layout(block, width as u16, view) {
+            let drawn = image_layout(block, width as u16, view);
+            if let Some(l) = &drawn {
                 out.extend(std::iter::repeat_with(Line::default).take(l.rows as usize));
             }
             // The key hint belongs on a chip that stands in for the picture,
             // not under one the terminal has already drawn.
-            let key = if view.image.inline { "" } else { &d.open_key };
+            let key = if drawn.is_some() { "" } else { &d.open_key };
             out.push(Line::from(Span::styled(
                 super::image::chip(d, key),
                 pal.dim(),
@@ -731,7 +737,7 @@ mod tests {
         }))
     }
 
-    fn image_view(inline: bool) -> View {
+    fn image_view_of(inline: bool, proto: crate::tui::image::Proto) -> View {
         View {
             show_tool_output: false,
             tool_output_lines: 5,
@@ -741,11 +747,21 @@ mod tests {
             code_highlight: false,
             image: ImageView {
                 inline,
+                proto,
                 cell_px: (10, 20),
                 max_cols: 0,
                 max_rows: 20,
             },
         }
+    }
+
+    fn image_view(inline: bool) -> View {
+        let proto = if inline {
+            crate::tui::image::Proto::Kitty
+        } else {
+            crate::tui::image::Proto::None
+        };
+        image_view_of(inline, proto)
     }
 
     #[test]
@@ -782,6 +798,30 @@ mod tests {
         let block = image_block((0, 0));
         assert!(image_layout(&block, 80, &view).is_none());
         assert_eq!(render(&block, 80, &view, &pal).len(), 2);
+    }
+
+    #[test]
+    fn a_format_the_terminal_cannot_draw_is_laid_out_as_a_chip() {
+        let pal = Palette::from_theme(&ah_core::abi::Theme::default());
+        let mut jpeg = image_block((1024, 768));
+        if let Block::Image(d) = &mut jpeg {
+            d.mime = "image/jpeg".into();
+        }
+        // kitty carries PNG and raw pixels only, so a JPEG is a chip — and it
+        // says which key opens it, since there is nothing to look at.
+        let kitty = image_view_of(true, crate::tui::image::Proto::Kitty);
+        assert!(image_layout(&jpeg, 80, &kitty).is_none());
+        let lines = render(&jpeg, 80, &kitty, &pal);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].to_string().contains("1024×768"), "{lines:?}");
+        assert!(lines[0].to_string().contains("opens it"), "{lines:?}");
+        // iTerm2 hands the bytes to the system decoder, so it draws.
+        let iterm = image_view_of(true, crate::tui::image::Proto::Iterm2);
+        assert!(image_layout(&jpeg, 80, &iterm).is_some());
+        // PNG draws on both.
+        let png = image_block((1024, 768));
+        assert!(image_layout(&png, 80, &kitty).is_some());
+        assert!(image_layout(&png, 80, &iterm).is_some());
     }
 
     #[test]

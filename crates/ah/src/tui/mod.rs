@@ -897,6 +897,7 @@ impl App {
         let cap = (self.size.1 as u32 * 2 / 3).max(3) as u16;
         self.view.image = transcript::ImageView {
             inline: self.img_proto != image::Proto::None,
+            proto: self.img_proto,
             cell_px: self.cell_px,
             max_cols: s.max_cols,
             max_rows: s.max_rows.max(1).min(cap),

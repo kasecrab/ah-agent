@@ -13,6 +13,7 @@ use ratatui::layout::Rect;
 
 /// The graphics protocol this terminal speaks.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[repr(u8)]
 pub enum Proto {
     /// No pictures: a one-line chip instead.
     #[default]
@@ -76,6 +77,25 @@ pub struct Placement {
     /// Rows actually on screen.
     pub visible: u16,
     pub px: (u32, u32),
+}
+
+impl Proto {
+    /// True when this terminal can draw a picture of this type.
+    ///
+    /// The kitty protocol carries PNG or raw pixels, nothing else, so a JPEG
+    /// or a WebP would arrive as garbage — those terminals get the chip until
+    /// there is a decoder to turn one into the other. iTerm2 hands the bytes
+    /// to the system decoder and takes whatever it knows.
+    pub fn draws(self, mime: &str) -> bool {
+        match self {
+            Proto::None => false,
+            Proto::Kitty => mime == "image/png",
+            Proto::Iterm2 => matches!(
+                mime,
+                "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+            ),
+        }
+    }
 }
 
 impl Placement {

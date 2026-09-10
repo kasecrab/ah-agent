@@ -112,9 +112,7 @@ impl Talk {
         // before it means the key came up. A keyboard waits half a second
         // before it starts repeating, so this can be measured but never
         // assumed.
-        if listening
-            && let Some(prev) = self.last
-        {
+        if listening && let Some(prev) = self.last {
             let apart = now.saturating_duration_since(prev);
             if apart < self.gap {
                 self.gap = (apart * GAP_FACTOR).clamp(MIN_GAP, self.first_gap);
@@ -775,7 +773,9 @@ mod tests {
         assert!(
             acts[1..].iter().all(|a| *a == Act::Nothing),
             "the hold was interrupted: {:?}",
-            acts.iter().filter(|a| **a != Act::Nothing).collect::<Vec<_>>()
+            acts.iter()
+                .filter(|a| **a != Act::Nothing)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -786,8 +786,14 @@ mod tests {
         let (_, last) = wezterm_hold(&mut talk, t0, 3300);
         // The repeat rate has been seen, so the gap is now short.
         assert!(talk.gap <= Duration::from_millis(120), "gap {:?}", talk.gap);
-        assert_eq!(talk.tick(last + Duration::from_millis(60), true), Act::Nothing);
-        assert_eq!(talk.tick(last + Duration::from_millis(200), true), Act::Stop);
+        assert_eq!(
+            talk.tick(last + Duration::from_millis(60), true),
+            Act::Nothing
+        );
+        assert_eq!(
+            talk.tick(last + Duration::from_millis(200), true),
+            Act::Stop
+        );
         assert_eq!(talk.hold, Hold::Gap);
     }
 
@@ -811,7 +817,10 @@ mod tests {
         let mut talk = Talk::new("auto", 700);
         let t0 = Instant::now();
         assert_eq!(talk.press(t0, false), Act::Start);
-        assert_eq!(talk.tick(t0 + Duration::from_millis(600), true), Act::Nothing);
+        assert_eq!(
+            talk.tick(t0 + Duration::from_millis(600), true),
+            Act::Nothing
+        );
         assert_eq!(talk.tick(t0 + Duration::from_millis(800), true), Act::Stop);
     }
 
@@ -837,12 +846,18 @@ mod tests {
         let mut talk = Talk::new("auto", 700);
         let t0 = Instant::now();
         let (_, last) = wezterm_hold(&mut talk, t0, 1000);
-        assert_eq!(talk.tick(last + Duration::from_millis(300), true), Act::Stop);
+        assert_eq!(
+            talk.tick(last + Duration::from_millis(300), true),
+            Act::Stop
+        );
         // The narrowed gap must not carry into the next hold, or the silence
         // before the keyboard repeats would end it immediately.
         let t1 = last + Duration::from_secs(2);
         assert_eq!(talk.press(t1, false), Act::Start);
-        assert_eq!(talk.tick(t1 + Duration::from_millis(400), true), Act::Nothing);
+        assert_eq!(
+            talk.tick(t1 + Duration::from_millis(400), true),
+            Act::Nothing
+        );
     }
 
     #[test]
@@ -865,8 +880,6 @@ mod tests {
             "asking for push-to-talk on a terminal that cannot do it must not hang"
         );
     }
-
-
 
     #[test]
     fn hold_falls_back_from_the_setting() {

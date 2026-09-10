@@ -128,16 +128,110 @@ pub fn decode_base64(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// `(width, height)` from a PNG's IHDR. `None` for every other format: an
-/// image ah cannot measure is still saved and still offered, the renderer
-/// just has no aspect ratio to lay it out with.
+/// `(width, height)` from an image's header, without decoding a pixel.
+///
+/// PNG, JPEG, GIF and WebP are all readable from their first bytes. `None` for
+/// anything else — an image ah cannot measure is still saved and still
+/// offered, the renderer just has no aspect ratio to lay it out with.
 pub fn size(bytes: &[u8]) -> Option<(u32, u32)> {
-    if bytes.len() < 24 || !crate::clipboard::looks_like_png(bytes) || &bytes[12..16] != b"IHDR" {
+    png_size(bytes)
+        .or_else(|| jpeg_size(bytes))
+        .or_else(|| gif_size(bytes))
+        .or_else(|| webp_size(bytes))
+}
+
+fn png_size(b: &[u8]) -> Option<(u32, u32)> {
+    if b.len() < 24 || !crate::clipboard::looks_like_png(b) || &b[12..16] != b"IHDR" {
         return None;
     }
-    let be = |o: usize| u32::from_be_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]);
-    let (w, h) = (be(16), be(20));
+    let (w, h) = (be32(b, 16)?, be32(b, 20)?);
     (w > 0 && h > 0).then_some((w, h))
+}
+
+/// Walk the JPEG marker segments to the frame header, which carries the size.
+/// Everything before it is metadata of some length that says how long it is.
+fn jpeg_size(b: &[u8]) -> Option<(u32, u32)> {
+    if b.len() < 4 || b[0] != 0xFF || b[1] != 0xD8 {
+        return None;
+    }
+    let mut i = 2;
+    while i + 3 < b.len() {
+        if b[i] != 0xFF {
+            i += 1; // padding between segments
+            continue;
+        }
+        let marker = b[i + 1];
+        // Standalone markers carry no length.
+        if marker == 0xFF || (0xD0..=0xD9).contains(&marker) || marker == 0x01 {
+            i += 2;
+            continue;
+        }
+        let len = be16(b, i + 2)? as usize;
+        // Any start-of-frame but the ones that are not frames (DHT, DAC, DRI).
+        let frame = matches!(marker, 0xC0..=0xCF) && !matches!(marker, 0xC4 | 0xC8 | 0xCC);
+        if frame {
+            let (h, w) = (be16(b, i + 5)?, be16(b, i + 7)?);
+            return (w > 0 && h > 0).then_some((w as u32, h as u32));
+        }
+        if marker == 0xDA {
+            return None; // image data: no frame header was found
+        }
+        i += 2 + len.max(2);
+    }
+    None
+}
+
+fn gif_size(b: &[u8]) -> Option<(u32, u32)> {
+    if b.len() < 10 || !b.starts_with(b"GIF8") {
+        return None;
+    }
+    let (w, h) = (le16(b, 6)?, le16(b, 8)?);
+    (w > 0 && h > 0).then_some((w as u32, h as u32))
+}
+
+/// WebP comes in three shapes, and each keeps its size somewhere else.
+fn webp_size(b: &[u8]) -> Option<(u32, u32)> {
+    if b.len() < 30 || !b.starts_with(b"RIFF") || &b[8..12] != b"WEBP" {
+        return None;
+    }
+    match &b[12..16] {
+        // Lossy: a VP8 keyframe, sizes 14 bytes in, 14 bits each.
+        b"VP8 " => {
+            let (w, h) = (le16(b, 26)? & 0x3FFF, le16(b, 28)? & 0x3FFF);
+            (w > 0 && h > 0).then_some((w as u32, h as u32))
+        }
+        // Lossless: 14 bits each, packed across four bytes.
+        b"VP8L" => {
+            let bits = u32::from_le_bytes([b[21], b[22], b[23], b[24]]);
+            let w = (bits & 0x3FFF) + 1;
+            let h = ((bits >> 14) & 0x3FFF) + 1;
+            Some((w, h))
+        }
+        // Extended: one less than the size, three bytes each.
+        b"VP8X" => {
+            let w = u32::from_le_bytes([b[24], b[25], b[26], 0]) + 1;
+            let h = u32::from_le_bytes([b[27], b[28], b[29], 0]) + 1;
+            Some((w, h))
+        }
+        _ => None,
+    }
+}
+
+fn be32(b: &[u8], o: usize) -> Option<u32> {
+    Some(u32::from_be_bytes([
+        *b.get(o)?,
+        *b.get(o + 1)?,
+        *b.get(o + 2)?,
+        *b.get(o + 3)?,
+    ]))
+}
+
+fn be16(b: &[u8], o: usize) -> Option<u16> {
+    Some(u16::from_be_bytes([*b.get(o)?, *b.get(o + 1)?]))
+}
+
+fn le16(b: &[u8], o: usize) -> Option<u16> {
+    Some(u16::from_le_bytes([*b.get(o)?, *b.get(o + 1)?]))
 }
 
 /// File extension for a mime type; `bin` for one ah does not know.
@@ -345,6 +439,50 @@ mod tests {
         let mut zero = png_1x1();
         zero[16..20].copy_from_slice(&0u32.to_be_bytes());
         assert_eq!(size(&zero), None);
+    }
+
+    /// A JPEG whose frame header sits behind `pad` bytes of metadata, the way
+    /// a real one sits behind its EXIF and quantisation tables.
+    fn jpeg(w: u16, h: u16, pad: usize) -> Vec<u8> {
+        let mut v = vec![0xFF, 0xD8];
+        if pad > 0 {
+            v.extend_from_slice(&[0xFF, 0xE0]);
+            v.extend_from_slice(&((pad + 2) as u16).to_be_bytes());
+            v.extend(std::iter::repeat_n(0u8, pad));
+        }
+        v.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x11, 0x08]);
+        v.extend_from_slice(&h.to_be_bytes());
+        v.extend_from_slice(&w.to_be_bytes());
+        v.extend_from_slice(&[0x03, 0x01, 0x22, 0x00]);
+        v
+    }
+
+    #[test]
+    fn the_other_formats_are_measured_from_their_headers_too() {
+        // A model that answers with a JPEG is measured, not shrugged at.
+        assert_eq!(size(&jpeg(1024, 768, 0)), Some((1024, 768)));
+        assert_eq!(size(&jpeg(1024, 768, 64)), Some((1024, 768)));
+        // Restart markers and padding between segments are stepped over.
+        let mut odd = jpeg(64, 32, 8);
+        odd.splice(2..2, [0xFF, 0xFF, 0xFF, 0xD0]);
+        assert_eq!(size(&odd), Some((64, 32)));
+
+        let mut gif = b"GIF89a".to_vec();
+        gif.extend_from_slice(&300u16.to_le_bytes());
+        gif.extend_from_slice(&200u16.to_le_bytes());
+        gif.extend_from_slice(&[0; 8]);
+        assert_eq!(size(&gif), Some((300, 200)));
+
+        let mut webp = b"RIFF\0\0\0\0WEBPVP8X".to_vec();
+        webp.extend_from_slice(&[0; 8]); // chunk size and flags
+        webp.extend_from_slice(&[0x3F, 0x02, 0x00]); // width - 1, three bytes
+        webp.extend_from_slice(&[0xBF, 0x01, 0x00]); // height - 1
+        assert_eq!(size(&webp), Some((576, 448)));
+
+        // Nothing recognisable, and truncated inputs, are simply unknown.
+        assert_eq!(size(b"<svg xmlns=..."), None);
+        assert_eq!(size(&jpeg(10, 10, 0)[..6]), None);
+        assert_eq!(size(&[]), None);
     }
 
     #[test]

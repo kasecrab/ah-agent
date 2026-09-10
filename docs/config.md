@@ -307,6 +307,11 @@ Inline drawing needs a terminal that speaks the kitty graphics protocol (kitty,
 Ghostty, WezTerm, Warp) or the iTerm2 one. Anywhere else — tmux, screen, VS
 Code, Alacritty — a picture shows as a one-line chip and Ctrl-O opens it.
 
+ah asks the images endpoint for PNG, because the kitty protocol carries PNG
+and raw pixels and nothing else. A provider that answers with a JPEG or a WebP
+anyway is still saved and still measured, and shows as a chip in a kitty
+terminal; iTerm2 hands those to the system decoder and draws them.
+
 | Key | Default | Meaning |
 |---|---|---|
 | `output` | `"auto"` | `auto` asks only chat models the catalogue says draw; `always` asks anyway; `off` never asks. A model that only draws ignores this |
