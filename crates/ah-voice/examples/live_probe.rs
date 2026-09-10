@@ -168,7 +168,10 @@ fn main() {
             std::thread::sleep(Duration::from_millis(1500));
             let full = said.lock().unwrap().clone();
             let tail = guess.lock().unwrap().clone();
-            println!("\n  heard: {full}{}{tail}\n", if tail.is_empty() { "" } else { " " });
+            println!(
+                "\n  heard: {full}{}{tail}\n",
+                if tail.is_empty() { "" } else { " " }
+            );
             println!("Enter to go again, `q` to quit.");
         }
     }

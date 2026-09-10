@@ -318,6 +318,12 @@ impl<'a> Agent<'a> {
         if self.image_dir.is_none() {
             return Vec::new();
         }
+        // A model that only draws has no other mode to fall back on, so this
+        // is not a request for image output — it is what the model is. The
+        // setting decides whether a *chat* model is asked for pictures.
+        if self.draws_only() {
+            return vec!["image".into()];
+        }
         let wanted = match self.settings.images.output {
             ImageOutput::Off => false,
             ImageOutput::Always => true,
@@ -337,6 +343,13 @@ impl<'a> Agent<'a> {
         } else {
             vec!["image".into()]
         }
+    }
+
+    /// True when the catalogue says this model answers with a picture and
+    /// nothing else. Such a model lives on the images endpoint: it has no
+    /// conversation, no tools, and nothing to summarise.
+    pub fn draws_only(&self) -> bool {
+        self.output_modalities.has("image") && !self.output_modalities.has("text")
     }
 
     /// Swap stored references for what actually goes on the wire. The newest
@@ -408,7 +421,10 @@ impl<'a> Agent<'a> {
     /// True once the conversation fills `context.compact_at` percent of the window.
     pub fn over_threshold(&self) -> bool {
         let c = &self.settings.context;
-        c.auto_compact
+        // Nothing to compact and nobody to write the summary: a model that
+        // only draws would answer the summary request with a picture.
+        !self.draws_only()
+            && c.auto_compact
             && self.context_window > 0
             && self.context_tokens.saturating_mul(100)
                 >= self.context_window * c.compact_at.min(100) as u64
@@ -438,6 +454,12 @@ impl<'a> Agent<'a> {
         auto: bool,
         io: &dyn AgentIo,
     ) -> Result<()> {
+        if self.draws_only() {
+            return Err(Error::Config(format!(
+                "{} only draws; it cannot write a summary",
+                self.settings.model.id
+            )));
+        }
         if messages.is_empty() {
             return Ok(());
         }

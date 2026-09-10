@@ -900,9 +900,11 @@ impl VoiceSettings {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ImageSettings {
-    /// When to ask a model for pictures. `auto` asks only models the
+    /// When to ask a *chat* model for pictures. `auto` asks only models the
     /// catalogue says draw, `always` asks regardless — for a catalogue that
-    /// has not caught up, or a proxy of your own — and `off` never asks.
+    /// has not caught up, or a proxy of your own — and `off` never asks. A
+    /// model that only draws has no other mode, so it is always called on the
+    /// images endpoint whatever this says.
     pub output: ImageOutput,
     /// Where generated images are written. Empty means one directory per
     /// session under the data directory.

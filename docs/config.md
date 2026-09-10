@@ -293,13 +293,23 @@ Pictures a model draws. Ask an image-capable model for one in plain language —
 there is no separate command, and `ah models` marks them `T→TI`. Generated
 images are written to disk; the conversation stores the path, never the bytes.
 
+Two kinds of model draw. A chat model that also makes pictures
+(`google/gemini-3-pro-image`, `openai/gpt-5-image`) answers with words and
+images together, and `output` decides whether it is asked for them. A model
+that *only* draws (`meta/muse-image`, `black-forest-labs/flux.2-pro` — the
+`image` category in `/model`) is not on the chat endpoint at all: ah sends the
+last thing you asked for, plus every picture already in the conversation as
+something to work from, so "now make it night" edits what is there. Such a
+model has no tools and cannot summarise, so compaction is off while one is
+selected.
+
 Inline drawing needs a terminal that speaks the kitty graphics protocol (kitty,
 Ghostty, WezTerm, Warp) or the iTerm2 one. Anywhere else — tmux, screen, VS
 Code, Alacritty — a picture shows as a one-line chip and Ctrl-O opens it.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `output` | `"auto"` | `auto` asks only models the catalogue says draw; `always` asks anyway; `off` never asks |
+| `output` | `"auto"` | `auto` asks only chat models the catalogue says draw; `always` asks anyway; `off` never asks. A model that only draws ignores this |
 | `dir` | `""` | where images land; empty = `<data dir>/images/<session>/` |
 | `history` | `1` | recent generated images resent with the next request; 0 never resends one |
 | `echo` | `"assistant"` | shape of a resent image: `assistant`, or `user` for a provider that refuses assistant images |

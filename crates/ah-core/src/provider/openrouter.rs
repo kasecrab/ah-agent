@@ -103,6 +103,47 @@ impl OpenRouter {
         Ok((said, cost))
     }
 
+    /// Draw on `/images`, which is where a model that only makes pictures
+    /// lives. It is not a chat: there is no conversation to send, no tools to
+    /// offer and nothing to stream — one prompt goes up and the picture comes
+    /// back whole — so the answer is turned into the same events a chat would
+    /// have produced and the loop above never learns the difference.
+    fn draw(&self, req: &ChatRequest, cancel: &AtomicBool, on_event: OnEvent<'_>) -> Result<()> {
+        let body = images_body(req);
+        crate::debug!(
+            "images model={} refs={}",
+            req.model,
+            body["input_references"].as_array().map_or(0, Vec::len)
+        );
+        if cancel.load(Ordering::Relaxed) {
+            return Err(Error::Cancelled);
+        }
+        let mut resp = self
+            .agent
+            .post(self.url("/images"))
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("HTTP-Referer", self.referer.clone())
+            .header("X-Title", self.app_title.clone())
+            .send_json(&body)?;
+        let status = resp.status().as_u16();
+        let text = resp
+            .body_mut()
+            .with_config()
+            .limit(64 * 1024 * 1024)
+            .read_to_string()?;
+        if !(200..300).contains(&status) {
+            return Err(Error::Api {
+                status,
+                message: excerpt(&text),
+            });
+        }
+        if cancel.load(Ordering::Relaxed) {
+            return Err(Error::Cancelled);
+        }
+        let v: Value = serde_json::from_str(&text)?;
+        handle_images(&v, on_event)
+    }
+
     /// GET a JSON endpoint (used by `ah models`, key info).
     pub fn get_json(&self, path: &str) -> Result<Value> {
         let mut req = self.agent.get(self.url(path));
@@ -411,6 +452,11 @@ impl Provider for OpenRouter {
     }
 
     fn stream(&self, req: &ChatRequest, cancel: &AtomicBool, on_event: OnEvent<'_>) -> Result<()> {
+        // A model that answers with a picture and nothing else is not on the
+        // chat endpoint at all; asking there is a 404 telling you so.
+        if draws_only(req) {
+            return self.draw(req, cancel, on_event);
+        }
         let mut body = serde_json::to_value(req)?;
         attach_images(&mut body);
         let audio_bytes = attach_audio(&mut body);
@@ -495,6 +541,81 @@ impl Provider for OpenRouter {
         }
         out
     }
+}
+
+/// True for a request to a model whose only output is a picture.
+fn draws_only(req: &ChatRequest) -> bool {
+    req.modalities.iter().any(|m| m == "image") && !req.modalities.iter().any(|m| m == "text")
+}
+
+/// The `/images` body for a chat request: the last thing the user asked for,
+/// and every picture already in the conversation as something to work from.
+///
+/// The rest of the conversation is left behind on purpose — the endpoint takes
+/// one prompt, and a model that draws has nowhere to put a history.
+fn images_body(req: &ChatRequest) -> Value {
+    let prompt = req
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.role == ah_abi::Role::User)
+        .map(|m| m.content.trim())
+        .unwrap_or_default();
+    let refs: Vec<Value> = req
+        .messages
+        .iter()
+        .flat_map(|m| m.images.iter())
+        .filter(|u| u.starts_with("data:") || u.starts_with("http"))
+        .map(|u| serde_json::json!({"type": "image_url", "image_url": {"url": u}}))
+        .collect();
+    let mut body = serde_json::json!({"model": req.model, "prompt": prompt});
+    if !refs.is_empty() {
+        body["input_references"] = Value::Array(refs);
+    }
+    if let Some(p) = &req.provider {
+        body["provider"] = p.clone();
+    }
+    body
+}
+
+/// Turn an `/images` answer into the events a chat would have produced.
+fn handle_images(v: &Value, on_event: OnEvent<'_>) -> Result<()> {
+    let mut drawn = 0usize;
+    for img in v["data"].as_array().into_iter().flatten() {
+        let Some(b64) = img["b64_json"].as_str().filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        let mime = img["media_type"].as_str().unwrap_or("image/png");
+        drawn += 1;
+        if !on_event(StreamEvent::Image(format!("data:{mime};base64,{b64}"))) {
+            return Ok(());
+        }
+    }
+    if drawn == 0 {
+        return Err(Error::Api {
+            status: 200,
+            message: "the model returned no image".into(),
+        });
+    }
+    if let Some(u) = v.get("usage")
+        && !u.is_null()
+    {
+        let usage = Usage {
+            prompt_tokens: u["prompt_tokens"].as_u64().unwrap_or(0),
+            completion_tokens: u["completion_tokens"].as_u64().unwrap_or(0),
+            total_tokens: u["total_tokens"].as_u64().unwrap_or(0),
+            cost: u["cost"].as_f64().unwrap_or(0.0),
+            cached_tokens: u["prompt_tokens_details"]["cached_tokens"]
+                .as_u64()
+                .unwrap_or(0),
+            ..Usage::default()
+        };
+        if !on_event(StreamEvent::Usage(usage)) {
+            return Ok(());
+        }
+    }
+    on_event(StreamEvent::Finish("stop".into()));
+    Ok(())
 }
 
 /// Put `images` on the wire. A user message becomes OpenAI content parts; an
@@ -622,6 +743,111 @@ mod tests {
         assert_eq!(parts[0]["text"], "look");
         assert_eq!(parts[1]["image_url"]["url"], "data:image/png;base64,AA==");
         assert!(body["messages"][1].get("images").is_none());
+    }
+
+    fn image_request(messages: Vec<ah_abi::Message>, modalities: &[&str]) -> ChatRequest {
+        ChatRequest {
+            model: "meta/muse-image".into(),
+            messages,
+            tools: Vec::new(),
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            modalities: modalities.iter().map(|s| String::from(*s)).collect(),
+            reasoning: None,
+            provider: None,
+            session_id: None,
+            cache_control: None,
+        }
+    }
+
+    #[test]
+    fn a_model_that_only_draws_takes_the_other_road() {
+        assert!(draws_only(&image_request(Vec::new(), &["image"])));
+        // A model that can also talk stays on the chat endpoint, where its
+        // words and its pictures arrive together.
+        assert!(!draws_only(&image_request(Vec::new(), &["image", "text"])));
+        assert!(!draws_only(&image_request(Vec::new(), &[])));
+    }
+
+    #[test]
+    fn the_images_body_is_the_last_thing_asked_and_what_to_work_from() {
+        let mut earlier = ah_abi::Message::user("a cat");
+        earlier.images = vec!["data:image/png;base64,AA==".into()];
+        let mut drawn = ah_abi::Message::assistant("");
+        drawn.images = vec!["data:image/png;base64,BB==".into()];
+        let req = image_request(
+            vec![
+                ah_abi::Message::system("you are ah"),
+                earlier,
+                drawn,
+                ah_abi::Message::user("  now make it night  "),
+            ],
+            &["image"],
+        );
+        let body = images_body(&req);
+        assert_eq!(body["model"], "meta/muse-image");
+        // The last thing the user asked, trimmed; the system prompt and the
+        // rest of the conversation have nowhere to go on this endpoint.
+        assert_eq!(body["prompt"], "now make it night");
+        let refs = body["input_references"].as_array().unwrap();
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0]["type"], "image_url");
+        assert_eq!(refs[0]["image_url"]["url"], "data:image/png;base64,AA==");
+        assert_eq!(refs[1]["image_url"]["url"], "data:image/png;base64,BB==");
+        // Nothing to work from: the key is left off rather than sent empty.
+        let bare = images_body(&image_request(
+            vec![ah_abi::Message::user("a dog")],
+            &["image"],
+        ));
+        assert!(bare.get("input_references").is_none());
+        assert_eq!(bare["prompt"], "a dog");
+    }
+
+    #[test]
+    fn a_drawn_answer_becomes_the_events_a_chat_would_have_sent() {
+        let v = serde_json::json!({
+            "created": 1757100000,
+            "data": [
+                {"b64_json": "AAAA", "media_type": "image/png"},
+                {"b64_json": "BBBB"},
+                {"b64_json": ""}
+            ],
+            "usage": {"prompt_tokens": 12, "completion_tokens": 1290, "total_tokens": 1302, "cost": 0.003}
+        });
+        let mut seen = Vec::new();
+        handle_images(&v, &mut |e| {
+            seen.push(e);
+            true
+        })
+        .unwrap();
+        assert_eq!(
+            seen[0],
+            StreamEvent::Image("data:image/png;base64,AAAA".into())
+        );
+        // No media type given: png, which is what these endpoints return.
+        assert_eq!(
+            seen[1],
+            StreamEvent::Image("data:image/png;base64,BBBB".into())
+        );
+        // The empty entry is skipped, then usage and a finish reason so the
+        // turn ends and is billed like any other.
+        match &seen[2] {
+            StreamEvent::Usage(u) => {
+                assert_eq!(u.total_tokens, 1302);
+                assert!((u.cost - 0.003).abs() < 1e-9);
+            }
+            other => panic!("expected usage, got {other:?}"),
+        }
+        assert_eq!(seen[3], StreamEvent::Finish("stop".into()));
+        assert_eq!(seen.len(), 4);
+    }
+
+    #[test]
+    fn an_answer_with_no_picture_in_it_is_an_error() {
+        let empty = serde_json::json!({"created": 1, "data": []});
+        let err = handle_images(&empty, &mut |_| true).unwrap_err();
+        assert!(err.to_string().contains("no image"), "{err}");
     }
 
     #[test]
