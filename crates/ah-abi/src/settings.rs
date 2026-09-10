@@ -663,8 +663,11 @@ pub struct AgentSettings {
     pub effort: String,
     /// Longest report a child can hand back. The middle is dropped.
     pub report_bytes: usize,
-    /// Tool lines kept per child for the agent view.
+    /// Tool lines kept per child for the agent list.
     pub log_lines: usize,
+    /// What a child keeps of its own work, in bytes, so its conversation can be
+    /// read the way the main one is. The oldest goes first.
+    pub view_bytes: usize,
     /// Finished children kept, with their conversation, for follow-ups.
     pub keep: usize,
     /// When a background child ends while the model is idle, start a turn so
@@ -698,6 +701,7 @@ impl Default for AgentSettings {
             effort: String::new(),
             report_bytes: 8192,
             log_lines: 200,
+            view_bytes: 256 * 1024,
             keep: 16,
             wake: true,
             allow_model_arg: false,

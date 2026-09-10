@@ -118,6 +118,9 @@ pub struct Child {
     log: Mutex<VecDeque<String>>,
     /// What it said at the end, capped.
     report: Mutex<String>,
+    /// Everything it did, as it happened, so a screen can show its work the
+    /// way the main conversation is shown. Capped by bytes; the oldest go.
+    events: Mutex<Events>,
     /// Said to it while it runs, read before its next request.
     inbox: Mutex<Vec<String>>,
     /// Kept so a follow-up continues instead of starting over.
@@ -163,6 +166,23 @@ impl Child {
 
     pub fn report(&self) -> String {
         self.report.lock().unwrap().clone()
+    }
+
+    /// What it has done since event `cursor`, and the number to ask from next
+    /// time. `0` is everything still kept.
+    pub fn events_since(&self, cursor: u64) -> (Vec<AgentEvent>, u64) {
+        let events = self.events.lock().unwrap();
+        let out: Vec<AgentEvent> = events
+            .items
+            .iter()
+            .filter(|(n, _)| *n > cursor)
+            .map(|(_, ev)| ev.clone())
+            .collect();
+        (out, events.next - 1)
+    }
+
+    fn record(&self, ev: AgentEvent) {
+        self.events.lock().unwrap().push(ev);
     }
 
     /// The last `max` lines of what it has done.
@@ -271,6 +291,53 @@ impl Child {
 impl Mailbox for Child {
     fn take(&self) -> Vec<String> {
         std::mem::take(&mut *self.inbox.lock().unwrap())
+    }
+}
+
+/// A child's own transcript, in the order it happened. Each event is numbered,
+/// so a screen that has seen the first `n` can ask for the rest.
+struct Events {
+    items: VecDeque<(u64, AgentEvent)>,
+    next: u64,
+    bytes: usize,
+    cap: usize,
+}
+
+impl Events {
+    fn new(cap: usize) -> Self {
+        Self {
+            items: VecDeque::new(),
+            next: 1,
+            bytes: 0,
+            cap: cap.max(4096),
+        }
+    }
+
+    fn push(&mut self, ev: AgentEvent) {
+        let size = weight(&ev);
+        self.items.push_back((self.next, ev));
+        self.next += 1;
+        self.bytes += size;
+        while self.bytes > self.cap && self.items.len() > 1 {
+            if let Some((_, old)) = self.items.pop_front() {
+                self.bytes = self.bytes.saturating_sub(weight(&old));
+            }
+        }
+    }
+}
+
+/// Roughly what an event costs to keep.
+fn weight(ev: &AgentEvent) -> usize {
+    match ev {
+        AgentEvent::Text(t) | AgentEvent::Reasoning(t) | AgentEvent::Notice(t) => t.len() + 16,
+        AgentEvent::AssistantMessage(m) => {
+            m.content.len() + m.reasoning.as_deref().map_or(0, str::len) + 16
+        }
+        AgentEvent::ToolStart(c) => c.function.name.len() + c.function.arguments.len() + 16,
+        AgentEvent::ToolEnd { call, result, .. } => {
+            call.function.arguments.len() + result.output.len() + 32
+        }
+        _ => 32,
     }
 }
 
@@ -617,9 +684,9 @@ struct ChildIo(Arc<Child>);
 impl AgentIo for ChildIo {
     fn emit(&self, ev: AgentEvent) {
         let c = &self.0;
-        match ev {
+        match &ev {
             AgentEvent::RequestStart { turn } => {
-                c.requests.store(turn, Ordering::Relaxed);
+                c.requests.store(*turn, Ordering::Relaxed);
                 c.bump();
             }
             AgentEvent::ToolStart(call) => {
@@ -631,13 +698,22 @@ impl AgentIo for ChildIo {
                 c.note(line);
             }
             AgentEvent::Usage(u) => {
-                c.usage.lock().unwrap().add(&u);
-                table().spent.lock().unwrap().add(&u);
+                c.usage.lock().unwrap().add(u);
+                table().spent.lock().unwrap().add(u);
                 c.bump();
             }
             AgentEvent::Error(e) => c.note(format!("error: {e}")),
-            AgentEvent::Notice(n) => c.note(n),
+            AgentEvent::Notice(n) => c.note(n.clone()),
             _ => {}
+        }
+        // Kept whole, so a screen can show the agent's work the way it shows
+        // the conversation: the same blocks, from the same events.
+        match ev {
+            AgentEvent::Usage(_) | AgentEvent::ToolMessage(_) | AgentEvent::SettingsPatch(_) => {}
+            ev => {
+                c.record(ev);
+                c.bump();
+            }
         }
     }
 
@@ -828,6 +904,7 @@ impl Spawner for AgentSpawner {
             activity: Mutex::new(String::new()),
             log: Mutex::new(VecDeque::new()),
             report: Mutex::new(String::new()),
+            events: Mutex::new(Events::new(cfg.view_bytes)),
             inbox: Mutex::new(Vec::new()),
             messages: Mutex::new(vec![Message::user(req.task)]),
             launch: Arc::new(launch),

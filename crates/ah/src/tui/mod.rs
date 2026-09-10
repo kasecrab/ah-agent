@@ -1,6 +1,5 @@
 //! Terminal UI. Threads: render loop, input reader, engine. Idle = blocked on a channel.
 
-mod agents;
 mod ask;
 mod highlight;
 mod image;
@@ -17,7 +16,7 @@ mod usage;
 mod voice;
 mod working;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -348,10 +347,15 @@ struct App {
     job_view: Option<jobs::View>,
     /// The agent being watched, if the user has stepped into one. `None` is
     /// the main conversation.
-    agent_view: Option<agents::View>,
+    /// The agent the input and the transcript belong to, if not the
+    /// conversation.
+    watching: Option<u32>,
     /// Which row of the strip under the status bar the keys are on, while the
     /// strip has them. `None` leaves them with the input.
     switch: Option<usize>,
+    /// An agent's own conversation, built from its events the same way this
+    /// one is, kept while the agent is worth looking at.
+    panes: HashMap<u32, Pane>,
     plan_view: Option<plan::View>,
     usage_pane: Option<usage::Pane>,
     /// Dictation, while it is armed. `None` is the whole cost of the feature
@@ -544,8 +548,9 @@ fn run_inner(
         completion: None,
         picker: None,
         job_view: None,
-        agent_view: None,
+        watching: None,
         switch: None,
+        panes: HashMap::new(),
         plan_view: None,
         usage_pane: None,
         voice: None,
@@ -665,6 +670,152 @@ fn run_inner(
 
 /// A call of the plan tool, whose block is worth keeping only until the next
 /// one.
+/// One transcript and where its reasoning clock stands: the conversation has
+/// one, and so does every agent being watched.
+#[derive(Default)]
+struct Pane {
+    entries: Vec<Entry>,
+    think: Option<Instant>,
+    /// The last event of that agent already turned into blocks.
+    seen: u64,
+}
+
+/// Turn one event into blocks, for a transcript that is not the conversation.
+/// The conversation's copy of this also moves session state; an agent's does
+/// not, because none of it is the session's.
+fn apply_event(entries: &mut Vec<Entry>, think: &mut Option<Instant>, ev: AgentEvent) {
+    let finish_thinking = |entries: &mut Vec<Entry>, think: &mut Option<Instant>| {
+        if let Some(t) = think.take()
+            && let Some(Block::Assistant { think_ms, .. }) =
+                entries.last_mut().map(|e| &mut e.block)
+        {
+            *think_ms = t.elapsed().as_millis() as u64;
+        }
+    };
+    match ev {
+        AgentEvent::RequestStart { .. } => {
+            *think = None;
+            push_block(
+                entries,
+                Block::Assistant {
+                    text: String::new(),
+                    reasoning: String::new(),
+                    streaming: true,
+                    think_ms: 0,
+                },
+            );
+        }
+        AgentEvent::Text(t) => {
+            finish_thinking(entries, think);
+            if let Some(Block::Assistant { text, .. }) = entries.last_mut().map(|e| &mut e.block) {
+                text.push_str(&t);
+            }
+        }
+        AgentEvent::Reasoning(t) => {
+            think.get_or_insert_with(Instant::now);
+            if let Some(Block::Assistant { reasoning, .. }) =
+                entries.last_mut().map(|e| &mut e.block)
+            {
+                reasoning.push_str(&t);
+            }
+        }
+        AgentEvent::AssistantMessage(m) => {
+            finish_thinking(entries, think);
+            if let Some(Block::Assistant {
+                text,
+                reasoning,
+                streaming,
+                ..
+            }) = entries.last_mut().map(|e| &mut e.block)
+            {
+                *text = m.content.clone();
+                *reasoning = m.reasoning.clone().unwrap_or_default();
+                *streaming = false;
+            }
+            if let Some(Block::Assistant {
+                text, reasoning, ..
+            }) = entries.last().map(|e| &e.block)
+                && text.is_empty()
+                && reasoning.is_empty()
+            {
+                entries.pop();
+            }
+        }
+        AgentEvent::ToolStart(call) => push_block(
+            entries,
+            Block::Tool {
+                call,
+                result: None,
+                duration_ms: None,
+                expanded: None,
+            },
+        ),
+        AgentEvent::ToolEnd {
+            call,
+            result,
+            duration_ms,
+        } => {
+            for e in entries.iter_mut().rev() {
+                if let Block::Tool {
+                    call: c,
+                    result: r,
+                    duration_ms: d,
+                    ..
+                } = &mut e.block
+                    && c.id == call.id
+                {
+                    *r = Some(result);
+                    *d = Some(duration_ms);
+                    break;
+                }
+            }
+        }
+        AgentEvent::ToolDenied { call, reason } => push_block(
+            entries,
+            Block::Error(format!("{} denied: {reason}", call.function.name)),
+        ),
+        AgentEvent::Notice(n) => push_block(entries, Block::Notice(n)),
+        AgentEvent::Retry {
+            attempt,
+            wait_ms,
+            error,
+        } => push_block(
+            entries,
+            Block::Notice(format!("retry {attempt} in {wait_ms} ms: {error}")),
+        ),
+        AgentEvent::Error(e) => push_block(entries, Block::Error(e)),
+        AgentEvent::Compacted {
+            before,
+            after,
+            summary,
+        } => push_block(
+            entries,
+            Block::Summary {
+                text: summary,
+                tokens: Some((before, after)),
+                expanded: None,
+            },
+        ),
+        AgentEvent::TurnEnd(s) if s.cancelled => {
+            push_block(entries, Block::Notice("stopped".into()))
+        }
+        _ => {}
+    }
+}
+
+/// Add a block to a transcript, whether it is the conversation or an agent's.
+fn push_block(entries: &mut Vec<Entry>, b: Block) {
+    // Runs of plan updates say the same thing over and over; only the last one
+    // is still true, so it takes the place of the one before it.
+    if is_plan(&b)
+        && let Some(last) = entries.last()
+        && is_plan(&last.block)
+    {
+        entries.pop();
+    }
+    entries.push(Entry::new(b));
+}
+
 fn is_plan(b: &Block) -> bool {
     matches!(b, Block::Tool { call, .. } if call.function.name == "plan")
 }
@@ -745,15 +896,7 @@ impl App {
     }
 
     fn push(&mut self, b: Block) {
-        // Runs of plan updates say the same thing over and over; only the last
-        // one is still true, so it takes the place of the one before it.
-        if is_plan(&b)
-            && let Some(last) = self.entries.last()
-            && is_plan(&last.block)
-        {
-            self.entries.pop();
-        }
-        self.entries.push(Entry::new(b));
+        push_block(&mut self.entries, b);
         self.dirty = true;
     }
 
@@ -1159,6 +1302,21 @@ impl App {
             },
             rendered: String::new(),
         };
+        // Bound to an agent, the row belongs to that agent: its model, its
+        // spend, how full its own window is.
+        if let Some(child) = self
+            .watching
+            .and_then(|id| ah_core::agents::table().get(id))
+        {
+            let u = child.usage();
+            ctx.model = child.model.clone();
+            ctx.usage = u;
+            ctx.context_tokens = u.prompt_tokens + u.completion_tokens;
+            ctx.context_window = ah_core::models::context_window(&child.model).unwrap_or(0);
+            ctx.favorite = String::new();
+            ctx.state = format!("agent:{}", child.kind);
+            ctx.session_id = format!("{}", child.id);
+        }
         ctx.rendered = app::status_text(&self.settings().statusline, &ctx);
         ctx
     }
@@ -1211,7 +1369,7 @@ impl App {
             return;
         }
         // While an agent is being watched, what is typed is said to it.
-        if let Some(id) = self.agent_view.as_ref().map(|v| v.id) {
+        if let Some(id) = self.watching {
             self.say_to_agent(id, text);
             return;
         }
@@ -3332,11 +3490,17 @@ impl App {
         // A finished agent is not something to watch or step into: its report
         // is already in the conversation. Fall back to it, and keep the keys
         // on a row that still exists.
-        if let Some(id) = self.agent_view.as_ref().map(|v| v.id)
+        if let Some(id) = self.watching {
+            self.pump_agent(id);
+        }
+        if let Some(id) = self.watching
             && table.get(id).is_none_or(|c| !c.running())
         {
-            self.agent_view = None;
+            self.watching = None;
+            self.follow = true;
         }
+        // An agent the table has forgotten takes its conversation with it.
+        self.panes.retain(|id, _| table.get(*id).is_some());
         if let Some(i) = self.switch {
             let rows = switch::rows().len();
             self.switch = (rows > 0).then(|| i.min(rows - 1));
@@ -3378,11 +3542,37 @@ impl App {
         self.dirty = true;
     }
 
+    /// Catch an agent's own conversation up with what it has done. Its events
+    /// are kept by the agent itself; this turns them into the same blocks the
+    /// conversation is made of.
+    fn pump_agent(&mut self, id: u32) {
+        let Some(child) = ah_core::agents::table().get(id) else {
+            self.panes.remove(&id);
+            return;
+        };
+        let pane = self.panes.entry(id).or_insert_with(|| {
+            let mut p = Pane::default();
+            // The brief it was given reads as the first thing said to it.
+            push_block(&mut p.entries, Block::User(child.task.clone()));
+            p
+        });
+        let (events, seen) = child.events_since(pane.seen);
+        if events.is_empty() {
+            return;
+        }
+        pane.seen = seen;
+        for ev in events {
+            apply_event(&mut pane.entries, &mut pane.think, ev);
+        }
+        self.dirty = true;
+    }
+
     /// Step into an agent: the transcript shows what it is doing and what the
     /// input box says goes to it instead of the main conversation.
     fn watch_agent(&mut self, id: u32) {
         self.picker = None;
-        self.agent_view = Some(agents::View::new(id));
+        self.watching = Some(id);
+        self.pump_agent(id);
         self.follow = true;
         self.dirty = true;
     }
@@ -3420,7 +3610,8 @@ impl App {
                 self.open_jobs_picker();
             }
             switch::Target::Main => {
-                self.agent_view = None;
+                self.watching = None;
+                self.follow = true;
                 self.switch = None;
                 self.dirty = true;
             }
@@ -3448,10 +3639,16 @@ impl App {
     fn say_to_agent(&mut self, id: u32, text: String) {
         let Some(child) = ah_core::agents::table().get(id).filter(|c| c.running()) else {
             self.push(Block::Notice(format!("agent {id} has finished")));
-            self.agent_view = None;
+            self.watching = None;
             return;
         };
+        // It reads as a message in that agent's conversation, the same way a
+        // message to the main one does.
+        if let Some(pane) = self.panes.get_mut(&id) {
+            push_block(&mut pane.entries, Block::User(text.clone()));
+        }
         child.say(text);
+        self.follow = true;
         self.dirty = true;
     }
 
@@ -4035,9 +4232,10 @@ impl App {
                 // Leaving the strip picks nothing; the input keeps what it had.
                 self.switch = None;
                 self.dirty = true;
-            } else if self.agent_view.is_some() {
+            } else if self.watching.is_some() {
                 // Leaving an agent leaves it running; it is not the turn.
-                self.agent_view = None;
+                self.watching = None;
+                self.follow = true;
                 self.dirty = true;
             } else if self.busy {
                 self.cancel_turn();
@@ -4563,7 +4761,7 @@ impl App {
         let side = if pal.has_side_borders() { 2 } else { 0 };
         // Bound to an agent, the glyph says which one: the placeholder that says
         // so is gone as soon as anything is typed.
-        let watching = self.agent_view.as_ref().map(|v| v.id);
+        let watching = self.watching;
         let lead_prefix = match watching {
             Some(id) => format!("a{id} {}", pal.input_prefix),
             None => pal.input_prefix.clone(),
@@ -4587,7 +4785,16 @@ impl App {
         } else {
             self.queue.len() as u16 + border
         };
-        let mut left = if self.busy {
+        // The working line belongs to whatever is selected: the turn, or the
+        // agent being watched while it is still going.
+        let working = match self
+            .watching
+            .and_then(|id| ah_core::agents::table().get(id))
+        {
+            Some(child) => child.running(),
+            None => self.busy,
+        };
+        let mut left = if working {
             self.working_line().spans
         } else {
             Vec::new()
@@ -4643,8 +4850,8 @@ impl App {
             f.render_widget(Paragraph::new(line), dock_area);
         }
         if switch_rows > 0 {
-            let active = match self.agent_view.as_ref() {
-                Some(v) => switch::Target::Agent(v.id),
+            let active = match self.watching {
+                Some(id) => switch::Target::Agent(id),
                 None => switch::Target::Main,
             };
             let mut lines = vec![Line::raw("")];
@@ -4658,20 +4865,17 @@ impl App {
             f.render_widget(Paragraph::new(lines), switch_area);
         }
 
-        // Watching an agent takes the transcript's place: the main
-        // conversation is one step to the left, and comes back untouched.
-        let watched = self
-            .agent_view
-            .as_ref()
-            .and_then(|v| ah_core::agents::table().get(v.id));
-        match (self.agent_view.as_mut(), watched) {
-            (Some(view), Some(child)) => view.draw(f, transcript_area, &pal, &child),
-            (Some(_), None) => {
-                self.agent_view = None;
-                self.draw_transcript(f, transcript_area, &pal, layout.transcript_max_width);
-            }
-            _ => self.draw_transcript(f, transcript_area, &pal, layout.transcript_max_width),
-        }
+        // An agent takes the conversation's place while it is the one selected,
+        // drawn by the same code from the same kind of blocks. The conversation
+        // is one step away and comes back untouched.
+        let watching = self.watching.filter(|id| self.panes.contains_key(id));
+        self.draw_transcript(
+            f,
+            transcript_area,
+            &pal,
+            layout.transcript_max_width,
+            watching,
+        );
         if !self.queue.is_empty() {
             self.draw_queue(f, queue_area, &pal, layout.paste_collapse_lines);
         }
@@ -4928,7 +5132,14 @@ impl App {
 
     /// `• Working (3s · esc to interrupt)`, animated unless turned off.
     fn working_line(&self) -> Line<'static> {
-        let start = self.busy_start.unwrap_or_else(Instant::now);
+        // An agent's clock is its own; the turn's is the session's.
+        let watched = self
+            .watching
+            .and_then(|id| ah_core::agents::table().get(id));
+        let start = match &watched {
+            Some(child) => Instant::now() - child.duration(),
+            None => self.busy_start.unwrap_or_else(Instant::now),
+        };
         // The band would stand still while a question is up, which reads as a
         // hang; the line goes plain until the turn is moving again.
         let at = (self.settings().layout.animation_ms > 0 && self.ask.is_none())
@@ -4947,6 +5158,16 @@ impl App {
 
     /// What the turn is busy with, as one word.
     fn header(&self) -> String {
+        // Bound to an agent, the line is about that agent, not the turn.
+        if let Some(child) = self
+            .watching
+            .and_then(|id| ah_core::agents::table().get(id))
+        {
+            return match child.running() {
+                true => "Working".into(),
+                false => "Done".into(),
+            };
+        }
         // A turn stuck inside the agent tool is not working, it is waiting.
         let waiting = ah_core::agents::table().waiting();
         if self.state == State::Tool && waiting > 0 {
@@ -4963,7 +5184,42 @@ impl App {
         }
     }
 
-    fn draw_transcript(&mut self, f: &mut Frame, area: Rect, pal: &Palette, max_width: u16) {
+    /// Draw whichever conversation is on screen: this one, or an agent's. The
+    /// blocks are taken out for the pass and put back, so one body draws both.
+    fn draw_transcript(
+        &mut self,
+        f: &mut Frame,
+        area: Rect,
+        pal: &Palette,
+        max_width: u16,
+        agent: Option<u32>,
+    ) {
+        let mut entries = match agent {
+            None => std::mem::take(&mut self.entries),
+            Some(id) => match self.panes.get_mut(&id) {
+                Some(p) => std::mem::take(&mut p.entries),
+                None => Vec::new(),
+            },
+        };
+        self.draw_entries(f, area, pal, max_width, &mut entries);
+        match agent {
+            None => self.entries = entries,
+            Some(id) => {
+                if let Some(p) = self.panes.get_mut(&id) {
+                    p.entries = entries;
+                }
+            }
+        }
+    }
+
+    fn draw_entries(
+        &mut self,
+        f: &mut Frame,
+        area: Rect,
+        pal: &Palette,
+        max_width: u16,
+        entries: &mut [Entry],
+    ) {
         let width = if max_width > 0 {
             area.width.min(max_width)
         } else {
@@ -4977,7 +5233,7 @@ impl App {
         let mut total = 0;
         let text_width = width.saturating_sub(1);
         self.img_scan.clear();
-        for e in &mut self.entries {
+        for e in entries.iter_mut() {
             let n = e.lines(text_width, &view, pal, pal_gen).len();
             self.img_scan
                 .push((n, transcript::image_layout(&e.block, text_width, &view)));
@@ -5004,7 +5260,7 @@ impl App {
         let mut skip = self.scroll;
         let mut row = 0;
         let buf = f.buffer_mut();
-        for e in &self.entries {
+        for e in entries.iter() {
             if row == self.viewport_lines {
                 break;
             }
@@ -5251,6 +5507,35 @@ fn highlight_selection(f: &mut Frame, area: Rect, sel: Selection) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_agents_events_become_the_same_blocks_as_a_conversation() {
+        use ah_core::abi::{ToolCall, ToolResult};
+        let mut entries: Vec<Entry> = Vec::new();
+        let mut think = None;
+        let call = ToolCall::new("c1", "read_file", "{\"path\":\"a\"}");
+        for ev in [
+            AgentEvent::RequestStart { turn: 1 },
+            AgentEvent::Text("looking".into()),
+            AgentEvent::ToolStart(call.clone()),
+            AgentEvent::ToolEnd {
+                call,
+                result: ToolResult::ok("one line"),
+                duration_ms: 12,
+            },
+        ] {
+            apply_event(&mut entries, &mut think, ev);
+        }
+        assert!(matches!(entries[0].block, Block::Assistant { .. }));
+        let Block::Assistant { text, .. } = &entries[0].block else {
+            unreachable!()
+        };
+        assert_eq!(text, "looking");
+        let Block::Tool { result, .. } = &entries[1].block else {
+            panic!("{:?}", entries.len())
+        };
+        assert_eq!(result.as_ref().unwrap().output, "one line");
+    }
 
     #[test]
     fn the_working_line_says_what_it_is_waiting_for() {

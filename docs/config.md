@@ -406,7 +406,8 @@ themselves.
 | `model` | `""` | model for children whose type names none; empty inherits the session's |
 | `effort` | `""` | reasoning effort for those children; empty inherits |
 | `report_bytes` | `8192` | longest report a child hands back; the middle is dropped |
-| `log_lines` | `200` | tool lines kept per child for the agent view |
+| `log_lines` | `200` | tool lines kept per child for the agent list |
+| `view_bytes` | `262144` | what a child keeps of its own work, so its conversation can be read like the main one |
 | `keep` | `16` | finished children kept, with their conversation, for follow-ups |
 | `wake` | `true` | when a background child ends while the model is idle, start a turn so it can read the report |
 | `allow_model_arg` | `false` | let the model name a model per task instead of taking the type's |

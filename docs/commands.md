@@ -177,11 +177,18 @@ something is running, and an agent's row goes as soon as it reports.
 With an empty input, Down moves the keys from the input into the strip and
 along it, Up moves back out of the top, Enter binds the input and the
 transcript to the highlighted row, Ctrl-K stops the agent it is on, and Esc
-leaves the strip alone. Bound to an agent, the transcript shows what that agent
-is doing and what you type is passed to it — it reads the message before its
-next step. Going back to `main` leaves the agent running; the conversation is
-untouched, because stepping into an agent watches it rather than interrupting
-anything.
+leaves the strip alone. An arrow marks the row the keys are on; `●` the one the
+input belongs to.
+
+Bound to an agent, the screen is that agent's conversation, drawn exactly like
+this one: its brief as the first message, its replies as they arrive, its tool
+calls with the same headers and the same Ctrl-T to open their output. The
+status bar reports that agent — its model, its context, its spend — and the
+prompt reads `a3 ›`. What you type goes to it and it reads the message before
+its next step. Going back to `main` leaves the agent running; the conversation
+is untouched, because stepping into an agent watches it rather than
+interrupting anything. `agents.view_bytes` caps what an agent keeps of its own
+work for this.
 
 An agent's own background commands never appear in the conversation. They are
 in that agent's view, with the rest of what it did.
