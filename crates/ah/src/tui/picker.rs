@@ -1,6 +1,7 @@
 //! Fuzzy list overlay shared by `/model`, `/resume`, `/effort`, `/favorite`,
 //! `/rename` and `/skills`.
 
+use std::borrow::Cow;
 use std::cmp::Reverse;
 
 use ah_core::models;
@@ -72,8 +73,11 @@ pub struct Row {
     pub label: String,
     /// Label colour when the row is not selected.
     pub style: Option<Style>,
-    /// Fixed-width trailing columns.
-    pub cols: Vec<(String, Style)>,
+    /// Fixed-width trailing columns. Borrowed where the text is fixed — the
+    /// model list draws two dozen single-character columns per row, and six
+    /// hundred rows of those would be twelve thousand tiny allocations every
+    /// time the picker opens.
+    pub cols: Vec<(Cow<'static, str>, Style)>,
 }
 
 /// One category in a picker's tab row. `mask` of 0 matches every row.

@@ -44,9 +44,9 @@ pub fn rows(kids: &[Arc<Child>], pal: &Palette) -> Vec<Row> {
                 label: format!("{:>3}  {}  {}", c.id, c.kind, one_line(&c.task)),
                 style: Some(style),
                 cols: vec![
-                    (format!("{:<8}", state_text(c)), style),
-                    (format!("{:>8}", elapsed(c.duration())), pal.dim()),
-                    (format!("{:>4} req", c.requests()), pal.dim()),
+                    (format!("{:<8}", state_text(c)).into(), style),
+                    (format!("{:>8}", elapsed(c.duration())).into(), pal.dim()),
+                    (format!("{:>4} req", c.requests()).into(), pal.dim()),
                 ],
             }
         })

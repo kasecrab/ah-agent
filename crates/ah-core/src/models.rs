@@ -7,20 +7,48 @@ use serde::{Deserialize, Serialize};
 
 use crate::Result;
 
-/// Modalities in display order with their one-letter tags, and the words
-/// OpenRouter uses for them. Plain ASCII so every terminal font renders the
-/// tags at full size.
-pub const MODALITIES: &[(&str, &str)] = &[
-    ("text", "T"),
-    ("image", "I"),
-    ("audio", "A"),
-    ("video", "V"),
-    ("file", "F"),
-    ("speech", "S"),
-    ("transcription", "X"),
-    ("embeddings", "E"),
-    ("rerank", "R"),
+/// Modalities in display order: the word OpenRouter uses, a one-letter tag,
+/// and which side of the arrow it can appear on. Plain ASCII so every terminal
+/// font renders the tags at full size.
+///
+/// The sides are not decoration: nothing takes a rerank as input and nothing
+/// answers with a file, so a grid that offered either would be claiming
+/// something that cannot happen.
+pub const MODALITIES: &[(&str, &str, Side)] = &[
+    ("text", "T", Side::Both),
+    ("image", "I", Side::Both),
+    ("audio", "A", Side::Both),
+    ("video", "V", Side::Both),
+    ("file", "F", Side::In),
+    ("speech", "S", Side::Out),
+    ("transcription", "X", Side::Out),
+    ("embeddings", "E", Side::Out),
+    ("rerank", "R", Side::Out),
 ];
+
+/// Where a modality can appear.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    In,
+    Out,
+    Both,
+}
+
+/// Modalities a model can take, in display order.
+pub fn inputs() -> impl Iterator<Item = (&'static str, &'static str)> {
+    MODALITIES
+        .iter()
+        .filter(|(_, _, s)| matches!(s, Side::In | Side::Both))
+        .map(|(m, i, _)| (*m, *i))
+}
+
+/// Modalities a model can answer with, in display order.
+pub fn outputs() -> impl Iterator<Item = (&'static str, &'static str)> {
+    MODALITIES
+        .iter()
+        .filter(|(_, _, s)| matches!(s, Side::Out | Side::Both))
+        .map(|(m, i, _)| (*m, *i))
+}
 
 /// Bit for anything the table above does not name, so a modality OpenRouter
 /// adds later is still counted rather than silently dropped.
@@ -42,7 +70,7 @@ impl Modalities {
     pub fn bit(name: &str) -> u16 {
         MODALITIES
             .iter()
-            .position(|(m, _)| *m == name)
+            .position(|(m, _, _)| *m == name)
             .map(|i| 1 << i)
             .unwrap_or(OTHER)
     }
@@ -69,7 +97,7 @@ impl Modalities {
             .iter()
             .enumerate()
             .filter(move |(i, _)| self.0 & (1 << i) != 0)
-            .map(|(_, (m, _))| *m)
+            .map(|(_, (m, _, _))| *m)
     }
 
     /// `TIF`, in table order.
@@ -78,7 +106,7 @@ impl Modalities {
             .iter()
             .enumerate()
             .filter(|(i, _)| self.0 & (1 << i) != 0)
-            .map(|(_, (_, t))| *t)
+            .map(|(_, (_, t, _))| *t)
             .collect()
     }
 }
@@ -420,6 +448,25 @@ mod tests {
         assert!(!odd.has("text"));
         assert_eq!(odd.icons(), "");
         assert_eq!(odd.names().count(), 0);
+    }
+
+    #[test]
+    fn a_modality_sits_on_the_side_it_can_appear_on() {
+        let ins: Vec<&str> = inputs().map(|(m, _)| m).collect();
+        let outs: Vec<&str> = outputs().map(|(m, _)| m).collect();
+        // Nothing is fed a rerank, and nothing answers with a file.
+        assert!(ins.contains(&"file") && !outs.contains(&"file"));
+        assert!(outs.contains(&"rerank") && !ins.contains(&"rerank"));
+        assert!(ins.contains(&"text") && outs.contains(&"text"));
+        // Every modality is on at least one side, and the bits still line up
+        // with the table after any reordering.
+        for (name, _, _) in MODALITIES {
+            assert!(
+                ins.contains(name) || outs.contains(name),
+                "{name} is nowhere"
+            );
+            assert!(Modalities::from_names([*name]).has(name));
+        }
     }
 
     #[test]

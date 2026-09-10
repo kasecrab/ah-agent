@@ -49,9 +49,9 @@ pub fn rows(jobs: &[Arc<Job>], pal: &Palette) -> Vec<Row> {
                 label: format!("{:>3}  {}", j.id, j.command.replace('\n', " ")),
                 style: Some(style),
                 cols: vec![
-                    (format!("{:<8}", state_text(j)), style),
-                    (format!("{:>8}", elapsed(j.duration())), pal.dim()),
-                    (format!("{lines:>7} ln"), pal.dim()),
+                    (format!("{:<8}", state_text(j)).into(), style),
+                    (format!("{:>8}", elapsed(j.duration())).into(), pal.dim()),
+                    (format!("{lines:>7} ln").into(), pal.dim()),
                 ],
             }
         })

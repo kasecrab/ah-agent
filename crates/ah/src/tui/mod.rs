@@ -1654,7 +1654,7 @@ impl App {
                         m.id.clone()
                     },
                     cols: vec![
-                        (format!("{ctx:>6} "), pal.dim()),
+                        (format!("{ctx:>6} ").into(), pal.dim()),
                         (
                             // A model that only draws prices nothing under
                             // completion; showing that as $0.00 would read as
@@ -1667,7 +1667,8 @@ impl App {
                                 } else {
                                     m.image_out_per_m
                                 }
-                            ),
+                            )
+                            .into(),
                             pal.dim(),
                         ),
                         (
@@ -1683,18 +1684,20 @@ impl App {
                 if show_modalities {
                     row.cols.push((" ".into(), pal.dim()));
                     let on_style = Style::default().fg(pal.accent);
-                    for (name, icon) in models::MODALITIES {
+                    // Every one of these is a static string, so a row of two
+                    // dozen icon columns allocates nothing at all.
+                    for (name, icon) in models::inputs() {
                         let on = m.accepts(name);
                         row.cols.push((
-                            if on { (*icon).to_string() } else { "·".into() },
+                            if on { icon } else { "·" }.into(),
                             if on { on_style } else { pal.dim() },
                         ));
                     }
                     row.cols.push((models::MODALITY_ARROW.into(), pal.dim()));
-                    for (name, icon) in models::MODALITIES {
+                    for (name, icon) in models::outputs() {
                         let on = m.produces(name);
                         row.cols.push((
-                            if on { (*icon).to_string() } else { "·".into() },
+                            if on { icon } else { "·" }.into(),
                             if on { on_style } else { pal.dim() },
                         ));
                     }
@@ -1762,7 +1765,7 @@ impl App {
                 } else {
                     name.to_string()
                 },
-                cols: vec![(format!("{desc:<24}"), pal.dim())],
+                cols: vec![(format!("{desc:<24}").into(), pal.dim())],
             })
             .collect();
         let title = match (&model, &favorite) {
@@ -1883,7 +1886,7 @@ impl App {
                 } else {
                     (*id).to_string()
                 },
-                cols: vec![(format!("  {about}"), pal.dim())],
+                cols: vec![(format!("  {about}").into(), pal.dim())],
             })
             .collect();
         let mut p = Picker::new(
@@ -1935,11 +1938,11 @@ impl App {
                             // provider means a different unit by it. Printing
                             // a per-token price for them would be a lie, so
                             // the real figure comes from `/usage` instead.
-                            format!("{:>15}", "billed per audio")
+                            format!("{:>15}", "billed per audio").into()
                         } else if m.audio_per_m > 0.0 {
-                            format!("${:>8.2}/M audio", m.audio_per_m)
+                            format!("${:>8.2}/M audio", m.audio_per_m).into()
                         } else {
-                            format!("${:>8.2}/M in   ", m.prompt_per_m)
+                            format!("${:>8.2}/M in   ", m.prompt_per_m).into()
                         },
                         pal.dim(),
                     ),
@@ -1947,7 +1950,7 @@ impl App {
                         if m.transcribes() {
                             "  transcribes ".into()
                         } else {
-                            format!(" ${:<6.2} out", m.completion_per_m)
+                            format!(" ${:<6.2} out", m.completion_per_m).into()
                         },
                         if m.transcribes() {
                             Style::default().fg(pal.accent)
@@ -2044,13 +2047,13 @@ impl App {
                     format!("★ {k}")
                 },
                 cols: vec![
-                    (format!("{:<44.44} ", f.id()), pal.dim()),
+                    (format!("{:<44.44} ", f.id()).into(), pal.dim()),
                     (
-                        format!("{:<8}", f.effort().unwrap_or("")),
+                        format!("{:<8}", f.effort().unwrap_or("")).into(),
                         Style::default().fg(pal.reasoning),
                     ),
                     (
-                        format!("{:<12}", self.icons_for(f.id())),
+                        format!("{:<12}", self.icons_for(f.id())).into(),
                         Style::default().fg(pal.accent),
                     ),
                 ],
@@ -2086,7 +2089,7 @@ impl App {
             id: id.to_string(),
             search: format!("{id} {about}"),
             label: format!("{} {id}", tick(on)),
-            cols: vec![(format!("{about:<40}"), dim)],
+            cols: vec![(format!("{about:<40}").into(), dim)],
         };
         let mut rows = vec![row(
             COLORS,
@@ -2161,9 +2164,9 @@ impl App {
                 search: format!("{} {}", s.name, s.description),
                 label: s.name.clone(),
                 cols: vec![
-                    (format!("{:<40.40} ", s.description), pal.dim()),
+                    (format!("{:<40.40} ", s.description).into(), pal.dim()),
                     (
-                        format!("{:<7}", s.scope),
+                        format!("{:<7}", s.scope).into(),
                         Style::default().fg(if s.scope == "project" {
                             pal.user
                         } else {
@@ -2241,13 +2244,16 @@ impl App {
                     search: format!("{label} {title} {short_cwd} {model} {}", s.id),
                     label,
                     cols: vec![
-                        (format!("{:>8} ", picker::age(s.started_ms)), pal.dim()),
-                        (format!("{:>4} msg ", s.messages), pal.dim()),
                         (
-                            format!("{short_cwd:<16.16} "),
+                            format!("{:>8} ", picker::age(s.started_ms)).into(),
+                            pal.dim(),
+                        ),
+                        (format!("{:>4} msg ", s.messages).into(), pal.dim()),
+                        (
+                            format!("{short_cwd:<16.16} ").into(),
                             Style::default().fg(pal.user),
                         ),
-                        (format!("{model:<20.20}"), pal.dim()),
+                        (format!("{model:<20.20}").into(), pal.dim()),
                     ],
                 }
             })
@@ -2485,7 +2491,7 @@ impl App {
                 cols: if it.detail.is_empty() {
                     Vec::new()
                 } else {
-                    vec![(it.detail.clone(), dim)]
+                    vec![(it.detail.clone().into(), dim)]
                 },
             })
             .collect();
@@ -5057,9 +5063,8 @@ fn model_tab_name(word: &str) -> Option<&'static str> {
     if word == "all" {
         return Some("all");
     }
-    models::MODALITIES
-        .iter()
-        .map(|(m, _)| *m)
+    models::outputs()
+        .map(|(m, _)| m)
         .find(|m| *m == word || tab_label(m) == word)
 }
 
@@ -5074,7 +5079,8 @@ fn model_tabs(masks: &[u16]) -> Vec<picker::Tab> {
         mask: 0,
         count: 0,
     }];
-    tabs.extend(models::MODALITIES.iter().filter_map(|(name, _)| {
+    // Only categories a model can answer with: nothing is picked for its input.
+    tabs.extend(models::outputs().filter_map(|(name, _)| {
         let mask = models::Modalities::bit(name);
         (present & mask != 0).then(|| picker::Tab {
             name: (*name).to_string(),

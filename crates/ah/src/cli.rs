@@ -587,12 +587,9 @@ fn models(
     // The catalogue holds every kind of model, so an unknown word here would
     // quietly list nothing at all.
     if let Some(m) = &modality
-        && !ah_core::models::MODALITIES.iter().any(|(n, _)| n == m)
+        && !ah_core::models::outputs().any(|(n, _)| n == m)
     {
-        let known: Vec<&str> = ah_core::models::MODALITIES
-            .iter()
-            .map(|(n, _)| *n)
-            .collect();
+        let known: Vec<&str> = ah_core::models::outputs().map(|(n, _)| n).collect();
         return Err(format!("unknown modality {m:?}; try one of: {}", known.join(", ")).into());
     }
     let all = ah_core::models::load(base, key.as_deref(), max_age)?;
