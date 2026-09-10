@@ -244,7 +244,8 @@ mod tests {
                 p.set(&[crate::plan::NewTask {
                     title: "write the parser".into(),
                     ..Default::default()
-                }])
+                }])?;
+                Ok(((), true))
             })
             .unwrap();
         assert_eq!(

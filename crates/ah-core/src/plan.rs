@@ -125,6 +125,27 @@ impl Plan {
             .collect()
     }
 
+    /// Everything under `id`, however deep. Dropping a task drops the work
+    /// below it, and that work is not always one level down.
+    fn descendants(&self, id: u16) -> Vec<u16> {
+        let mut out = Vec::new();
+        let mut frontier = self.children(id);
+        let mut depth = 0;
+        while !frontier.is_empty() && depth <= 8 {
+            let mut next = Vec::new();
+            for c in frontier {
+                if c == id || out.contains(&c) {
+                    continue;
+                }
+                out.push(c);
+                next.extend(self.children(c));
+            }
+            frontier = next;
+            depth += 1;
+        }
+        out
+    }
+
     /// Dependencies of `id` that are not finished yet.
     pub fn waiting_for(&self, id: u16) -> Vec<u16> {
         let Some(t) = self.get(id) else {
@@ -185,8 +206,15 @@ impl Plan {
         Ok(ids)
     }
 
-    /// Move tasks to `status`. `note` is attached to each of them.
-    pub fn set_status(&mut self, ids: &[u16], status: Status, note: &str) -> Result<(), String> {
+    /// Move tasks to `status`. `note` is attached to each of them. What comes
+    /// back are the tasks this actually moved, the subtasks a drop took with
+    /// it included — empty when every one of them was already there.
+    pub fn set_status(
+        &mut self,
+        ids: &[u16],
+        status: Status,
+        note: &str,
+    ) -> Result<Vec<u16>, String> {
         for id in ids {
             if self.get(*id).is_none() {
                 return Err(format!("no task {id}"));
@@ -204,9 +232,12 @@ impl Plan {
                 }
             }
             if status == Status::Done {
+                // A subtask finished in this same call is not an open one:
+                // closing a parent and its children together is one move.
                 let open: Vec<u16> = self
                     .children(*id)
                     .into_iter()
+                    .filter(|c| !ids.contains(c))
                     .filter(|c| self.get(*c).is_some_and(|t| !t.status.settled()))
                     .collect();
                 if !open.is_empty() {
@@ -217,13 +248,22 @@ impl Plan {
                 }
             }
         }
+        let mut changed = Vec::new();
         for id in ids {
             let dropping = status == Status::Dropped;
-            let kids = if dropping { self.children(*id) } else { vec![] };
+            let kids = if dropping {
+                self.descendants(*id)
+            } else {
+                vec![]
+            };
             if let Some(t) = self.get_mut(*id) {
+                let moved = t.status != status || (!note.is_empty() && t.note != note);
                 t.status = status;
                 if !note.is_empty() {
                     t.note = note.to_string();
+                }
+                if moved && !changed.contains(id) {
+                    changed.push(*id);
                 }
             }
             for c in kids {
@@ -231,13 +271,17 @@ impl Plan {
                     && !t.status.settled()
                 {
                     t.status = Status::Dropped;
+                    if !changed.contains(&c) {
+                        changed.push(c);
+                    }
                 }
             }
         }
-        Ok(())
+        Ok(changed)
     }
 
-    /// Change one task in place. `None` leaves a field alone.
+    /// Change one task in place. `None` leaves a field alone; the answer says
+    /// whether any of it landed on something different from what was there.
     pub fn update(
         &mut self,
         id: u16,
@@ -245,7 +289,7 @@ impl Plan {
         parent: Option<Option<u16>>,
         needs: Option<Vec<u16>>,
         note: Option<&str>,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         let mut plan = self.clone();
         let Some(t) = plan.get_mut(id) else {
             return Err(format!("no task {id}"));
@@ -266,8 +310,9 @@ impl Plan {
             t.note = n.trim().to_string();
         }
         plan.check()?;
+        let changed = plan != *self;
         *self = plan;
-        Ok(())
+        Ok(changed)
     }
 
     /// Every id refers to a real task, and neither parents nor dependencies
@@ -356,6 +401,25 @@ impl Plan {
         for (id, depth) in self.ordered() {
             out.push('\n');
             out.push_str(&self.line(id, depth));
+        }
+        out
+    }
+
+    /// The summary followed by only the tasks named. A reply about a move
+    /// that touched two tasks has no reason to spell out the other twenty:
+    /// the summary already says how far the work has got and what is next.
+    /// Order and depth come from the whole plan, so a line reads the same
+    /// here as it does in `render`.
+    pub fn render_some(&self, ids: &[u16]) -> String {
+        if self.tasks.is_empty() {
+            return "plan · empty; set one with the plan tool".into();
+        }
+        let mut out = self.summary();
+        for (id, depth) in self.ordered() {
+            if ids.contains(&id) {
+                out.push('\n');
+                out.push_str(&self.line(id, depth));
+            }
         }
         out
     }
@@ -461,26 +525,42 @@ impl Store {
         self.version.load(Ordering::Relaxed)
     }
 
+    /// A copy of the plan, for whoever needs to keep one. Every caller that
+    /// only means to read it wants `with` instead.
     pub fn snapshot(&self) -> Plan {
         self.plan.lock().unwrap().clone()
+    }
+
+    /// Read the plan where it lies. The drawing code runs this on every
+    /// frame, so it copies nothing.
+    pub fn with<T>(&self, f: impl FnOnce(&Plan) -> T) -> T {
+        f(&self.plan.lock().unwrap())
     }
 
     pub fn is_empty(&self) -> bool {
         self.plan.lock().unwrap().is_empty()
     }
 
-    /// Run `f` on the plan; a change bumps the version and wakes the UI.
-    pub fn edit<T>(&self, f: impl FnOnce(&mut Plan) -> Result<T, String>) -> Result<T, String> {
+    /// Run `f` on the plan. It answers with its result and whether the plan
+    /// moved; a move bumps the version and wakes the UI. The mutators know
+    /// what they did, so nothing here has to copy the plan to find out.
+    pub fn edit<T>(
+        &self,
+        f: impl FnOnce(&mut Plan) -> Result<(T, bool), String>,
+    ) -> Result<T, String> {
         let mut guard = self.plan.lock().unwrap();
-        let before = guard.clone();
         let out = f(&mut guard);
-        let changed = *guard != before;
         drop(guard);
-        if changed {
-            self.version.fetch_add(1, Ordering::Relaxed);
-            self.wake();
+        match out {
+            Ok((value, changed)) => {
+                if changed {
+                    self.version.fetch_add(1, Ordering::Relaxed);
+                    self.wake();
+                }
+                Ok(value)
+            }
+            Err(e) => Err(e),
         }
-        out
     }
 
     /// Replace the plan wholesale, as when a session is resumed.
@@ -574,6 +654,59 @@ mod tests {
     }
 
     #[test]
+    fn dropping_a_task_drops_the_work_below_it() {
+        let mut p = Plan::default();
+        p.set(&[
+            new("api", None, &[]),
+            new("routes", Some(1), &[]),
+            new("the get", Some(2), &[]),
+            new("the post", Some(3), &[]),
+        ])
+        .unwrap();
+        assert_eq!(
+            p.set_status(&[1], Status::Dropped, "cut").unwrap(),
+            vec![1, 2, 3, 4]
+        );
+        assert!(p.tasks.iter().all(|t| t.status == Status::Dropped));
+    }
+
+    #[test]
+    fn a_parent_and_its_subtasks_finish_in_one_call() {
+        let mut p = plan();
+        assert_eq!(
+            p.set_status(&[1, 2, 3], Status::Done, "").unwrap(),
+            vec![1, 2, 3]
+        );
+        assert_eq!(p.counts(), (3, 4));
+    }
+
+    #[test]
+    fn moving_a_task_where_it_already_is_moves_nothing() {
+        let mut p = plan();
+        assert_eq!(p.set_status(&[2], Status::Done, "").unwrap(), vec![2]);
+        assert!(p.set_status(&[2], Status::Done, "").unwrap().is_empty());
+        // A note is a change of its own, even when the status is not.
+        assert_eq!(
+            p.set_status(&[2], Status::Done, "12 routes").unwrap(),
+            vec![2]
+        );
+        assert!(!p.update(2, Some("routes"), None, None, None).unwrap());
+        assert!(p.update(2, Some("the routes"), None, None, None).unwrap());
+    }
+
+    #[test]
+    fn a_reply_about_two_tasks_leaves_the_others_out() {
+        let mut p = plan();
+        p.set_status(&[2], Status::Done, "12 routes").unwrap();
+        assert_eq!(
+            p.render_some(&[2, 4]),
+            "plan · 1/4 done · next: 1 api\n\
+             \x20 2   [x] routes · 12 routes\n\
+             \x20 4 [ ] tests · waits for 1"
+        );
+    }
+
+    #[test]
     fn loops_and_dangling_ids_are_refused() {
         let mut p = Plan::default();
         assert!(
@@ -636,11 +769,29 @@ mod tests {
             version: AtomicU64::new(0),
             waker: Mutex::new(None),
         };
-        s.edit(|p| p.set(&[new("a", None, &[])])).unwrap();
+        s.edit(|p| Ok((p.set(&[new("a", None, &[])])?, true)))
+            .unwrap();
         let v = s.version();
-        assert!(s.edit(|p| p.set_status(&[9], Status::Done, "")).is_err());
+        assert!(
+            s.edit(|p| {
+                let moved = p.set_status(&[9], Status::Done, "")?;
+                Ok((moved, true))
+            })
+            .is_err()
+        );
         assert_eq!(s.version(), v);
-        s.edit(|p| p.set_status(&[1], Status::Done, "")).unwrap();
+        let done = |s: &Store| {
+            s.edit(|p| {
+                let moved = p.set_status(&[1], Status::Done, "")?;
+                let changed = !moved.is_empty();
+                Ok((moved, changed))
+            })
+            .unwrap()
+        };
+        assert_eq!(done(&s), vec![1]);
+        assert_eq!(s.version(), v + 1);
+        // Finishing a finished task moves nothing, so nothing redraws.
+        assert!(done(&s).is_empty());
         assert_eq!(s.version(), v + 1);
     }
 }

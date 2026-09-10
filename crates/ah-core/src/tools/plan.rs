@@ -6,6 +6,10 @@ use crate::plan::{self, NewTask, Status};
 
 pub struct PlanTool;
 
+/// What the reply says, and which tasks it shows beneath: `None` for the
+/// whole plan, `Some(ids)` for the summary and just those lines.
+type Reply = (String, Option<Vec<u16>>);
+
 impl Tool for PlanTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec::new(
@@ -15,8 +19,9 @@ impl Tool for PlanTool {
              task you list); `add` appends; `start`, `done` and `drop` move tasks; `update` \
              changes one; `list` shows it. Give a task a `parent` to make it a subtask and \
              `needs` for the tasks that must finish first. Start a task before working on it \
-             and finish it as soon as it is done, one at a time. Every call returns the whole \
-             plan, so read the reply instead of keeping a copy.",
+             and finish it as soon as it is done, one at a time. `set` and `list` answer with \
+             the whole plan and the others with the summary and the tasks they touched, so \
+             read the reply instead of keeping a copy.",
             json!({
                 "type": "object",
                 "properties": {
@@ -52,17 +57,17 @@ impl Tool for PlanTool {
         let action = arg_str(args, "action").unwrap_or("list");
         let note = arg_str(args, "note").unwrap_or("").trim();
         let store = plan::store();
-        let outcome: Result<String, String> = match action {
-            "list" => Ok(String::new()),
+        let outcome: Result<Reply, String> = match action {
+            "list" => Ok((String::new(), None)),
             "set" | "add" => match tasks(args) {
                 Err(e) => Err(e),
                 Ok(items) => store.edit(|p| {
                     if action == "set" {
                         p.set(&items)?;
-                        Ok(format!("plan set: {} task(s)", items.len()))
+                        Ok(((format!("plan set: {} task(s)", items.len()), None), true))
                     } else {
                         let ids = p.add(&items)?;
-                        Ok(format!("added {}", join(&ids)))
+                        Ok(((format!("added {}", join(&ids)), Some(ids)), true))
                     }
                 }),
             },
@@ -77,15 +82,29 @@ impl Tool for PlanTool {
                         _ => Status::Dropped,
                     };
                     store.edit(|p| {
-                        p.set_status(&ids, status, note)?;
-                        Ok(format!("{} {}", status.name(), join(&ids)))
+                        let moved = p.set_status(&ids, status, note)?;
+                        // Saying so beats a reply that looks like work: a
+                        // model told nothing changed stops asking again.
+                        if moved.is_empty() {
+                            let head = format!(
+                                "no change: {} {} already {}",
+                                join(&ids),
+                                if ids.len() == 1 { "is" } else { "are" },
+                                status.name()
+                            );
+                            return Ok(((head, Some(ids.clone())), false));
+                        }
+                        Ok((
+                            (format!("{} {}", status.name(), join(&moved)), Some(moved)),
+                            true,
+                        ))
                     })
                 }
             }
             "update" => match arg_u64(args, "id").map(|n| n as u16) {
                 None => Err("missing `id`".into()),
                 Some(id) => store.edit(|p| {
-                    p.update(
+                    let changed = p.update(
                         id,
                         arg_str(args, "title"),
                         args.get("parent")
@@ -99,17 +118,27 @@ impl Tool for PlanTool {
                         }),
                         (!note.is_empty()).then_some(note),
                     )?;
-                    Ok(format!("updated {id}"))
+                    let head = if changed {
+                        format!("updated {id}")
+                    } else {
+                        format!("no change: {id} already reads that way")
+                    };
+                    Ok(((head, Some(vec![id])), changed))
                 }),
             },
             other => Err(format!(
                 "unknown action `{other}`; use set, add, start, done, drop, update or list"
             )),
         };
-        let view = store.snapshot().render();
+        // A move shows what it moved; anything else, and every error, shows
+        // the whole plan, which is exactly what a model needs to correct itself.
+        let view = match &outcome {
+            Ok((_, Some(ids))) => store.with(|p| p.render_some(ids)),
+            _ => store.with(|p| p.render()),
+        };
         match outcome {
-            Ok(head) if head.is_empty() => ToolResult::ok(view),
-            Ok(head) => ToolResult::ok(format!("{head}\n{view}")),
+            Ok((head, _)) if head.is_empty() => ToolResult::ok(view),
+            Ok((head, _)) => ToolResult::ok(format!("{head}\n{view}")),
             Err(e) => ToolResult::err(format!("{e}\n{view}")),
         }
     }
@@ -211,6 +240,39 @@ mod tests {
         let r = run(json!({"action": "done", "ids": [7]}));
         assert!(r.output.contains("no task 7"), "{}", r.output);
         assert!(!run(json!({"action": "list"})).is_error);
+    }
+
+    #[test]
+    fn a_move_answers_with_what_it_moved_and_not_the_rest() {
+        let _guard = plan::test_lock();
+        run(json!({"action": "set", "tasks": [
+            {"title": "parser"},
+            {"title": "lexer"},
+            {"title": "tests"}
+        ]}));
+        run(json!({"action": "done", "id": 1}));
+
+        let r = run(json!({"action": "done", "id": 2, "note": "hand written"}));
+        assert!(!r.is_error, "{}", r.output);
+        assert!(r.output.contains("done 2"), "{}", r.output);
+        assert!(r.output.contains("lexer"), "{}", r.output);
+        assert!(!r.output.contains("parser"), "{}", r.output);
+
+        // Asking again says so, rather than reading like work that happened.
+        let r = run(json!({"action": "done", "id": 2}));
+        assert!(!r.is_error, "{}", r.output);
+        assert!(
+            r.output.contains("no change: 2 is already done"),
+            "{}",
+            r.output
+        );
+
+        // The whole plan is still there for the asking, and after a bad call.
+        let r = run(json!({"action": "list"}));
+        assert!(r.output.contains("parser"), "{}", r.output);
+        let r = run(json!({"action": "done", "ids": [9]}));
+        assert!(r.is_error);
+        assert!(r.output.contains("parser"), "{}", r.output);
     }
 
     #[test]

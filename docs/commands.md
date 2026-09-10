@@ -233,15 +233,35 @@ without changing it.
 
 Two moves are refused, because they are the ones that quietly put a plan out
 of order: starting a task whose dependencies are unfinished, and finishing a
-task whose subtasks are still open. Dropping a task drops its subtasks, and a
-dropped task no longer blocks whatever waited for it. Every call returns the
-whole plan:
+task whose subtasks are still open — though naming a parent and its subtasks
+in the same call is fine, since that finishes them together. Dropping a task
+drops the work below it however deep it goes, and a dropped task no longer
+blocks whatever waited for it.
+
+`set` and `list` answer with the whole plan:
 
 ```
 plan · 1/3 done · doing: 2 read the [tools] table
   1 [ ] parse the config file
   2   [>] read the [tools] table
   3 [ ] tests for the parser · waits for 1
+```
+
+The other actions answer with the summary and only the tasks they touched,
+which keeps a plan worked through over twenty calls from being written out
+twenty times:
+
+```
+done 2
+plan · 2/3 done · next: 3 tests for the parser
+  2   [x] read the [tools] table · 40 lines
+```
+
+A move that finds the task already where it was asked to go says so instead,
+so a model that has lost track stops repeating itself:
+
+```
+no change: 2 is already done
 ```
 
 The plan is stored with the session, so `ah -r` resumes it. In the TUI, the
