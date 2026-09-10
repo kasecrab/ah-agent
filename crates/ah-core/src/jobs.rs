@@ -16,27 +16,27 @@ use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Who has already been told that a job finished. A job belongs to one agent —
-/// the main one is 0, a subagent its own id — so `Model` carries whose news it
-/// is and one bit is enough for all of them.
+/// the main one is 0, a subagent its own id — so both audiences carry whose
+/// news it is, and one bit each is enough for all of them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Audience {
     Model(u32),
-    Ui,
+    /// The screen, for that agent's own view: the main conversation is 0.
+    Ui(u32),
 }
 
 impl Audience {
     fn bit(self) -> u32 {
         match self {
             Audience::Model(_) => 1,
-            Audience::Ui => 2,
+            Audience::Ui(_) => 2,
         }
     }
 
     /// Whether this job is any of that audience's business.
     fn covers(self, job: &Job) -> bool {
         match self {
-            Audience::Model(owner) => job.owner() == owner,
-            Audience::Ui => true,
+            Audience::Model(owner) | Audience::Ui(owner) => job.owner() == owner,
         }
     }
 }
@@ -651,7 +651,7 @@ mod tests {
         assert!(!table().unheard(Audience::Model(0)));
         assert!(
             table()
-                .notices(Audience::Ui)
+                .notices(Audience::Ui(0))
                 .iter()
                 .any(|n| n.starts_with(&mine))
         );
@@ -686,6 +686,22 @@ mod tests {
         let theirs_heard = t.notices(Audience::Model(7));
         assert_eq!(theirs_heard.len(), 1, "{theirs_heard:?}");
         assert!(theirs_heard[0].starts_with(&format!("job {} exited 0", theirs.id)));
+    }
+
+    #[test]
+    fn the_screen_is_told_about_its_own_agents_jobs_only() {
+        let t = own_table();
+        let mine = t.spawn("sh", "true", &cwd(), 65536, 0).unwrap();
+        let theirs = t.spawn("sh", "true", &cwd(), 65536, 7).unwrap();
+        assert!(mine.wait(Duration::from_secs(5)));
+        assert!(theirs.wait(Duration::from_secs(5)));
+
+        let main = t.notices(Audience::Ui(0));
+        assert_eq!(main.len(), 1, "{main:?}");
+        assert!(main[0].starts_with(&format!("job {} exited 0", mine.id)));
+        // The subagent's job is still news to the view of that agent.
+        assert!(t.unheard(Audience::Ui(7)));
+        assert_eq!(t.notices(Audience::Ui(7)).len(), 1);
     }
 
     #[test]

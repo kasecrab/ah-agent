@@ -23,26 +23,26 @@ use crate::agent::{Agent, AgentEvent, AgentIo, Mailbox, NoHooks};
 use crate::provider::Provider;
 use crate::tools::Registry;
 
-/// Who has already been told that a child finished: the model it belongs to,
-/// or the screen.
+/// Who has already been told that a child finished: the agent it belongs to,
+/// or the screen showing that agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Audience {
     Model(u32),
-    Ui,
+    /// The screen, for that agent's own view: the main conversation is 0.
+    Ui(u32),
 }
 
 impl Audience {
     fn bit(self) -> u32 {
         match self {
             Audience::Model(_) => 1,
-            Audience::Ui => 2,
+            Audience::Ui(_) => 2,
         }
     }
 
     fn covers(self, child: &Child) -> bool {
         match self {
-            Audience::Model(parent) => child.parent == parent,
-            Audience::Ui => true,
+            Audience::Model(parent) | Audience::Ui(parent) => child.parent == parent,
         }
     }
 }
@@ -178,12 +178,15 @@ impl Child {
     /// within a tick of the stream it is reading.
     pub fn cancel(&self) {
         self.cancel.store(true, Ordering::Relaxed);
+        self.note("stopping".to_string());
     }
 
     /// Something to read before its next request. The user typing at a child
     /// and the model's `agents say` both land here.
     pub fn say(&self, text: impl Into<String>) {
-        self.inbox.lock().unwrap().push(text.into());
+        let text = text.into();
+        self.note(format!("told: {}", text.lines().next().unwrap_or("")));
+        self.inbox.lock().unwrap().push(text);
         self.bump();
     }
 
@@ -235,7 +238,10 @@ impl Child {
         table().wake();
     }
 
-    fn note(&self, line: String) {
+    /// Add a line to what this agent has done. Its own steps land here, and so
+    /// does anything the user or the agent above it says to it: an agent's view
+    /// is the only place that news belongs.
+    pub fn note(&self, line: String) {
         {
             let mut log = self.log.lock().unwrap();
             log.push_back(line.clone());
@@ -283,6 +289,23 @@ pub struct Agents {
     /// Children started in this process, ever. Caps are counted on this rather
     /// than on the table, which forgets the old ones.
     started: AtomicU32,
+    /// Children an agent is blocked on right now. The screen says "waiting for
+    /// agents" on the strength of this, so it counts what a caller is actually
+    /// stuck behind, not what merely happens to be running.
+    waiting: AtomicU32,
+}
+
+/// A caller waiting on children, counted while it waits. Dropping it stops
+/// the count, whether the wait ended, timed out or was cancelled.
+pub struct Waiting {
+    table: &'static Agents,
+    n: u32,
+}
+
+impl Drop for Waiting {
+    fn drop(&mut self) {
+        self.table.waiting.fetch_sub(self.n, Ordering::Relaxed);
+    }
 }
 
 /// The table for this process. Children belong to the run, so there is one.
@@ -296,10 +319,23 @@ pub fn table() -> &'static Agents {
         pending: AtomicBool::new(false),
         spent: Mutex::new(Usage::default()),
         started: AtomicU32::new(0),
+        waiting: AtomicU32::new(0),
     })
 }
 
 impl Agents {
+    /// How many children somebody is blocked on. Zero while the agents run in
+    /// the background and nobody is waiting.
+    pub fn waiting(&self) -> u32 {
+        self.waiting.load(Ordering::Relaxed)
+    }
+
+    /// Count `n` children as waited on until the guard is dropped.
+    pub fn waiting_on(&'static self, n: u32) -> Waiting {
+        self.waiting.fetch_add(n, Ordering::Relaxed);
+        Waiting { table: self, n }
+    }
+
     pub fn get(&self, id: u32) -> Option<Arc<Child>> {
         self.kids
             .lock()
@@ -1167,6 +1203,42 @@ mod tests {
         child.cancel();
         assert!(child.wait(Duration::from_secs(5)), "cancel did not stop it");
         assert_eq!(child.state(), State::Cancelled);
+    }
+
+    #[test]
+    fn waiting_counts_only_while_somebody_waits() {
+        let _guard = test_lock();
+        assert_eq!(table().waiting(), 0);
+        {
+            let _held = table().waiting_on(2);
+            assert_eq!(table().waiting(), 2);
+        }
+        assert_eq!(table().waiting(), 0);
+    }
+
+    #[test]
+    fn what_a_child_is_told_shows_in_its_own_log() {
+        let _guard = test_lock();
+        let provider = Arc::new(MockProvider::new(vec![says("ok")]));
+        let s = spawner_with(provider, settings());
+        let child = s
+            .spawn(SpawnRequest {
+                kind: String::new(),
+                task: "wait".into(),
+                cwd: None,
+                model: None,
+            })
+            .unwrap();
+        child.say("look at sse.rs too");
+        assert!(child.wait(Duration::from_secs(5)));
+        assert!(
+            child
+                .log(50)
+                .iter()
+                .any(|l| l.contains("look at sse.rs too")),
+            "{:?}",
+            child.log(50)
+        );
     }
 
     #[test]

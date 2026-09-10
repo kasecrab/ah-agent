@@ -156,7 +156,10 @@ impl Tool for AgentTool {
             .unwrap_or(self.timeout_ms)
             .max(1);
         let ids: Vec<u32> = started.iter().map(|c| c.id).collect();
-        table().wait_any(&ids, true, Duration::from_millis(ms), ctx.cancel);
+        {
+            let _waiting = table().waiting_on(ids.len() as u32);
+            table().wait_any(&ids, true, Duration::from_millis(ms), ctx.cancel);
+        }
 
         if ctx.cancel.load(std::sync::atomic::Ordering::Relaxed) {
             for c in &started {
@@ -249,7 +252,10 @@ impl Tool for AgentsTool {
                     .unwrap_or(self.timeout_ms)
                     .max(1);
                 let ids: Vec<u32> = picked.iter().map(|c| c.id).collect();
-                t.wait_any(&ids, all, Duration::from_millis(ms), ctx.cancel);
+                {
+                    let _waiting = t.waiting_on(ids.len() as u32);
+                    t.wait_any(&ids, all, Duration::from_millis(ms), ctx.cancel);
+                }
                 if ctx.cancel.load(std::sync::atomic::Ordering::Relaxed) {
                     return ToolResult::err("[cancelled by user]");
                 }

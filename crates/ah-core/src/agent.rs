@@ -657,11 +657,21 @@ impl<'a> Agent<'a> {
                 for note in
                     crate::jobs::table().notices(crate::jobs::Audience::Model(self.agent_id))
                 {
+                    // A subagent's commands are its own business: the screen
+                    // shows them in that agent's view, not in the conversation
+                    // the user is having. The main loop's news goes out the
+                    // other way, from the table straight to the transcript.
+                    if self.agent_id != 0 {
+                        io.emit(AgentEvent::Notice(note.clone()));
+                    }
                     messages.push(Message::user(format!("[background] {note}")));
                 }
                 for note in
                     crate::agents::table().notices(crate::agents::Audience::Model(self.agent_id))
                 {
+                    if self.agent_id != 0 {
+                        io.emit(AgentEvent::Notice(note.clone()));
+                    }
                     messages.push(Message::user(format!("[agent] {note}")));
                 }
             }

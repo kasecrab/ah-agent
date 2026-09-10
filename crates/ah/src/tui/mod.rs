@@ -3283,7 +3283,7 @@ impl App {
     fn jobs_changed(&mut self) {
         let table = ah_core::jobs::table();
         table.caught_up();
-        for n in table.notices(ah_core::jobs::Audience::Ui) {
+        for n in table.notices(ah_core::jobs::Audience::Ui(0)) {
             self.push(Block::Notice(n));
         }
         // A job that ended while nothing was running gets the model's
@@ -3318,7 +3318,7 @@ impl App {
             self.usage.add(&spent);
             self.stats.add_usage("agents", &spent);
         }
-        for n in table.notices(ah_core::agents::Audience::Ui) {
+        for n in table.notices(ah_core::agents::Audience::Ui(0)) {
             self.push(Block::Notice(n));
         }
         if !self.busy
