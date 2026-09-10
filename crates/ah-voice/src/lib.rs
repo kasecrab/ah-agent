@@ -10,6 +10,8 @@
 //! is nothing at all: no thread, no buffer, no open device.
 
 pub mod capture;
+#[cfg(feature = "live")]
+pub mod deepgram;
 pub mod filter;
 pub mod resample;
 pub mod ring;

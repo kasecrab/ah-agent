@@ -5,11 +5,19 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = ["mic"]
+default = ["mic", "live"]
 # Capture from the system microphone. Without it only `voice.capture_cmd`
 # works, and nothing links an audio library.
 mic = ["dep:cpal"]
+# Deepgram's live socket: words back while the sentence is still being said.
+live = ["dep:tungstenite", "dep:rustls", "dep:webpki-roots"]
 
 [dependencies]
 ah-abi = { path = "../ah-abi" }
 cpal = { version = "0.18", optional = true, default-features = false }
+# `__rustls-tls` rather than `rustls-tls-webpki-roots`: the root store is
+# supplied from the copy `ureq` already pulls in, instead of bundling a
+# second one.
+tungstenite = { version = "0.30", optional = true, default-features = false, features = ["handshake", "__rustls-tls"] }
+rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = { version = "1", optional = true }
