@@ -4167,8 +4167,8 @@ impl App {
         let v = self.voice.as_ref()?;
         let mut out = Vec::new();
         if v.listening() {
-            let secs = 0;
-            let _ = secs;
+            // While the key is down there is one thing worth saying, so it
+            // takes the whole chip rather than being added beside the rest.
             out.push(Span::styled("● ", Style::default().fg(pal.accent)));
             out.push(Span::styled("listening", pal.bold(pal.accent)));
             if self.settings().voice.meter {
@@ -4180,20 +4180,22 @@ impl App {
             }
         } else {
             out.push(Span::styled("○ ", pal.dim()));
-            // On the live route the socket is what makes the first word
-            // instant, so say when it is up rather than only that the
-            // microphone is.
-            let ready = if v.is_live() && v.live_ready() {
-                " · socket up"
-            } else if v.is_live() {
-                " · connecting"
-            } else {
-                ""
-            };
             out.push(Span::styled(
-                format!("mic on · hold {}{ready}", self.talk_key_name()),
+                format!("hold {}", self.talk_key_name()),
                 pal.dim(),
             ));
+            // On the live route the socket is what makes the first word
+            // instant, so whether it is up is worth a word of its own.
+            if let Some(link) = v.link() {
+                let (text, style) = match link {
+                    ah_voice::deepgram::Link::Connected => (" · connected", pal.dim()),
+                    ah_voice::deepgram::Link::Connecting => (" · connecting", pal.dim()),
+                    ah_voice::deepgram::Link::Failed => {
+                        (" · connection failed", Style::default().fg(pal.error))
+                    }
+                };
+                out.push(Span::styled(text, style));
+            }
         }
         if self.settings().voice.show_cost && v.cost > 0.0 {
             out.push(Span::styled(format!(" ${:.4}", v.cost), pal.dim()));

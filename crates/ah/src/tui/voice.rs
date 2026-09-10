@@ -563,9 +563,9 @@ impl Session {
         self.live.is_some()
     }
 
-    /// The socket is up, so the next phrase costs no handshake.
-    pub fn live_ready(&self) -> bool {
-        self.live.as_ref().is_some_and(|l| l.connected())
+    /// How the socket to Deepgram is doing, when there is one.
+    pub fn link(&self) -> Option<deepgram::Link> {
+        self.live.as_ref().map(|l| l.link())
     }
 
     pub fn live_event(&mut self, ev: deepgram::Event) {

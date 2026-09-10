@@ -55,6 +55,16 @@ pub enum Event {
     Trouble(String),
 }
 
+/// How the socket is doing, for whatever is telling the user about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Link {
+    /// Not up yet, and no reason to think it will not be.
+    Connecting,
+    Connected,
+    /// The last attempt failed. It will be tried again.
+    Failed,
+}
+
 #[derive(Debug)]
 pub enum Error {
     Config(String),
@@ -81,6 +91,7 @@ pub struct Live {
     /// instead of waiting for the endpointing silence to elapse.
     flush: Arc<AtomicBool>,
     connected: Arc<AtomicBool>,
+    failed: Arc<AtomicBool>,
 }
 
 impl Live {
@@ -97,11 +108,17 @@ impl Live {
         let listening = Arc::new(AtomicBool::new(false));
         let flush = Arc::new(AtomicBool::new(false));
         let connected = Arc::new(AtomicBool::new(false));
+        let failed = Arc::new(AtomicBool::new(false));
         let (stop_tx, stop_rx) = mpsc::channel::<()>();
-        let (l, fl, c) = (listening.clone(), flush.clone(), connected.clone());
+        let (l, fl, c, f) = (
+            listening.clone(),
+            flush.clone(),
+            connected.clone(),
+            failed.clone(),
+        );
         let thread = std::thread::Builder::new()
             .name("ah-voice-dg".into())
-            .spawn(move || run(cfg, audio, l, fl, c, stop_rx, on))
+            .spawn(move || run(cfg, audio, l, fl, c, f, stop_rx, on))
             .map_err(|e| Error::Connect(e.to_string()))?;
         Ok(Self {
             stop: Some(stop_tx),
@@ -109,6 +126,7 @@ impl Live {
             listening,
             flush,
             connected,
+            failed,
         })
     }
 
@@ -128,8 +146,14 @@ impl Live {
         }
     }
 
-    pub fn connected(&self) -> bool {
-        self.connected.load(Ordering::Acquire)
+    pub fn link(&self) -> Link {
+        if self.connected.load(Ordering::Acquire) {
+            Link::Connected
+        } else if self.failed.load(Ordering::Acquire) {
+            Link::Failed
+        } else {
+            Link::Connecting
+        }
     }
 }
 
@@ -159,6 +183,7 @@ fn run(
     listening: Arc<AtomicBool>,
     flush: Arc<AtomicBool>,
     connected: Arc<AtomicBool>,
+    failed: Arc<AtomicBool>,
     stop: mpsc::Receiver<()>,
     on: impl Fn(Event),
 ) {
@@ -202,6 +227,7 @@ fn run(
                 Ok(ws) => {
                     socket = Some(ws);
                     connected.store(true, Ordering::Release);
+                    failed.store(false, Ordering::Release);
                     backoff = BACKOFF_MIN;
                     retry_at = None;
                     last_send = Instant::now();
@@ -211,6 +237,7 @@ fn run(
                 }
                 Err(e) => {
                     on(Event::Trouble(e.to_string()));
+                    failed.store(true, Ordering::Release);
                     retry_at = Some(Instant::now() + backoff);
                     backoff = (backoff * 2).min(BACKOFF_MAX);
                     audio.keep_last(0);

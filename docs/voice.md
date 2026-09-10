@@ -185,16 +185,34 @@ is a shell command, it is read from `~/.config/ah/config.toml` or
 
 ## The talk key on your terminal
 
-Holding a key is only visible if the terminal reports the release, which needs
-the kitty keyboard protocol. `ah` works out what it has on the first press:
+Holding a key looks different depending on what the terminal reports, so `ah`
+works it out rather than assuming.
 
-1. A release arrives — hold to talk, as intended.
-2. No release, but repeats while held — a gap in the repeats ends the phrase.
-3. Neither — the key toggles instead, and `ah` says so once.
+- **A release is reported.** Press starts, release stops. Exact, and nothing
+  is timed.
+- **No release.** A held key arrives as the same key pressed again and again,
+  at whatever rate the keyboard repeats. `ah` treats every one of those as the
+  key still being down, and a silence as letting go. The silence it waits for
+  starts at `voice.release_grace_ms` — wide, because a keyboard stays quiet for
+  half a second before it starts repeating — and narrows to a fraction of the
+  repeat rate as soon as that rate has been seen. A tap ends after the wide
+  gap; a hold ends about a tenth of a second after the key comes up.
 
-`voice.hotkey_mode` forces one of `push_to_talk` or `toggle` instead of
-working it out. In toggle mode `voice.max_listen_secs` stops a microphone left
-on by accident.
+Either way a held key is one phrase. It is never treated as a series of
+presses that turn dictation on and off.
+
+Key releases need the kitty keyboard protocol. Most terminals that support it
+have it on; **WezTerm does not**, so add this to `wezterm.lua` if you want the
+exact version rather than the gap-timed one:
+
+```lua
+enable_kitty_keyboard = true,
+```
+
+`voice.hotkey_mode` overrides the lot: `push_to_talk` insists on releases (and
+still falls back to the gap if none arrive, rather than never stopping), and
+`toggle` makes the key start and stop dictation on alternate presses, bounded
+by `voice.max_listen_secs`.
 
 ## What it costs when it is off
 
