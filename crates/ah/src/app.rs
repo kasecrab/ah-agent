@@ -290,10 +290,7 @@ impl Engine {
     /// `None` without an API key.
     fn agent<'a>(&'a mut self, no_hooks: &'a mut NoHooks, window: u64) -> Option<Agent<'a>> {
         // Read before the borrow below, which takes the whole struct apart.
-        let modalities = self
-            .model_info()
-            .map(|i| i.output_modalities.clone())
-            .unwrap_or_default();
+        let modalities = self.model_info().map(|i| i.output).unwrap_or_default();
         let Self {
             provider,
             registry,

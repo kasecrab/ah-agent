@@ -14,8 +14,8 @@ use std::time::{Duration, Instant};
 
 use ah_abi::{ChatRequest, Message, VoiceSettings};
 use ah_core::provider::openrouter::OpenRouter;
-use ah_voice::deepgram;
 use ah_core::provider::{Provider, StreamEvent};
+use ah_voice::deepgram;
 
 use super::Msg;
 
@@ -143,7 +143,8 @@ impl Session {
                 .ok_or("no Deepgram API key: run /voice and choose Deepgram again")?;
             // Two seconds of headroom between the microphone thread and the
             // socket thread, which is far more than either needs.
-            let (producer, consumer) = ah_voice::ring::ring(ah_voice::resample::TARGET_RATE as usize * 2);
+            let (producer, consumer) =
+                ah_voice::ring::ring(ah_voice::resample::TARGET_RATE as usize * 2);
             let live_tx = tx.clone();
             let live = deepgram::Live::open(
                 deepgram::Config {

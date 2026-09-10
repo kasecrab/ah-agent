@@ -308,7 +308,7 @@ struct App {
     /// Messages typed while a turn ran; sent one per turn once it ends.
     queue: std::collections::VecDeque<(String, Vec<String>)>,
     /// Input modalities of the current model from the catalogue.
-    modalities: Vec<String>,
+    modalities: models::Modalities,
     /// `TI→T` for the current model, empty when unknown.
     modality_icons: String,
     /// A catalogue fetch is in flight.
@@ -505,7 +505,7 @@ fn run_inner(
         entries: Vec::new(),
         editor: Editor::default(),
         queue: std::collections::VecDeque::new(),
-        modalities: Vec::new(),
+        modalities: models::Modalities::default(),
         modality_icons: String::new(),
         fetching_models: false,
         scroll: 0,
@@ -844,7 +844,7 @@ impl App {
         } else {
             info.map(|m| m.context_length).unwrap_or(0)
         };
-        self.modalities = info.map(|m| m.input_modalities.clone()).unwrap_or_default();
+        self.modalities = info.map(|m| m.input).unwrap_or_default();
         self.modality_icons = info.map(|m| m.modality_icons()).unwrap_or_default();
     }
 
@@ -1229,7 +1229,7 @@ impl App {
     /// Ctrl-V: attach the clipboard image to the draft.
     fn paste_image(&mut self) {
         let model = self.settings().model.id.clone();
-        if !self.modalities.is_empty() && !self.modalities.iter().any(|m| m == "image") {
+        if !self.modalities.is_empty() && !self.modalities.has("image") {
             self.push(Block::Notice(format!(
                 "{model} doesn't accept images as input (see /model)"
             )));
@@ -1778,7 +1778,12 @@ impl App {
                 )],
             },
         ];
-        let mut p = Picker::new(Kind::VoiceProvider, "who transcribes · Enter select", "", rows);
+        let mut p = Picker::new(
+            Kind::VoiceProvider,
+            "who transcribes · Enter select",
+            "",
+            rows,
+        );
         p.hotkeys = true;
         p.hint = "Deepgram opens a socket and answers while you are still talking. \
                   OpenRouter sends each phrase when you pause."
@@ -1830,7 +1835,10 @@ impl App {
             ("nova-3", "the current one: best accuracy, 30-odd languages"),
             ("nova-3-medical", "clinical vocabulary"),
             ("nova-2", "the one before it, a little cheaper"),
-            ("nova-2-meeting", "several people, a room away from the microphone"),
+            (
+                "nova-2-meeting",
+                "several people, a room away from the microphone",
+            ),
             ("nova-2-phonecall", "narrowband audio"),
             ("nova-2-medical", "clinical vocabulary, older model"),
             ("enhanced", "older still"),
@@ -1929,10 +1937,9 @@ impl App {
             query,
             rows,
         );
-        p.hint =
-            "models marked `transcribes` answer on the speech endpoint: better at the job, \
+        p.hint = "models marked `transcribes` answer on the speech endpoint: better at the job, \
              but no streaming and no sentence context. `/usage` shows what a phrase cost"
-                .into();
+            .into();
         if empty && !stale {
             p.error = Some(
                 "no model in the catalogue takes audio input; Ctrl-R refreshes the list".into(),

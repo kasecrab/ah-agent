@@ -267,7 +267,7 @@ pub struct Agent<'a> {
     /// empty when it does not list the model. The agent never reads the
     /// catalogue itself; the caller, which already has it for the context
     /// window, passes it in.
-    pub output_modalities: Vec<String>,
+    pub output_modalities: crate::models::Modalities,
     /// Where generated images are written. `None` turns the feature off, which
     /// is what a caller with nowhere to put a file wants.
     pub image_dir: Option<PathBuf>,
@@ -305,7 +305,7 @@ impl<'a> Agent<'a> {
             notices: true,
             mailbox: None,
             spawner: None,
-            output_modalities: Vec::new(),
+            output_modalities: crate::models::Modalities::EMPTY,
             image_dir: None,
             plan_seen: 0,
             plan_quiet: 0,
@@ -324,14 +324,14 @@ impl<'a> Agent<'a> {
             // Unknown means no. Asking a model that cannot draw for images is
             // an error on some providers, and a catalogue that has not been
             // fetched yet is the normal state for the first second of a run.
-            ImageOutput::Auto => self.output_modalities.iter().any(|m| m == "image"),
+            ImageOutput::Auto => self.output_modalities.has("image"),
         };
         if !wanted {
             return Vec::new();
         }
         let text = self.settings.images.output == ImageOutput::Always
             || self.output_modalities.is_empty()
-            || self.output_modalities.iter().any(|m| m == "text");
+            || self.output_modalities.has("text");
         if text {
             vec!["image".into(), "text".into()]
         } else {
@@ -1304,7 +1304,7 @@ mod tests {
         );
         a.notices = false;
         a.image_dir = Some(dir.to_path_buf());
-        a.output_modalities = modalities.iter().map(|s| String::from(*s)).collect();
+        a.output_modalities = crate::models::Modalities::from_names(modalities.iter().copied());
         a
     }
 

@@ -7,6 +7,82 @@ use serde::{Deserialize, Serialize};
 
 use crate::Result;
 
+/// Modalities in display order with their one-letter tags, and the words
+/// OpenRouter uses for them. Plain ASCII so every terminal font renders the
+/// tags at full size.
+pub const MODALITIES: &[(&str, &str)] = &[
+    ("text", "T"),
+    ("image", "I"),
+    ("audio", "A"),
+    ("video", "V"),
+    ("file", "F"),
+    ("speech", "S"),
+    ("transcription", "X"),
+    ("embeddings", "E"),
+    ("rerank", "R"),
+];
+
+/// Bit for anything the table above does not name, so a modality OpenRouter
+/// adds later is still counted rather than silently dropped.
+const OTHER: u16 = 1 << 15;
+
+/// A set of modalities, one bit each.
+///
+/// The catalogue is nearly six hundred models and every one of them used to
+/// carry two `Vec<String>` — some twelve hundred allocations to answer
+/// questions like "does this model draw?". A `u16` answers them with an `and`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Modalities(u16);
+
+impl Modalities {
+    pub const EMPTY: Self = Self(0);
+
+    /// The bit for one modality name, or [`OTHER`] for a name not in the table.
+    pub fn bit(name: &str) -> u16 {
+        MODALITIES
+            .iter()
+            .position(|(m, _)| *m == name)
+            .map(|i| 1 << i)
+            .unwrap_or(OTHER)
+    }
+
+    pub fn from_names<'a>(names: impl IntoIterator<Item = &'a str>) -> Self {
+        Self(names.into_iter().fold(0, |acc, n| acc | Self::bit(n)))
+    }
+
+    pub fn has(self, name: &str) -> bool {
+        self.0 & Self::bit(name) != 0
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    pub fn bits(self) -> u16 {
+        self.0
+    }
+
+    /// The names in table order. `other` is not named: there is no word for it.
+    pub fn names(self) -> impl Iterator<Item = &'static str> {
+        MODALITIES
+            .iter()
+            .enumerate()
+            .filter(move |(i, _)| self.0 & (1 << i) != 0)
+            .map(|(_, (m, _))| *m)
+    }
+
+    /// `TIF`, in table order.
+    pub fn icons(self) -> String {
+        MODALITIES
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| self.0 & (1 << i) != 0)
+            .map(|(_, (_, t))| *t)
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ModelInfo {
     pub id: String,
@@ -23,24 +99,28 @@ pub struct ModelInfo {
     /// spread between models is wide enough that picking blind is expensive.
     #[serde(default)]
     pub audio_per_m: f64,
+    /// USD per million image output tokens. A model that only draws prices
+    /// nothing under `completion`, so without this it reads as free.
+    #[serde(default)]
+    pub image_out_per_m: f64,
     #[serde(default)]
     pub tools: bool,
     #[serde(default)]
     pub reasoning: bool,
-    /// `text`, `image`, `audio`, `video`, `file` as OpenRouter reports them.
+    /// What the model takes and what it gives back, as OpenRouter reports it.
     #[serde(default)]
-    pub input_modalities: Vec<String>,
+    pub input: Modalities,
     #[serde(default)]
-    pub output_modalities: Vec<String>,
+    pub output: Modalities,
 }
 
 impl ModelInfo {
     pub fn accepts(&self, modality: &str) -> bool {
-        self.input_modalities.iter().any(|m| m == modality)
+        self.input.has(modality)
     }
 
     pub fn produces(&self, modality: &str) -> bool {
-        self.output_modalities.iter().any(|m| m == modality)
+        self.output.has(modality)
     }
 
     /// A speech-to-text model: it answers on `/audio/transcriptions`, not
@@ -49,37 +129,25 @@ impl ModelInfo {
         self.produces("transcription")
     }
 
+    /// True for a model there is any point talking to: one that answers with
+    /// words or with a picture. Everything else in the catalogue — embeddings,
+    /// rerank, video, speech — is a different kind of thing entirely.
+    pub fn chats(&self) -> bool {
+        (self.produces("text") || self.produces("image")) && !self.transcribes()
+    }
+
     /// `TIF→T`: input tags, arrow, output tags.
     pub fn modality_icons(&self) -> String {
-        modality_icons(&self.input_modalities, &self.output_modalities)
+        modality_icons(self.input, self.output)
     }
 }
-
-/// Modalities in display order with their one-letter tags. Plain ASCII so
-/// every terminal font renders them at full size.
-pub const MODALITIES: &[(&str, &str)] = &[
-    ("text", "T"),
-    ("image", "I"),
-    ("audio", "A"),
-    ("video", "V"),
-    ("file", "F"),
-];
 
 /// Separates input from output icons.
 pub const MODALITY_ARROW: &str = "→";
 
-fn icons(mods: &[String]) -> String {
-    MODALITIES
-        .iter()
-        .filter(|(m, _)| mods.iter().any(|x| x == m))
-        .map(|(_, i)| *i)
-        .collect()
-}
-
-/// `TIF→T`; only the input half when outputs are unknown, empty when both
-/// are.
-pub fn modality_icons(input: &[String], output: &[String]) -> String {
-    let (i, o) = (icons(input), icons(output));
+/// `TIF→T`; only the input half when outputs are unknown, empty when both are.
+pub fn modality_icons(input: Modalities, output: Modalities) -> String {
+    let (i, o) = (input.icons(), output.icons());
     match (i.is_empty(), o.is_empty()) {
         (true, true) => String::new(),
         (_, true) => i,
@@ -88,7 +156,7 @@ pub fn modality_icons(input: &[String], output: &[String]) -> String {
 }
 
 /// Bumped when `ModelInfo` gains fields; older caches are refetched.
-const CACHE_VERSION: u32 = 5;
+const CACHE_VERSION: u32 = 6;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Cache {
@@ -134,22 +202,23 @@ pub fn save_cache(models: &[ModelInfo]) -> Result<()> {
     Ok(())
 }
 
-/// Fetch `/models` from the API and refresh the cache.
+/// Fetch the catalogue from the API and refresh the cache.
+///
+/// `/models` on its own answers with the text category alone — four hundred
+/// odd models — and everything that draws, speaks, transcribes, embeds or
+/// reranks is missing from it. `output_modalities=all` asks for the lot.
 pub fn fetch(base_url: &str, api_key: Option<&str>) -> Result<Vec<ModelInfo>> {
     let client = crate::provider::openrouter::OpenRouter::new(base_url, api_key.unwrap_or(""));
-    let v = client.get_json("/models")?;
-    let mut models: Vec<ModelInfo> = parse(&v);
-    // Speech-to-text models are left out of the unfiltered list, so they have
-    // to be asked for by name. Dictation is the only thing that uses them, and
-    // without this they cannot be picked at all.
-    match client.get_json("/models?output_modalities=transcription") {
-        Ok(v) => {
-            let known: std::collections::HashSet<String> =
-                models.iter().map(|m| m.id.clone()).collect();
-            models.extend(parse(&v).into_iter().filter(|m| !known.contains(&m.id)));
+    let v = match client.get_json("/models?output_modalities=all") {
+        Ok(v) => v,
+        // A proxy that does not know the parameter still owes us the models it
+        // does list, which is what ah had before it asked for the rest.
+        Err(e) => {
+            crate::debug!("full catalogue unavailable ({e}); asking for the default one");
+            client.get_json("/models")?
         }
-        Err(e) => crate::debug!("transcription models unavailable: {e}"),
-    }
+    };
+    let mut models: Vec<ModelInfo> = parse(&v);
     models.sort_by(|a, b| a.id.cmp(&b.id));
     save_cache(&models)?;
     Ok(models)
@@ -182,23 +251,25 @@ fn parse(v: &serde_json::Value) -> Vec<ModelInfo> {
                     let a = price("input_audio");
                     if a > 0.0 { a } else { price("audio") }
                 },
+                image_out_per_m: {
+                    let i = price("image_output");
+                    if i > 0.0 { i } else { price("image_token") }
+                },
                 tools: has("tools"),
                 reasoning: has("reasoning") || has("include_reasoning"),
-                input_modalities: strings(&m["architecture"]["input_modalities"]),
-                output_modalities: strings(&m["architecture"]["output_modalities"]),
+                input: modalities(&m["architecture"]["input_modalities"]),
+                output: modalities(&m["architecture"]["output_modalities"]),
             })
         })
         .collect()
 }
 
-fn strings(v: &serde_json::Value) -> Vec<String> {
-    v.as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|x| x.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default()
+/// The modality names in a JSON array, as a bit set.
+fn modalities(v: &serde_json::Value) -> Modalities {
+    match v.as_array() {
+        Some(a) => Modalities::from_names(a.iter().filter_map(|x| x.as_str())),
+        None => Modalities::EMPTY,
+    }
 }
 
 /// Cached if younger than `max_age`, otherwise fetched (falling back to a
@@ -282,6 +353,82 @@ pub fn rank<'a, T>(query: &str, items: &'a [T], key: impl Fn(&T) -> String) -> V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_modality_set_is_a_bit_per_name() {
+        let m = Modalities::from_names(["text", "image"]);
+        assert!(m.has("text") && m.has("image"));
+        assert!(!m.has("audio") && !m.has("rerank"));
+        assert!(!m.is_empty());
+        assert!(Modalities::EMPTY.is_empty());
+        assert_eq!(m.names().collect::<Vec<_>>(), vec!["text", "image"]);
+        assert_eq!(m.icons(), "TI");
+        // A name the table does not know is still counted, so a category
+        // OpenRouter adds later does not read as "no modalities at all".
+        let odd = Modalities::from_names(["hologram"]);
+        assert!(!odd.is_empty());
+        assert!(!odd.has("text"));
+        assert_eq!(odd.icons(), "");
+        assert_eq!(odd.names().count(), 0);
+    }
+
+    #[test]
+    fn icons_show_what_goes_in_and_what_comes_out() {
+        let i = Modalities::from_names(["text", "image", "file"]);
+        let o = Modalities::from_names(["text"]);
+        assert_eq!(modality_icons(i, o), "TIF→T");
+        // Outputs unknown: the input half alone.
+        assert_eq!(modality_icons(i, Modalities::EMPTY), "TIF");
+        assert_eq!(
+            modality_icons(Modalities::EMPTY, Modalities::EMPTY),
+            String::new()
+        );
+    }
+
+    fn model(json: serde_json::Value) -> ModelInfo {
+        parse(&serde_json::json!({"data": [json]})).remove(0)
+    }
+
+    #[test]
+    fn a_model_that_only_draws_is_parsed_with_its_own_price() {
+        let m = model(serde_json::json!({
+            "id": "meta/muse-image",
+            "context_length": 65536,
+            "pricing": {"prompt": "0", "completion": "0", "image_output": "0.0000024"},
+            "architecture": {
+                "input_modalities": ["text", "image"],
+                "output_modalities": ["image"]
+            }
+        }));
+        assert!(m.produces("image") && !m.produces("text"));
+        assert!(m.accepts("text") && m.accepts("image"));
+        assert!(m.chats(), "a model that draws is one you can talk to");
+        assert!(!m.transcribes());
+        // Priced per image token, not under completion: without this it reads
+        // as free.
+        assert_eq!(m.completion_per_m, 0.0);
+        assert!((m.image_out_per_m - 2.4).abs() < 1e-9);
+        assert_eq!(m.modality_icons(), "TI→I");
+    }
+
+    #[test]
+    fn the_kinds_of_model_you_cannot_talk_to() {
+        let embed = model(serde_json::json!({
+            "id": "openai/text-embedding-3-large",
+            "architecture": {"input_modalities": ["text"], "output_modalities": ["embeddings"]}
+        }));
+        assert!(!embed.chats());
+        let stt = model(serde_json::json!({
+            "id": "openai/whisper",
+            "architecture": {"input_modalities": ["audio"], "output_modalities": ["transcription"]}
+        }));
+        assert!(stt.transcribes() && !stt.chats());
+        let chat = model(serde_json::json!({
+            "id": "anthropic/claude",
+            "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]}
+        }));
+        assert!(chat.chats());
+    }
 
     #[test]
     fn fuzzy_prefers_prefix_and_boundaries() {
