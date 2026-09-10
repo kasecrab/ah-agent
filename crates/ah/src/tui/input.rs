@@ -330,8 +330,9 @@ impl Editor {
     /// Soft-wrapped rows for `width`, plus the cursor's (row, col).
     /// The same rows, but with `pending` shown at the cursor and each run
     /// marked: false is text that is really there, true is dictation that has
-    /// not been committed yet. The cursor stays where the words will land,
-    /// which is in front of the pending run.
+    /// not been committed yet. The cursor sits at the end of the pending run,
+    /// so it travels with the words as they arrive rather than sitting still
+    /// while they pile up beside it.
     pub fn layout_pending(&self, width: usize, pending: &str) -> (Rows, (usize, usize)) {
         let width = width.max(1);
         let mut rows: Rows = Vec::new();
@@ -344,19 +345,20 @@ impl Editor {
             .map(|c| (c, false))
             .chain(pending.chars().map(|c| (c, true)))
             .chain(tail.map(|c| (c, false)));
+        // Counted over the combined stream, so the caret can be put after the
+        // pending run rather than in front of it.
+        let target = self.cursor + pending.chars().count();
         let mut i = 0usize;
         let mut placed = false;
         for (c, ghost) in chars {
             if c == '\n' {
-                if !placed && i == self.cursor {
+                if !placed && i == target {
                     cursor_rc = (rows.len(), cur_w);
                     placed = true;
                 }
                 rows.push(std::mem::take(&mut cur));
                 cur_w = 0;
-                if !ghost {
-                    i += 1;
-                }
+                i += 1;
                 continue;
             }
             let w = c.width().unwrap_or(1);
@@ -364,7 +366,7 @@ impl Editor {
                 rows.push(std::mem::take(&mut cur));
                 cur_w = 0;
             }
-            if !placed && i == self.cursor {
+            if !placed && i == target {
                 cursor_rc = (rows.len(), cur_w);
                 placed = true;
             }
@@ -373,9 +375,7 @@ impl Editor {
                 _ => cur.push((c.to_string(), ghost)),
             }
             cur_w += w;
-            if !ghost {
-                i += 1;
-            }
+            i += 1;
         }
         if !placed {
             if cur_w >= width {
@@ -480,10 +480,31 @@ mod tests {
         e.insert_str("fix ");
         let (rows, cur) = e.layout_pending(40, "the auth bug");
         assert_eq!(text_rows(&e, 40, "the auth bug"), vec!["fix the auth bug"]);
-        // The caret stays where the words will land, in front of the grey.
-        assert_eq!(cur, (0, 4));
+        // The caret follows the words, at the end of the grey rather than in
+        // front of it.
+        assert_eq!(cur, (0, 16));
         assert_eq!(rows[0][0], ("fix ".to_string(), false));
         assert_eq!(rows[0][1], ("the auth bug".to_string(), true));
+    }
+
+    #[test]
+    fn the_caret_travels_as_dictation_arrives() {
+        let mut e = Editor::default();
+        e.insert_str("fix ");
+        let at = |p: &str| e.layout_pending(40, p).1;
+        assert_eq!(at(""), (0, 4));
+        assert_eq!(at("the"), (0, 7));
+        assert_eq!(at("the auth"), (0, 12));
+        assert_eq!(at("the auth bug"), (0, 16));
+    }
+
+    #[test]
+    fn the_caret_follows_dictation_onto_the_next_row() {
+        let e = Editor::default();
+        // Eight characters at a width of four: the caret ends up on the row
+        // after the last full one.
+        assert_eq!(e.layout_pending(4, "abcdefgh").1, (2, 0));
+        assert_eq!(e.layout_pending(4, "abcde").1, (1, 1));
     }
 
     #[test]
@@ -501,7 +522,9 @@ mod tests {
             e.insert_str("ab");
             e
         };
-        assert_eq!(text_rows(&e, 4, "cdefgh"), vec!["abcd", "efgh"]);
+        // The trailing empty row is where the caret sits, exactly as it does
+        // for typed text that fills the last row.
+        assert_eq!(text_rows(&e, 4, "cdefgh"), vec!["abcd", "efgh", ""]);
     }
 }
 
