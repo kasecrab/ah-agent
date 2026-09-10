@@ -114,11 +114,17 @@ impl Live {
 
     /// The talk key went down, or came up.
     pub fn listen(&self, on: bool) {
-        if !on && self.listening.swap(false, Ordering::AcqRel) {
-            // Ask for what is buffered rather than waiting out the silence.
-            self.flush.store(true, Ordering::Release);
-        } else if on {
+        if on {
+            self.flush.store(false, Ordering::Release);
             self.listening.store(true, Ordering::Release);
+            return;
+        }
+        if self.listening.load(Ordering::Acquire) {
+            // Set before the flag that stops the audio, so the socket thread
+            // cannot see "not listening" without also seeing that there is a
+            // tail still to send.
+            self.flush.store(true, Ordering::Release);
+            self.listening.store(false, Ordering::Release);
         }
     }
 
@@ -215,7 +221,12 @@ fn run(
         let Some(ws) = socket.as_mut() else { continue };
 
         // ---- audio out ----
-        if want {
+        // The key coming up is the one moment when audio still sitting in the
+        // ring matters: it is the end of the last word. Send it, and only
+        // then ask Deepgram to finalise. At any other time there is nothing
+        // worth keeping.
+        let finishing = !want && flush.swap(false, Ordering::AcqRel);
+        if want || finishing {
             pcm.clear();
             audio.drain(&mut pcm);
             if !pcm.is_empty() {
@@ -233,14 +244,14 @@ fn run(
                 }
                 last_send = Instant::now();
             }
-        } else {
-            // Not listening: throw the audio away rather than letting it pile
-            // up, and pay nothing for the silence.
-            audio.keep_last(0);
-            if flush.swap(false, Ordering::AcqRel) {
+            if finishing {
                 let _ = ws.send(Message::text("{\"type\":\"Finalize\"}"));
                 last_send = Instant::now();
             }
+        } else {
+            // Idle: drop the audio rather than let it pile up, and pay
+            // nothing for the silence.
+            audio.keep_last(0);
             if last_send.elapsed() >= KEEPALIVE {
                 let _ = ws.send(Message::text("{\"type\":\"KeepAlive\"}"));
                 last_send = Instant::now();
