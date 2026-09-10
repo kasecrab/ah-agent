@@ -455,9 +455,11 @@ OpenRouter.
 ### Plan reminders
 
 The `plan` tool holds the task list for work that takes several steps, and
-every call to it returns the whole list, so the model normally sees the plan
-without help. When it stops calling the tool while tasks are still open, ah
-appends one line — the plan summary — after `plan_reminder_every` requests
-without a change. The line goes at the end of the prompt, where it cannot
-disturb a cached prefix, and it stops once every task is done or dropped. See
-`ah docs commands` for the tool itself.
+every call to it comes back with at least the summary, so the model normally
+sees where the work has got to without help. When it stops calling the tool
+while tasks are still open, ah appends one line — the plan summary — after
+`plan_reminder_every` requests without a change. The line goes at the end of
+the prompt, where it cannot disturb a cached prefix, and it belongs to that
+one request: it is not kept in the conversation, so no later turn pays for it
+or reads a count the plan has since moved past. It stops once every task is
+done or dropped. See `ah docs commands` for the tool itself.

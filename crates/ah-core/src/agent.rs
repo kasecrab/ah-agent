@@ -650,13 +650,17 @@ impl<'a> Agent<'a> {
                     messages.push(Message::user(said));
                 }
             }
-            if let Some(line) = self.plan_reminder().filter(|_| self.notices) {
-                messages.push(Message::user(line));
-            }
 
-            let mut all = Vec::with_capacity(messages.len() + 1);
+            let mut all = Vec::with_capacity(messages.len() + 2);
             all.push(Message::system(system.clone()));
             all.extend(messages.iter().cloned());
+            // The nudge belongs to this request and no other: a reminder kept
+            // in the conversation is paid for on every turn after it, and by
+            // then it is quoting a plan that has moved on. It still goes last,
+            // where it cannot disturb a cached prefix.
+            if let Some(line) = self.plan_reminder().filter(|_| self.notices) {
+                all.push(Message::user(line));
+            }
             self.hydrate_images(&mut all, self.settings.images.history);
             let modalities = self.modalities();
             // A model asked for pictures only has no text channel to call a
@@ -804,15 +808,16 @@ impl<'a> Agent<'a> {
             return None;
         }
         self.plan_quiet = 0;
-        let plan = store.snapshot();
-        let (done, total) = plan.counts();
-        if total == 0 || done == total {
-            return None;
-        }
-        Some(format!(
-            "[plan] {}\nUpdate it with the plan tool as you go.",
-            plan.summary()
-        ))
+        store.with(|plan| {
+            let (done, total) = plan.counts();
+            if total == 0 || done == total {
+                return None;
+            }
+            Some(format!(
+                "[plan] {}\nUpdate it with the plan tool as you go.",
+                plan.summary()
+            ))
+        })
     }
 
     /// Hooks, deny rules and the permission prompt, before anything runs.
@@ -2281,20 +2286,27 @@ mod tests {
             std::env::current_dir().unwrap(),
             &cancel,
         );
+        let sent =
+            |n: usize| -> Vec<Message> { provider.requests.lock().unwrap()[n].messages.clone() };
         let mut messages = vec![Message::user("go")];
         agent
             .run_turn(&mut messages, &RecordingIo::default())
             .unwrap();
         // The plan had just changed, so the first request said nothing about it.
-        assert!(!messages.iter().any(|m| m.content.starts_with("[plan]")));
+        assert!(!sent(0).iter().any(|m| m.content.starts_with("[plan]")));
         agent
             .run_turn(&mut messages, &RecordingIo::default())
             .unwrap();
-        let note = messages
+        let asked = sent(1);
+        let note = asked
             .iter()
             .find(|m| m.content.starts_with("[plan]"))
             .expect("a quiet plan is recalled");
         assert!(note.content.contains("0/1 done"), "{}", note.content);
+        assert_eq!(note.role, Role::User);
+        // The nudge rode along with that one request and stayed out of the
+        // conversation, so no later turn pays for it or reads it as current.
+        assert!(!messages.iter().any(|m| m.content.starts_with("[plan]")));
     }
 
     #[test]
