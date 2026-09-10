@@ -99,6 +99,10 @@ pub enum Command {
         /// Only models that support tool calling.
         #[arg(long)]
         tools: bool,
+        /// Only models producing this output: text, image, video, speech,
+        /// transcription, embeddings, rerank.
+        #[arg(long, value_name = "KIND")]
+        modality: Option<String>,
         /// Fuzzy filter on id and name.
         filter: Option<String>,
         /// Re-fetch even if the local cache is fresh.

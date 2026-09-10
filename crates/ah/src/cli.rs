@@ -425,9 +425,10 @@ pub fn subcommand(cmd: Command, o: &Overrides) -> Result<(), AnyError> {
         }
         Command::Models {
             tools,
+            modality,
             filter,
             refresh,
-        } => models(o, tools, filter, refresh),
+        } => models(o, tools, modality, filter, refresh),
         Command::Plugin { cmd } => plugin(o, cmd),
         Command::Config { cmd } => config(o, cmd.unwrap_or(ConfigCmd::Show { origins: false })),
         Command::Docs { topic } => docs(topic.as_deref()),
@@ -571,6 +572,7 @@ fn read_secret(prompt: &str) -> Result<String, AnyError> {
 fn models(
     o: &Overrides,
     tools_only: bool,
+    modality: Option<String>,
     filter: Option<String>,
     refresh: bool,
 ) -> Result<(), AnyError> {
@@ -582,6 +584,17 @@ fn models(
     } else {
         std::time::Duration::from_secs(24 * 3600)
     };
+    // The catalogue holds every kind of model, so an unknown word here would
+    // quietly list nothing at all.
+    if let Some(m) = &modality
+        && !ah_core::models::MODALITIES.iter().any(|(n, _)| n == m)
+    {
+        let known: Vec<&str> = ah_core::models::MODALITIES
+            .iter()
+            .map(|(n, _)| *n)
+            .collect();
+        return Err(format!("unknown modality {m:?}; try one of: {}", known.join(", ")).into());
+    }
     let all = ah_core::models::load(base, key.as_deref(), max_age)?;
     let filtered: Vec<&ah_core::models::ModelInfo> = match &filter {
         Some(q) => ah_core::models::rank(q, &all, |m| format!("{} {}", m.id, m.name)),
@@ -591,15 +604,27 @@ fn models(
         "{:<50} {:>8} {:>8} {:>8}  caps",
         "id", "context", "$in/M", "$out/M"
     );
-    for m in filtered.into_iter().filter(|m| !tools_only || m.tools) {
+    for m in filtered
+        .into_iter()
+        .filter(|m| !tools_only || m.tools)
+        .filter(|m| modality.as_deref().is_none_or(|k| m.produces(k)))
+    {
+        // A model that only draws prices nothing under completion; printing
+        // that as 0.00 would read as free.
+        let out = if m.completion_per_m > 0.0 {
+            m.completion_per_m
+        } else {
+            m.image_out_per_m
+        };
         println!(
-            "{:<50} {:>8} {:>8.2} {:>8.2}  {}{}",
+            "{:<50} {:>8} {:>8.2} {:>8.2}  {}{}{}",
             m.id,
             m.context_length,
             m.prompt_per_m,
-            m.completion_per_m,
-            if m.tools { "tools " } else { "" },
-            if m.reasoning { "reasoning" } else { "" }
+            out,
+            m.modality_icons(),
+            if m.tools { " tools" } else { "" },
+            if m.reasoning { " reasoning" } else { "" }
         );
     }
     eprintln!("(cache: {})", ah_core::models::cache_path().display());

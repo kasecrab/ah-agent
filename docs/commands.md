@@ -39,7 +39,7 @@ One-shot mode keeps the session in memory only; the TUI writes a session file
 |---|---|
 | `ah login` | show auth status, then prompt for an OpenRouter key (hidden), verify it and store it with mode 600. `--key K` skips the prompt |
 | `ah logout` | remove the stored key |
-| `ah models [FILTER] [--tools] [--refresh]` | list the cached OpenRouter catalogue, fuzzy filtered; `--tools` keeps tool-calling models; `--refresh` refetches |
+| `ah models [FILTER] [--tools] [--modality KIND] [--refresh]` | list the cached OpenRouter catalogue, fuzzy filtered; `--tools` keeps tool-calling models; `--modality` keeps one kind of output (`text`, `image`, `video`, `speech`, `transcription`, `embeddings`, `rerank`); `--refresh` refetches |
 | `ah plugin list` | discovered plugins and their load status |
 | `ah plugin add FILE.wasm` | copy into the user plugin dir |
 | `ah plugin rm NAME` | remove from the user plugin dir |
@@ -60,7 +60,7 @@ name in, Enter runs it. Plugins can add commands (`ah docs plugins`).
 | Command | Effect |
 |---|---|
 | `/help`, `/?` | list commands and keys |
-| `/model [ID\|refresh]` | fuzzy picker over the catalogue; a known id or favorite name switches directly; `refresh` refetches |
+| `/model [CATEGORY] [ID\|refresh]` | fuzzy picker over the catalogue, in categories walked with ← →; a known id or favorite name switches directly; `refresh` refetches |
 | `/effort [LEVEL]` | reasoning effort: `off`, `minimal`, `low`, `medium`, `high`, `xhigh` |
 | `/favorite [NAME]`, `/fav` | favorites picker; a name switches to it or creates it |
 | `/usage` | session cost per model, wall and API time, tool calls, lines changed, plus OpenRouter balance, limits and 30-day top models (`r` refreshes) |

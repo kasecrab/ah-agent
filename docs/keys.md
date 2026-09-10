@@ -86,7 +86,9 @@ quit = ["ctrl-q"]
   Ctrl-C interrupts the turn without asking.
 - Pickers (`/model`, `/resume`, `/favorite`, `/skills`): type to filter,
   Up/Down or Tab/Shift-Tab move, PgUp/PgDn page, Enter accepts, Esc closes,
-  Ctrl-U clears the query, Ctrl-R refreshes the model list. `/favorite` uses
+  Ctrl-U clears the query, Ctrl-R refreshes the model list. In `/model`,
+  Left/Right walk the categories along the top and the query carries over;
+  the category you leave it on is the one it opens on next. `/favorite` uses
   bare letters: `n` new, `m` model, `e` effort, `r` rename, `d` remove,
   `j`/`k` move, `q` close.
 
