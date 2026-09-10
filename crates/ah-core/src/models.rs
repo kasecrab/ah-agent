@@ -43,6 +43,12 @@ impl ModelInfo {
         self.output_modalities.iter().any(|m| m == modality)
     }
 
+    /// A speech-to-text model: it answers on `/audio/transcriptions`, not
+    /// `/chat/completions`, and takes nothing but the audio.
+    pub fn transcribes(&self) -> bool {
+        self.produces("transcription")
+    }
+
     /// `TIF→T`: input tags, arrow, output tags.
     pub fn modality_icons(&self) -> String {
         modality_icons(&self.input_modalities, &self.output_modalities)
@@ -82,7 +88,7 @@ pub fn modality_icons(input: &[String], output: &[String]) -> String {
 }
 
 /// Bumped when `ModelInfo` gains fields; older caches are refetched.
-const CACHE_VERSION: u32 = 4;
+const CACHE_VERSION: u32 = 5;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Cache {
@@ -132,7 +138,25 @@ pub fn save_cache(models: &[ModelInfo]) -> Result<()> {
 pub fn fetch(base_url: &str, api_key: Option<&str>) -> Result<Vec<ModelInfo>> {
     let client = crate::provider::openrouter::OpenRouter::new(base_url, api_key.unwrap_or(""));
     let v = client.get_json("/models")?;
-    let mut models: Vec<ModelInfo> = v["data"]
+    let mut models: Vec<ModelInfo> = parse(&v);
+    // Speech-to-text models are left out of the unfiltered list, so they have
+    // to be asked for by name. Dictation is the only thing that uses them, and
+    // without this they cannot be picked at all.
+    match client.get_json("/models?output_modalities=transcription") {
+        Ok(v) => {
+            let known: std::collections::HashSet<String> =
+                models.iter().map(|m| m.id.clone()).collect();
+            models.extend(parse(&v).into_iter().filter(|m| !known.contains(&m.id)));
+        }
+        Err(e) => crate::debug!("transcription models unavailable: {e}"),
+    }
+    models.sort_by(|a, b| a.id.cmp(&b.id));
+    save_cache(&models)?;
+    Ok(models)
+}
+
+fn parse(v: &serde_json::Value) -> Vec<ModelInfo> {
+    v["data"]
         .as_array()
         .map(|a| a.iter())
         .into_iter()
@@ -164,10 +188,7 @@ pub fn fetch(base_url: &str, api_key: Option<&str>) -> Result<Vec<ModelInfo>> {
                 output_modalities: strings(&m["architecture"]["output_modalities"]),
             })
         })
-        .collect();
-    models.sort_by(|a, b| a.id.cmp(&b.id));
-    save_cache(&models)?;
-    Ok(models)
+        .collect()
 }
 
 fn strings(v: &serde_json::Value) -> Vec<String> {

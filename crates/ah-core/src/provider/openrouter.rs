@@ -51,6 +51,58 @@ impl OpenRouter {
         format!("{}{}", self.base_url, path)
     }
 
+    /// Transcribe audio on `/audio/transcriptions`, which is where the
+    /// speech-to-text models live. Nothing about it is a chat: the whole clip
+    /// goes up as base64 and the whole transcript comes back at once, so
+    /// there is no stream to follow and no prompt to pay for.
+    ///
+    /// Returns the text and what it cost, which the response reports itself.
+    pub fn transcribe(
+        &self,
+        model: &str,
+        audio: &[u8],
+        format: &str,
+        language: &str,
+    ) -> Result<(String, f64)> {
+        let mut body = serde_json::json!({
+            "model": model,
+            "input_audio": {
+                "data": crate::clipboard::base64(audio),
+                "format": format,
+            },
+        });
+        if !language.trim().is_empty() {
+            body["language"] = Value::String(language.trim().to_string());
+        }
+        crate::debug!(
+            "transcribe model={model} format={format} audio={}B",
+            audio.len()
+        );
+        let mut resp = self
+            .agent
+            .post(self.url("/audio/transcriptions"))
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("HTTP-Referer", self.referer.clone())
+            .header("X-Title", self.app_title.clone())
+            .send_json(&body)?;
+        let status = resp.status().as_u16();
+        let text = resp
+            .body_mut()
+            .with_config()
+            .limit(4 * 1024 * 1024)
+            .read_to_string()?;
+        if !(200..300).contains(&status) {
+            return Err(Error::Api {
+                status,
+                message: excerpt(&text),
+            });
+        }
+        let v: Value = serde_json::from_str(&text)?;
+        let said = v["text"].as_str().unwrap_or_default().to_string();
+        let cost = v["usage"]["cost"].as_f64().unwrap_or(0.0);
+        Ok((said, cost))
+    }
+
     /// GET a JSON endpoint (used by `ah models`, key info).
     pub fn get_json(&self, path: &str) -> Result<Value> {
         let mut req = self.agent.get(self.url(path));

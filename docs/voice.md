@@ -34,10 +34,31 @@ file, and never logged — `AH_LOG` records the size of a clip and nothing else.
 
 ## Picking a model
 
-`/voice model` lists only the models that take audio input, with the audio
-price beside each. That price is the one that matters and the one nothing else
-in `ah` shows: it varies by orders of magnitude between models, and a spoken
-minute is about 1,900 audio tokens whichever you choose.
+`/voice model` lists two kinds of model, and `ah` sends a phrase to whichever
+one the model itself calls for.
+
+**Chat models that hear** — Gemini, Voxtral small and the rest. The phrase goes
+to `/chat/completions` as an `input_audio` part. The reply streams, so the grey
+text grows word by word, and the sentence so far rides along so the second half
+knows about the first. The audio price is shown per million tokens; a spoken
+minute is about 1,900 of them.
+
+**Speech-to-text models**, marked `transcribes` — whisper, nova-3, gpt-4o-transcribe,
+parakeet, qwen3-asr. These answer on `/audio/transcriptions`, which is what
+they were built for: no instructions to pay for on every phrase and better
+accuracy for the money. In exchange the endpoint has no stream and no prompt
+field, so a phrase appears whole rather than a word at a time, and
+`voice.prompt_append` and the sentence-so-far context do not reach it — `ah`
+says so when you arm one.
+
+Their price column reads `billed per audio` rather than a per-token figure,
+because each provider means a different unit by it — per second, per minute,
+per hour. `/usage` shows what a phrase actually cost, which the endpoint
+reports itself.
+
+OpenRouter leaves speech-to-text models out of its unfiltered model list, so
+`ah` asks for them separately and merges the two. If none appear, Ctrl-R in
+`/voice model` refetches.
 
 ## How it stays quick
 

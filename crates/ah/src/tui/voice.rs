@@ -13,6 +13,7 @@ use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 use ah_abi::{ChatRequest, Message, VoiceSettings};
+use ah_core::provider::openrouter::OpenRouter;
 use ah_core::provider::{Provider, StreamEvent};
 
 use super::Msg;
@@ -67,8 +68,12 @@ struct Chunk {
 
 pub struct Session {
     dictation: ah_voice::Dictation,
-    provider: Arc<dyn Provider>,
+    provider: Arc<OpenRouter>,
     model: String,
+    /// The model answers on `/audio/transcriptions` rather than as a chat.
+    /// It is better at the job and cheaper, but it hands back the whole
+    /// phrase at once and takes no context, so both paths are kept.
+    stt: bool,
     cfg: VoiceSettings,
     max_inflight: usize,
     /// Sticky-routing key, so every phrase of one dictation lands on the same
@@ -98,7 +103,8 @@ impl Session {
     pub fn arm(
         cfg: &VoiceSettings,
         model: String,
-        provider: Arc<dyn Provider>,
+        stt: bool,
+        provider: Arc<OpenRouter>,
         capture_cmd: String,
         tx: Sender<Msg>,
         route: String,
@@ -125,6 +131,7 @@ impl Session {
             dictation,
             provider,
             model,
+            stt,
             cfg: cfg.clone(),
             max_inflight,
             route,
@@ -316,6 +323,28 @@ impl Session {
 
     fn dispatch(&mut self, p: ah_voice::Phrase) {
         let seq = p.seq;
+        if self.stt {
+            let provider = self.provider.clone();
+            let tx = self.tx.clone();
+            let model = self.model.clone();
+            let language = self.cfg.language.clone();
+            let _ = std::thread::Builder::new()
+                .name("ah-voice-stt".into())
+                .spawn(move || {
+                    let ev = match provider.transcribe(&model, &p.wav, "wav", &language) {
+                        Ok((text, cost)) => {
+                            let _ = tx.send(Msg::Voice(Event::Delta { seq, text }));
+                            Event::Done { seq, cost }
+                        }
+                        Err(e) => Event::Failed {
+                            seq,
+                            message: e.to_string(),
+                        },
+                    };
+                    let _ = tx.send(Msg::Voice(ev));
+                });
+            return;
+        }
         let mut system = String::from(
             "Transcribe the audio. Output only the words spoken, verbatim. \
              No preamble, no quotes, no translation, no commentary. \

@@ -1783,14 +1783,31 @@ impl App {
                 },
                 cols: vec![
                     (
-                        if m.audio_per_m > 0.0 {
+                        if m.transcribes() {
+                            // These bill per length of audio, and each
+                            // provider means a different unit by it. Printing
+                            // a per-token price for them would be a lie, so
+                            // the real figure comes from `/usage` instead.
+                            format!("{:>15}", "billed per audio")
+                        } else if m.audio_per_m > 0.0 {
                             format!("${:>8.2}/M audio", m.audio_per_m)
                         } else {
                             format!("${:>8.2}/M in   ", m.prompt_per_m)
                         },
                         pal.dim(),
                     ),
-                    (format!(" ${:<6.2} out", m.completion_per_m), pal.dim()),
+                    (
+                        if m.transcribes() {
+                            "  transcribes ".into()
+                        } else {
+                            format!(" ${:<6.2} out", m.completion_per_m)
+                        },
+                        if m.transcribes() {
+                            Style::default().fg(pal.accent)
+                        } else {
+                            pal.dim()
+                        },
+                    ),
                 ],
             })
             .collect();
@@ -1801,7 +1818,10 @@ impl App {
             query,
             rows,
         );
-        p.hint = "audio price per million tokens; a phrase is a second or two of it".into();
+        p.hint =
+            "models marked `transcribes` answer on the speech endpoint: better at the job, \
+             but no streaming and no sentence context. `/usage` shows what a phrase cost"
+                .into();
         if empty && !stale {
             p.error = Some(
                 "no model in the catalogue takes audio input; Ctrl-R refreshes the list".into(),
@@ -3487,6 +3507,38 @@ impl App {
         self.voice.as_ref().map(|v| v.pending()).unwrap_or_default()
     }
 
+    /// The catalogue entry for `id`, loading the cache and, once, the list
+    /// itself if this is a model it has never seen.
+    fn model_info(&mut self, id: &str) -> Option<ModelInfo> {
+        if self.catalogue.is_none()
+            && let Some((m, _)) = models::load_cached()
+        {
+            self.catalogue = Some(m);
+        }
+        let found = |c: &Option<Vec<ModelInfo>>| {
+            c.as_deref()
+                .unwrap_or(&[])
+                .iter()
+                .find(|m| m.id == id)
+                .cloned()
+        };
+        if let Some(m) = found(&self.catalogue) {
+            return Some(m);
+        }
+        let key = ah_core::auth::api_key(self.settings().model.api_key.as_deref());
+        let base = self.settings().model.base_url.clone();
+        match models::fetch(&base, key.as_deref()) {
+            Ok(list) => {
+                self.catalogue = Some(list);
+                found(&self.catalogue)
+            }
+            Err(e) => {
+                self.push(Block::Error(format!("model list: {e}")));
+                None
+            }
+        }
+    }
+
     fn arm_voice(&mut self, model: Option<String>) {
         let cfg = self.settings().voice.clone();
         if !cfg.enabled {
@@ -3511,16 +3563,39 @@ impl App {
                 "dictation sends recorded audio to {model} through OpenRouter.                  It is billed to your key like any other request, and is never                  written to a session file or the log."
             )));
         }
-        let provider: std::sync::Arc<dyn ah_core::provider::Provider> =
-            std::sync::Arc::new(ah_core::provider::openrouter::OpenRouter::new(
-                self.settings().model.base_url.clone(),
-                key,
-            ));
+        let provider = std::sync::Arc::new(ah_core::provider::openrouter::OpenRouter::new(
+            self.settings().model.base_url.clone(),
+            key,
+        ));
+        // Speech-to-text models answer somewhere else entirely, so which
+        // route a phrase takes is the model's to decide, not a setting. The
+        // catalogue is what says which, so a model set by hand in the config
+        // is worth one lookup before the microphone opens.
+        let Some(info) = self.model_info(&model) else {
+            self.push(Block::Error(format!(
+                "{model} is not in the model catalogue; Ctrl-R in /voice model refreshes it"
+            )));
+            return;
+        };
+        let stt = info.transcribes();
+        if !stt && !info.accepts("audio") {
+            self.push(Block::Error(format!(
+                "{model} does not take audio; /voice model lists the ones that do"
+            )));
+            return;
+        }
+        if stt && !cfg.prompt_append.trim().is_empty() {
+            self.push(Block::Notice(format!(
+                "{model} transcribes on its own endpoint, which takes no prompt: \
+                 voice.prompt_append is ignored while it is the voice model"
+            )));
+        }
         let capture_cmd = self.stack.capture_cmd();
         let route = format!("voice-{}", self.session_id);
         match voice::Session::arm(
             &cfg,
             model.clone(),
+            stt,
             provider,
             capture_cmd,
             self.self_tx.clone(),
