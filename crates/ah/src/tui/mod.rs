@@ -3317,9 +3317,9 @@ impl App {
             self.usage.add(&spent);
             self.stats.add_usage("agents", &spent);
         }
-        for n in table.notices(ah_core::agents::Audience::Ui(0)) {
-            self.push(Block::Notice(n));
-        }
+        // Nothing goes into the transcript when an agent ends: the call that
+        // started it reports it, and the strip drops its row.
+        let _ = table.notices(ah_core::agents::Audience::Ui(0));
         if !self.busy
             && self.settings().agents.wake
             && table.unheard(ah_core::agents::Audience::Model(0))
@@ -4612,7 +4612,12 @@ impl App {
         let dock_rows: u16 = dock_line.is_some() as u16;
         // What else is running, under the status bar. Nothing running, no strip.
         let switch_rows_v = switch::rows();
-        let switch_rows = (switch_rows_v.len() as u16).min(8);
+        // One blank row above it, so the strip is not read as part of the
+        // status bar it sits under.
+        let switch_rows = match switch_rows_v.len() {
+            0 => 0,
+            n => (n as u16).min(8) + 1,
+        };
 
         let [
             transcript_area,
@@ -4642,13 +4647,14 @@ impl App {
                 Some(v) => switch::Target::Agent(v.id),
                 None => switch::Target::Main,
             };
-            let lines = switch::lines(
+            let mut lines = vec![Line::raw("")];
+            lines.extend(switch::lines(
                 &switch_rows_v,
                 active,
                 self.switch,
                 switch_area.width as usize,
                 &pal,
-            );
+            ));
             f.render_widget(Paragraph::new(lines), switch_area);
         }
 

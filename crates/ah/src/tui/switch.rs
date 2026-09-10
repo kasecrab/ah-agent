@@ -104,6 +104,9 @@ pub fn lines(
             let on = r.target == active;
             let here = cursor == Some(i);
             let mark = if on { "●" } else { "○" };
+            // The keys are on this row: an arrow says so, without painting the
+            // row a colour that would read as "this one is selected".
+            let lead = if here { "›" } else { " " };
             let mut style = match r.target {
                 Target::Jobs => Style::default().fg(pal.job),
                 Target::Main => Style::default().fg(pal.fg),
@@ -112,7 +115,7 @@ pub fn lines(
             if on {
                 style = style.add_modifier(Modifier::BOLD);
             }
-            let head = format!(" {mark} {:name_w$}  ", r.name);
+            let head = format!("{lead}{mark} {:name_w$}  ", r.name);
             let room = width
                 .saturating_sub(head.width() + r.right.width() + 2)
                 .max(1);
@@ -120,23 +123,12 @@ pub fn lines(
             let gap = width
                 .saturating_sub(head.width() + doing.width() + r.right.width())
                 .max(1);
-            let mut spans = vec![
+            Line::from(vec![
                 Span::styled(head, style),
                 Span::styled(doing, pal.dim()),
                 Span::raw(" ".repeat(gap)),
                 Span::styled(r.right.clone(), pal.dim()),
-            ];
-            if here {
-                // The row the keys are on, whichever one the input is bound to.
-                spans = spans
-                    .into_iter()
-                    .map(|s| {
-                        let st = s.style.add_modifier(Modifier::REVERSED);
-                        Span::styled(s.content, st)
-                    })
-                    .collect();
-            }
-            Line::from(spans)
+            ])
         })
         .collect()
 }
@@ -184,6 +176,21 @@ mod tests {
 
         let out = lines(&rows, Target::Main, None, 60, &pal);
         assert!(out[0].to_string().starts_with(" ● main"), "{}", out[0]);
+    }
+
+    #[test]
+    fn the_row_the_keys_are_on_gets_an_arrow() {
+        let pal = Palette::from_theme(&Theme::default());
+        let rows = vec![
+            row(Target::Main, "main", ""),
+            row(Target::Agent(3), "explorer", "reading sse.rs"),
+        ];
+        let out = lines(&rows, Target::Main, Some(1), 60, &pal);
+        assert!(out[0].to_string().starts_with(" ●"), "{}", out[0]);
+        assert!(out[1].to_string().starts_with("›○"), "{}", out[1]);
+        // Nothing is highlighted when the keys are in the input.
+        let out = lines(&rows, Target::Main, None, 60, &pal);
+        assert!(out[1].to_string().starts_with(" ○"), "{}", out[1]);
     }
 
     #[test]

@@ -182,7 +182,9 @@ pub fn save_state(patch: &Value) -> Result<()> {
     let text = toml::to_string_pretty(&state).map_err(|e| Error::Config(e.to_string()))?;
     std::fs::write(
         &path,
-        format!("# Written by ah. Choices it was asked to remember.\n# Anything here is overridden by ./.ah/config.toml.\n\n{text}"),
+        format!(
+            "# Written by ah. Choices it was asked to remember.\n# Anything here is overridden by ./.ah/config.toml.\n\n{text}"
+        ),
     )?;
     Ok(())
 }
@@ -232,7 +234,11 @@ mod tests {
         save_state(&serde_json::json!({"voice": {"model": "nova-3"}})).unwrap();
         let s = SettingsStack::from_files().unwrap();
         assert_eq!(s.settings().voice.provider, "deepgram");
-        assert_eq!(s.settings().voice.model, "nova-3", "the first choice was lost");
+        assert_eq!(
+            s.settings().voice.model,
+            "nova-3",
+            "the first choice was lost"
+        );
 
         // A project file still wins over what was remembered.
         let mut s2 = SettingsStack::from_files().unwrap();

@@ -19,9 +19,9 @@ pub mod vad;
 pub mod wav;
 
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::Mutex;
 use std::time::Duration;
 
 /// One run of speech, encoded and ready to send.
@@ -141,7 +141,10 @@ impl Dictation {
     /// What is doing the recording. Empty until the first hold, because
     /// nothing has been opened before then.
     pub fn source(&self) -> String {
-        self.heard.lock().map(|h| h.source.clone()).unwrap_or_default()
+        self.heard
+            .lock()
+            .map(|h| h.source.clone())
+            .unwrap_or_default()
     }
 
     /// The device's own rate, before anything is resampled. 0 until the first
@@ -297,7 +300,9 @@ fn run(
                 hand_over(c, &mut seq);
             }
             level.store(0f32.to_bits(), Ordering::Relaxed);
-            if !cfg.keep_open && let Some(m) = mic.take() {
+            if !cfg.keep_open
+                && let Some(m) = mic.take()
+            {
                 m.opened.close();
             }
             match stop.recv_timeout(QUIET) {
