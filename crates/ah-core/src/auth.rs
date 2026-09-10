@@ -8,6 +8,9 @@ use crate::{Error, Result};
 struct Credentials {
     #[serde(default)]
     openrouter_api_key: Option<String>,
+    /// Dictation against Deepgram's live socket. Nothing else uses it.
+    #[serde(default)]
+    deepgram_api_key: Option<String>,
 }
 
 /// Where the active key came from.
@@ -51,12 +54,42 @@ pub fn env_key() -> Option<String> {
 }
 
 pub fn stored_key() -> Option<String> {
-    std::fs::read_to_string(crate::paths::credentials_file())
-        .ok()
-        .and_then(|t| toml::from_str::<Credentials>(&t).ok())
+    read_credentials()
         .and_then(|c| c.openrouter_api_key)
         .map(|k| k.trim().to_string())
         .filter(|k| !k.is_empty())
+}
+
+/// The Deepgram key, from the environment or the credentials file. It buys
+/// one thing — dictation that answers while the sentence is still being said —
+/// so nothing else looks for it.
+pub fn deepgram_key() -> Option<String> {
+    if let Some(k) = std::env::var("DEEPGRAM_API_KEY")
+        .ok()
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())
+    {
+        return Some(k);
+    }
+    read_credentials()
+        .and_then(|c| c.deepgram_api_key)
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())
+}
+
+/// Write the Deepgram key beside the other one, owner-readable only. An
+/// empty key removes it.
+pub fn save_deepgram_key(key: &str) -> Result<()> {
+    let mut creds = read_credentials().unwrap_or_default();
+    let key = key.trim();
+    creds.deepgram_api_key = (!key.is_empty()).then(|| key.to_string());
+    write_credentials(&creds)
+}
+
+fn read_credentials() -> Option<Credentials> {
+    std::fs::read_to_string(crate::paths::credentials_file())
+        .ok()
+        .and_then(|t| toml::from_str::<Credentials>(&t).ok())
 }
 
 /// `sk-or-v1-…c3d4`: enough to recognise a key, not enough to use it.
@@ -72,6 +105,14 @@ pub fn masked(key: &str) -> String {
 
 /// Write the key to the credentials file, readable by the owner only.
 pub fn save_key(key: &str) -> Result<()> {
+    let mut creds = read_credentials().unwrap_or_default();
+    creds.openrouter_api_key = Some(key.trim().to_string());
+    write_credentials(&creds)
+}
+
+/// Replace the credentials file. Every key in it is a secret, so the file is
+/// the owner's alone and is rewritten whole rather than appended to.
+fn write_credentials(creds: &Credentials) -> Result<()> {
     let path = crate::paths::credentials_file();
     if let Some(p) = path.parent() {
         std::fs::create_dir_all(p)?;
@@ -81,10 +122,7 @@ pub fn save_key(key: &str) -> Result<()> {
             let _ = std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o700));
         }
     }
-    let creds = Credentials {
-        openrouter_api_key: Some(key.trim().to_string()),
-    };
-    let text = toml::to_string(&creds).map_err(|e| Error::Config(e.to_string()))?;
+    let text = toml::to_string(creds).map_err(|e| Error::Config(e.to_string()))?;
     #[cfg(unix)]
     {
         use std::io::Write as _;

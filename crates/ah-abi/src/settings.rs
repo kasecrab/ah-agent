@@ -744,9 +744,18 @@ pub struct AgentDef {
 pub struct VoiceSettings {
     /// Offer `/voice` at all. Off, the microphone is never opened.
     pub enabled: bool,
-    /// Model that does the transcribing; empty asks on first use. Only models
-    /// that accept audio input are offered.
+    /// Who transcribes: `openrouter` uses the key `ah` already has and any
+    /// model that takes audio; `deepgram` opens a socket to Deepgram and
+    /// needs a key of its own, which is the only way to get words back while
+    /// the sentence is still being said. Empty asks on the first `/voice`.
+    pub provider: String,
+    /// Model that does the transcribing; empty asks on first use. What counts
+    /// as a model depends on `provider`.
     pub model: String,
+    /// Seconds an idle Deepgram socket is held open before it is dropped and
+    /// reopened on the next phrase. Holding it costs nothing but a file
+    /// descriptor and saves the handshake; 0 never drops it.
+    pub idle_secs: u64,
     /// `fast`, `balanced` or `cheap`: one choice for `phrase_ms`,
     /// `max_chunk_ms` and `max_inflight`. Anything set by hand wins over it.
     pub mode: String,
@@ -801,7 +810,9 @@ impl Default for VoiceSettings {
     fn default() -> Self {
         Self {
             enabled: true,
+            provider: String::new(),
             model: String::new(),
+            idle_secs: 120,
             mode: String::from("balanced"),
             prompt_append: String::new(),
             language: String::new(),
@@ -827,6 +838,24 @@ impl Default for VoiceSettings {
 }
 
 impl VoiceSettings {
+    /// True when phrases go to Deepgram's socket rather than to OpenRouter.
+    pub fn live(&self) -> bool {
+        self.provider == "deepgram"
+    }
+
+    /// The model to use, with the provider's own default filled in. A model
+    /// left over from the other provider is not one, so it is ignored.
+    pub fn model_for(&self) -> String {
+        let m = self.model.trim();
+        if self.live() {
+            // OpenRouter ids are `author/name`; Deepgram's are not.
+            if m.is_empty() || m.contains('/') {
+                return String::from("nova-3");
+            }
+        }
+        m.into()
+    }
+
     /// `mode` as the three numbers it stands for, or `None` when the name is
     /// not one of the presets.
     pub fn preset(&self) -> Option<(u64, u64, usize)> {
