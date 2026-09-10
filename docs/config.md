@@ -186,7 +186,7 @@ price.
 | `prompt_append` | `""` | words the model would get wrong: project names, identifiers, people |
 | `language` | `""` | spoken language; empty lets the model decide |
 | `hotkey_mode` | `"auto"` | `auto`, `push_to_talk` or `toggle`; `auto` uses what the terminal reports |
-| `release_grace_ms` | `350` | silence after the last key repeat that counts as a release |
+| `release_grace_ms` | `700` | silence that counts as letting the talk key go, before the keyboard's repeat rate has been seen; after that a much shorter gap is used |
 | `max_listen_secs` | `300` | longest a toggled microphone stays on; holding a key needs no limit |
 | `device` | `""` | input device name; empty takes the system default |
 | `capture_cmd` | `""` | command printing raw s16le mono PCM on stdout; user config or environment only |

@@ -767,8 +767,10 @@ pub struct VoiceSettings {
     /// `auto` watches what the terminal reports and picks the best it can:
     /// hold to talk where key releases arrive, otherwise a toggle.
     pub hotkey_mode: String,
-    /// Silence after the last key repeat that counts as a release, for
-    /// terminals that report no release event.
+    /// Silence that counts as letting the talk key go, on terminals that
+    /// report no release event. It has to outlast the delay a keyboard waits
+    /// before it starts repeating, so it starts wide; once the repeat rate
+    /// has actually been seen, a much shorter gap is used instead.
     pub release_grace_ms: u64,
     /// Longest a toggled microphone stays on. Holding a key needs no limit.
     pub max_listen_secs: u64,
@@ -817,7 +819,7 @@ impl Default for VoiceSettings {
             prompt_append: String::new(),
             language: String::new(),
             hotkey_mode: String::from("auto"),
-            release_grace_ms: 350,
+            release_grace_ms: 700,
             max_listen_secs: 300,
             device: String::new(),
             capture_cmd: String::new(),
