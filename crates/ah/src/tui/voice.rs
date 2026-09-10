@@ -19,6 +19,89 @@ use ah_voice::deepgram;
 
 use super::Msg;
 
+/// What the live route has heard, and whether it has finished saying it.
+///
+/// Kept apart from the session so the decision that matters — has everything
+/// arrived, or is a word still on its way — can be tested without a
+/// microphone or a socket.
+#[derive(Default)]
+struct Spoken {
+    /// Words the transcriber has settled on.
+    said: String,
+    /// The word or two it is still deciding. Replaced wholesale each time.
+    guess: String,
+    /// When the talk key came up. `None` once everything has been handed
+    /// over, or before anything was said.
+    released: Option<Instant>,
+}
+
+impl Spoken {
+    fn interim(&mut self, t: String) {
+        self.guess = t;
+    }
+
+    fn settled_words(&mut self, t: &str) {
+        join(&mut self.said, t);
+        self.guess.clear();
+    }
+
+    fn utterance_end(&mut self) {
+        self.guess.clear();
+    }
+
+    fn release(&mut self, now: Instant) {
+        self.released = Some(now);
+    }
+
+    fn text(&self) -> String {
+        let mut out = self.said.clone();
+        join(&mut out, &self.guess);
+        out
+    }
+
+    fn is_empty(&self) -> bool {
+        self.said.is_empty() && self.guess.is_empty()
+    }
+
+    /// Has everything been heard that is going to be?
+    fn done(&self, now: Instant, listening: bool) -> bool {
+        if listening {
+            return false;
+        }
+        match self.released {
+            // Words arrived after the run had already been handed over —
+            // a transcriber can send one more after being asked to finish.
+            // Take them straight away rather than stranding them.
+            None => !self.is_empty(),
+            // The first words arrive a moment after the key comes up, so an
+            // empty guess this early means "nothing yet", not "nothing left".
+            // Waiting on something settled is what tells them apart; the
+            // clock is there for the case where nothing is ever said.
+            Some(at) => {
+                (!self.said.is_empty() && self.guess.is_empty())
+                    || now.saturating_duration_since(at) > SETTLE
+            }
+        }
+    }
+
+    /// True while something is expected, so the caller keeps looking in.
+    fn waiting(&self) -> bool {
+        self.released.is_some() || !self.is_empty()
+    }
+
+    fn take(&mut self) -> String {
+        let text = self.text();
+        self.clear();
+        text
+    }
+
+    fn clear(&mut self) {
+        self.said.clear();
+        self.guess.clear();
+        self.released = None;
+    }
+}
+
 /// Everything opening a dictation session needs that is not a setting.
 pub struct Arm {
     pub model: String,
@@ -339,13 +422,8 @@ pub struct Session {
     /// Deepgram's socket, when it is the one listening. Everything below it
     /// belongs to that route and is untouched by the other two.
     live: Option<deepgram::Live>,
-    /// Words the socket has settled on during this hold.
-    live_said: String,
-    /// The word or two still being decided. Replaced wholesale each time.
-    live_guess: String,
-    /// When the talk key came up, so the last words have a moment to land
-    /// before the grey text is committed.
-    released: Option<Instant>,
+    /// What the socket has heard, and whether it has finished.
+    spoken: Spoken,
     /// Audio actually sent, which is what Deepgram bills for.
     pub audio_ms: u64,
     cfg: VoiceSettings,
@@ -417,9 +495,7 @@ impl Session {
             model,
             stt,
             live,
-            live_said: String::new(),
-            live_guess: String::new(),
-            released: None,
+            spoken: Spoken::default(),
             audio_ms: 0,
             cfg: cfg.clone(),
             max_inflight,
@@ -456,8 +532,7 @@ impl Session {
         self.listening()
             || !self.chunks.is_empty()
             || !self.waiting.is_empty()
-            || !self.live_said.is_empty()
-            || !self.live_guess.is_empty()
+            || !self.spoken.is_empty()
     }
 
     // ---- the talk key ----------------------------------------------------
@@ -492,7 +567,7 @@ impl Session {
 
     fn start_listening(&mut self) {
         self.listen_since = Some(Instant::now());
-        self.released = None;
+        self.spoken.released = None;
         self.dictation.listen(true);
         if let Some(l) = &self.live {
             l.listen(true);
@@ -510,7 +585,7 @@ impl Session {
             // Asks Deepgram for what it is still holding rather than waiting
             // out the endpointing silence.
             l.listen(false);
-            self.released = Some(Instant::now());
+            self.spoken.release(Instant::now());
         }
     }
 
@@ -562,7 +637,7 @@ impl Session {
         }
         if self.is_live() {
             // Only waiting for the last words to land.
-            return self.released.map(|_| Duration::from_millis(120));
+            return self.spoken.waiting().then(|| Duration::from_millis(120));
         }
         (self.inflight > 0 || !self.waiting.is_empty()).then(|| Duration::from_millis(200))
     }
@@ -712,13 +787,12 @@ impl Session {
         match ev {
             // Interim words replace each other: Deepgram is refining one
             // guess, not adding to it.
-            deepgram::Event::Interim(t) => self.live_guess = t,
+            deepgram::Event::Interim(t) => self.spoken.interim(t),
             deepgram::Event::Final(t) => {
-                join(&mut self.live_said, &t);
-                self.live_guess.clear();
+                self.spoken.settled_words(&t);
                 self.requests += 1;
             }
-            deepgram::Event::UtteranceEnd => self.live_guess.clear(),
+            deepgram::Event::UtteranceEnd => self.spoken.utterance_end(),
             deepgram::Event::Open => {}
             deepgram::Event::Trouble(m) => self.note = Some(format!("Deepgram: {m}")),
         }
@@ -758,9 +832,7 @@ impl Session {
     /// not the requests came back in that order.
     pub fn pending(&self) -> String {
         if self.is_live() {
-            let mut out = self.live_said.clone();
-            join(&mut out, &self.live_guess);
-            return out;
+            return self.spoken.text();
         }
         let mut out = String::new();
         for c in self.chunks.values() {
@@ -772,12 +844,7 @@ impl Session {
     /// True once the key is up and nothing is still on the wire.
     pub fn settled(&self) -> bool {
         if self.is_live() {
-            let Some(at) = self.released else {
-                return false;
-            };
-            // The last words arrive a moment after the key comes up, so give
-            // them one — but never wait on a socket that has gone quiet.
-            return self.live_guess.is_empty() || at.elapsed() > SETTLE;
+            return self.spoken.done(Instant::now(), self.listening());
         }
         !self.listening()
             && self.waiting.is_empty()
@@ -788,11 +855,11 @@ impl Session {
     /// Take the finished text. The chunks go with it, so the next hold starts
     /// from nothing.
     pub fn take(&mut self) -> String {
+        if self.is_live() {
+            return self.spoken.take();
+        }
         let text = self.pending();
         self.chunks.clear();
-        self.live_said.clear();
-        self.live_guess.clear();
-        self.released = None;
         text
     }
 
@@ -801,9 +868,7 @@ impl Session {
         self.stop_listening();
         self.chunks.clear();
         self.waiting.clear();
-        self.live_said.clear();
-        self.live_guess.clear();
-        self.released = None;
+        self.spoken.clear();
     }
 
     /// Stop the microphone and give the socket up without waiting, for the way
@@ -1063,6 +1128,86 @@ mod tests {
             Act::Stop,
             "asking for push-to-talk on a terminal that cannot do it must not hang"
         );
+    }
+
+    use super::{Spoken, SETTLE};
+
+    #[test]
+    fn nothing_settles_while_the_key_is_still_down() {
+        let mut sp = Spoken::default();
+        sp.settled_words("fix the auth");
+        assert!(!sp.done(Instant::now(), true));
+    }
+
+    /// The reported bug: a short hold, released before the transcriber had
+    /// said anything. An empty guess at that moment means "nothing yet", not
+    /// "nothing left", and treating it as finished threw away the release
+    /// that later words needed to settle against.
+    #[test]
+    fn a_release_before_any_words_is_not_the_end_of_them() {
+        let mut sp = Spoken::default();
+        let t0 = Instant::now();
+        sp.release(t0);
+        assert!(
+            !sp.done(t0 + Duration::from_millis(1), false),
+            "declared finished before the transcriber had said anything"
+        );
+        // The words turn up a moment later, as they do.
+        sp.settled_words("can you hear me");
+        assert!(sp.done(t0 + Duration::from_millis(400), false));
+        assert_eq!(sp.take(), "can you hear me");
+    }
+
+    #[test]
+    fn a_guess_still_in_flight_is_waited_for() {
+        let mut sp = Spoken::default();
+        let t0 = Instant::now();
+        sp.settled_words("can you");
+        sp.interim("hear".into());
+        sp.release(t0);
+        assert!(!sp.done(t0 + Duration::from_millis(200), false));
+        sp.settled_words("hear me");
+        assert!(sp.done(t0 + Duration::from_millis(300), false));
+        assert_eq!(sp.take(), "can you hear me");
+    }
+
+    #[test]
+    fn the_clock_gives_up_when_nothing_is_ever_said() {
+        let mut sp = Spoken::default();
+        let t0 = Instant::now();
+        sp.release(t0);
+        assert!(!sp.done(t0 + SETTLE - Duration::from_millis(50), false));
+        assert!(sp.done(t0 + SETTLE + Duration::from_millis(50), false));
+        assert_eq!(sp.take(), "", "nothing was said, so nothing is inserted");
+    }
+
+    #[test]
+    fn a_straggler_after_everything_settled_is_not_stranded() {
+        let mut sp = Spoken::default();
+        let t0 = Instant::now();
+        sp.settled_words("can you hear me");
+        sp.release(t0);
+        assert!(sp.done(t0 + Duration::from_millis(100), false));
+        assert_eq!(sp.take(), "can you hear me");
+        // A transcriber may send one more after being asked to finish.
+        sp.settled_words("really");
+        assert!(
+            sp.done(t0 + Duration::from_millis(600), false),
+            "a late word with no release left to settle against was stranded"
+        );
+        assert_eq!(sp.take(), "really");
+    }
+
+    #[test]
+    fn taking_the_words_leaves_nothing_waiting() {
+        let mut sp = Spoken::default();
+        let t0 = Instant::now();
+        sp.settled_words("done");
+        sp.release(t0);
+        assert!(sp.waiting());
+        let _ = sp.take();
+        assert!(!sp.waiting(), "the loop would keep waking for nothing");
+        assert!(!sp.done(t0 + Duration::from_secs(10), false));
     }
 
     #[test]
