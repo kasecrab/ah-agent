@@ -38,6 +38,10 @@ pub enum Kind {
     },
     /// Models that take audio input, for `/voice model`.
     VoiceModel,
+    /// Who does the transcribing: Deepgram's socket or an OpenRouter model.
+    VoiceProvider,
+    /// Free text for a Deepgram API key. Typed blind.
+    VoiceKey,
     /// Input devices, for `/voice devices`.
     VoiceDevice,
     /// Background shell jobs. Enter opens the output view.
@@ -92,6 +96,9 @@ pub struct Picker {
     pub hint: String,
     /// Letters act as shortcuts instead of filtering (short, fixed lists).
     pub hotkeys: bool,
+    /// What is typed is a secret: show its length, not its characters, and
+    /// never let it onto the screen where a screenshot would keep it.
+    pub secret: bool,
 }
 
 impl Picker {
@@ -107,6 +114,7 @@ impl Picker {
             error: None,
             hint: String::new(),
             hotkeys: false,
+            secret: false,
         };
         p.refilter();
         p
@@ -232,7 +240,11 @@ impl Picker {
             f.render_widget(
                 Paragraph::new(Line::from(vec![
                     Span::styled("> ", pal.bold(pal.accent)),
-                    Span::raw(self.query.clone()),
+                    Span::raw(if self.secret {
+                        "•".repeat(self.query.chars().count())
+                    } else {
+                        self.query.clone()
+                    }),
                 ])),
                 q_area,
             );

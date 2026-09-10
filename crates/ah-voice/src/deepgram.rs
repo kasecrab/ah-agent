@@ -165,11 +165,7 @@ fn run(
     let mut pcm: Vec<i16> = Vec::with_capacity(cfg.sample_rate as usize);
     let mut bytes: Vec<u8> = Vec::with_capacity(cfg.sample_rate as usize * 2);
 
-    loop {
-        match stop.recv_timeout(TICK) {
-            Err(RecvTimeoutError::Timeout) => {}
-            _ => break,
-        }
+    while let Err(RecvTimeoutError::Timeout) = stop.recv_timeout(TICK) {
         let want = listening.load(Ordering::Acquire);
 
         // Hold the socket open for a while after the key comes up: the next
@@ -743,8 +739,10 @@ mod tests {
             let step = 16_000 / 25 * 2; // 40 ms
             for c in bytes.chunks(step) {
                 let pcm: Vec<i16> = c
-                    .chunks_exact(2)
-                    .map(|p| i16::from_le_bytes([p[0], p[1]]))
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|p| i16::from_le_bytes(*p))
                     .collect();
                 producer.write(&pcm);
                 std::thread::sleep(Duration::from_millis(40));

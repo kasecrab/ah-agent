@@ -1751,6 +1751,117 @@ impl App {
         self.dirty = true;
     }
 
+    /// Who transcribes. Asked once, then remembered.
+    fn open_voice_provider_picker(&mut self) {
+        let pal = &self.pal;
+        let cur = self.settings().voice.provider.clone();
+        let mark = |id: &str| if id == cur { " •" } else { "" };
+        let rows = vec![
+            Row {
+                style: None,
+                id: "deepgram".into(),
+                search: "deepgram live realtime websocket nova".into(),
+                label: format!("Deepgram{}", mark("deepgram")),
+                cols: vec![(
+                    "  words as you speak · needs a Deepgram key".into(),
+                    pal.dim(),
+                )],
+            },
+            Row {
+                style: None,
+                id: "openrouter".into(),
+                search: "openrouter whisper gemini gpt transcribe".into(),
+                label: format!("OpenRouter{}", mark("openrouter")),
+                cols: vec![(
+                    "  a phrase at a time · the key ah already has".into(),
+                    pal.dim(),
+                )],
+            },
+        ];
+        let mut p = Picker::new(Kind::VoiceProvider, "who transcribes · Enter select", "", rows);
+        p.hotkeys = true;
+        p.hint = "Deepgram opens a socket and answers while you are still talking. \
+                  OpenRouter sends each phrase when you pause."
+            .into();
+        p.selected = usize::from(cur == "openrouter");
+        self.picker = Some(p);
+        self.dirty = true;
+    }
+
+    fn pick_voice_provider(&mut self, name: &str) {
+        self.apply_patch(
+            Origin::Runtime("slash".into()),
+            serde_json::json!({"voice": {"provider": name}}),
+        );
+        if self.voice.is_some() {
+            self.disarm_voice();
+        }
+        if name == "deepgram" && ah_core::auth::deepgram_key().is_none() {
+            self.open_voice_key_prompt();
+            return;
+        }
+        self.arm_voice(None);
+    }
+
+    /// Ask for the Deepgram key. It is typed blind and written straight to the
+    /// credentials file; it is never shown, echoed or logged.
+    fn open_voice_key_prompt(&mut self) {
+        let mut p = Picker::new(
+            Kind::VoiceKey,
+            "Deepgram API key · Enter save · Esc cancel",
+            "",
+            Vec::new(),
+        );
+        p.secret = true;
+        p.hint = format!(
+            "typed blind, saved to {} owner-only. \
+             DEEPGRAM_API_KEY in the environment works instead",
+            ah_core::paths::credentials_file().display()
+        );
+        self.picker = Some(p);
+        self.dirty = true;
+    }
+
+    /// Deepgram's own models. Short, fixed, and nothing to fetch.
+    fn open_deepgram_model_picker(&mut self) {
+        let pal = &self.pal;
+        let cur = self.settings().voice.model_for();
+        const MODELS: &[(&str, &str)] = &[
+            ("nova-3", "the current one: best accuracy, 30-odd languages"),
+            ("nova-3-medical", "clinical vocabulary"),
+            ("nova-2", "the one before it, a little cheaper"),
+            ("nova-2-meeting", "several people, a room away from the microphone"),
+            ("nova-2-phonecall", "narrowband audio"),
+            ("nova-2-medical", "clinical vocabulary, older model"),
+            ("enhanced", "older still"),
+            ("base", "cheapest"),
+        ];
+        let rows = MODELS
+            .iter()
+            .map(|(id, about)| Row {
+                style: None,
+                id: (*id).into(),
+                search: format!("{id} {about}"),
+                label: if *id == cur {
+                    format!("{id} •")
+                } else {
+                    (*id).to_string()
+                },
+                cols: vec![(format!("  {about}"), pal.dim())],
+            })
+            .collect();
+        let mut p = Picker::new(
+            Kind::VoiceModel,
+            "Deepgram model · Enter select · Esc close",
+            "",
+            rows,
+        );
+        p.hint = "billed by the minute of audio, not by the token".into();
+        p.selected = MODELS.iter().position(|(id, _)| *id == cur).unwrap_or(0);
+        self.picker = Some(p);
+        self.dirty = true;
+    }
+
     /// Models that can hear. The audio price is the number that matters here,
     /// and it is the one nothing else shows.
     fn open_voice_model_picker(&mut self, query: &str) {
@@ -2172,6 +2283,32 @@ impl App {
                                 self.disarm_voice();
                             }
                             self.arm_voice(Some(id));
+                        }
+                    }
+                    Kind::VoiceProvider => {
+                        if let Some(name) = chosen {
+                            self.pick_voice_provider(&name);
+                        }
+                    }
+                    Kind::VoiceKey => {
+                        // The typed text is the secret itself, so it goes
+                        // straight to the file and is never echoed back.
+                        let key = query;
+                        if key.is_empty() {
+                            self.push(Block::Notice("no key given; dictation not armed".into()));
+                        } else {
+                            match ah_core::auth::save_deepgram_key(&key) {
+                                Ok(()) => {
+                                    self.push(Block::Notice(format!(
+                                        "Deepgram key saved to {}",
+                                        ah_core::paths::credentials_file().display()
+                                    )));
+                                    self.arm_voice(None);
+                                }
+                                Err(e) => {
+                                    self.push(Block::Error(format!("could not save the key: {e}")))
+                                }
+                            }
                         }
                     }
                     Kind::VoiceDevice => {
@@ -3477,6 +3614,7 @@ impl App {
                 self.stats.voice_phrases += 1;
             }
             voice::Event::Failed { seq, message } => v.failed(seq, message),
+            voice::Event::Live(e) => v.live_event(e),
         }
         if let Some(n) = self.voice.as_mut().and_then(|v| v.note.take()) {
             self.push(Block::Notice(n));
@@ -3547,6 +3685,22 @@ impl App {
             ));
             return;
         }
+        // Who listens is the first thing to settle, and it is asked once.
+        if cfg.provider.trim().is_empty() {
+            self.open_voice_provider_picker();
+            return;
+        }
+
+        if cfg.live() {
+            if ah_core::auth::deepgram_key().is_none() {
+                self.open_voice_key_prompt();
+                return;
+            }
+            let model = model.unwrap_or_else(|| cfg.model_for());
+            self.start_voice(&cfg, model, false, None);
+            return;
+        }
+
         let model = model.unwrap_or_else(|| cfg.model.clone());
         if model.trim().is_empty() {
             self.open_voice_model_picker("");
@@ -3558,11 +3712,6 @@ impl App {
             ));
             return;
         };
-        if self.voice_first_use() {
-            self.push(Block::Notice(format!(
-                "dictation sends recorded audio to {model} through OpenRouter.                  It is billed to your key like any other request, and is never                  written to a session file or the log."
-            )));
-        }
         let provider = std::sync::Arc::new(ah_core::provider::openrouter::OpenRouter::new(
             self.settings().model.base_url.clone(),
             key,
@@ -3590,10 +3739,43 @@ impl App {
                  voice.prompt_append is ignored while it is the voice model"
             )));
         }
+        self.start_voice(&cfg, model, stt, Some(provider));
+    }
+
+    /// Open the microphone and say what is listening to it.
+    fn start_voice(
+        &mut self,
+        cfg: &ah_core::abi::VoiceSettings,
+        model: String,
+        stt: bool,
+        provider: Option<std::sync::Arc<ah_core::provider::openrouter::OpenRouter>>,
+    ) {
+        if self.voice_first_use() {
+            self.push(Block::Notice(if cfg.live() {
+                "dictation streams your microphone to Deepgram while the talk key is held, \
+                 billed to your Deepgram key by the minute. It is never written to a \
+                 session file or the log."
+                    .to_string()
+            } else {
+                format!(
+                    "dictation sends recorded audio to {model} through OpenRouter. It is \
+                     billed to your key like any other request, and is never written to a \
+                     session file or the log."
+                )
+            }));
+        }
+        let provider = provider.unwrap_or_else(|| {
+            // The live route never uses it; a client with no key costs nothing
+            // to hold and keeps the session one shape.
+            std::sync::Arc::new(ah_core::provider::openrouter::OpenRouter::new(
+                self.settings().model.base_url.clone(),
+                String::new(),
+            ))
+        });
         let capture_cmd = self.stack.capture_cmd();
         let route = format!("voice-{}", self.session_id);
         match voice::Session::arm(
-            &cfg,
+            cfg,
             model.clone(),
             stt,
             provider,
@@ -3948,8 +4130,18 @@ impl App {
             }
         } else {
             out.push(Span::styled("○ ", pal.dim()));
+            // On the live route the socket is what makes the first word
+            // instant, so say when it is up rather than only that the
+            // microphone is.
+            let ready = if v.is_live() && v.live_ready() {
+                " · socket up"
+            } else if v.is_live() {
+                " · connecting"
+            } else {
+                ""
+            };
             out.push(Span::styled(
-                format!("mic on · hold {}", self.talk_key_name()),
+                format!("mic on · hold {}{ready}", self.talk_key_name()),
                 pal.dim(),
             ));
         }
@@ -3987,7 +4179,11 @@ impl App {
                     return;
                 }
                 if id.is_empty() {
-                    self.open_voice_model_picker("");
+                    if self.settings().voice.live() {
+                        self.open_deepgram_model_picker();
+                    } else {
+                        self.open_voice_model_picker("");
+                    }
                     return;
                 }
                 self.apply_patch(

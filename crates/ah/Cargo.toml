@@ -23,7 +23,10 @@ pulldown-cmark = { version = "0.13", default-features = false }
 dirs = "7"
 
 [features]
-default = ["mic"]
+default = ["mic", "live"]
 # Record from the system microphone. Off, `/voice` needs a recorder on PATH
 # or `voice.capture_cmd`, and nothing links an audio library.
 mic = ["ah-voice/mic"]
+# Dictation against Deepgram's live socket. Off, only the OpenRouter routes
+# are offered and no TLS client but `ureq`'s is linked.
+live = ["ah-voice/live"]

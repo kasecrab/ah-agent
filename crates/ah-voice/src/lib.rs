@@ -48,6 +48,16 @@ pub struct Config {
     pub speech_ratio: f32,
 }
 
+/// Where the 16 kHz mono stream goes once it has been captured.
+pub enum Output {
+    /// Cut it into phrases here and hand each one over encoded, for a
+    /// transcriber that takes whole clips.
+    Phrases(Box<dyn Fn(Phrase) + Send>),
+    /// Pass it straight through, for a transcriber that listens continuously
+    /// and decides for itself where a phrase ends.
+    Live(ring::Producer),
+}
+
 /// An open microphone. Dropping it closes the device.
 pub struct Dictation {
     stop: Option<mpsc::Sender<()>>,
@@ -60,12 +70,8 @@ pub struct Dictation {
 }
 
 impl Dictation {
-    /// Open the device and start the worker. `hand` is called on the worker
-    /// thread with each finished phrase.
-    pub fn arm(
-        cfg: &Config,
-        hand: impl Fn(Phrase) + Send + 'static,
-    ) -> Result<Self, capture::Error> {
+    /// Open the device and start the worker.
+    pub fn arm(cfg: &Config, out: Output) -> Result<Self, capture::Error> {
         let opened = capture::open(&capture::Request {
             device: cfg.device.clone(),
             command: cfg.capture_cmd.clone(),
@@ -85,7 +91,7 @@ impl Dictation {
         let worker = std::thread::Builder::new()
             .name("ah-voice".into())
             .spawn(move || {
-                run(opened, device_rate, channels, cfg, l, lv, ph, stop_rx, hand);
+                run(opened, device_rate, channels, cfg, l, lv, ph, stop_rx, out);
             })
             .map_err(|e| capture::Error::Device(e.to_string()))?;
 
@@ -156,7 +162,7 @@ fn run(
     level: Arc<AtomicU32>,
     phrases: Arc<AtomicU64>,
     stop: mpsc::Receiver<()>,
-    hand: impl Fn(Phrase),
+    out: Output,
 ) {
     let mut resampler = resample::Resampler::new(device_rate);
     let mut chunker = vad::Chunker::new(vad::Config {
@@ -198,24 +204,33 @@ fn run(
             if let Some(l) = peak(&pcm) {
                 level.store(l.to_bits(), Ordering::Relaxed);
             }
-            chunks.clear();
-            chunker.push(&pcm, true, &mut chunks);
-            for c in chunks.drain(..) {
-                seq += 1;
-                phrases.fetch_add(1, Ordering::Relaxed);
-                hand(Phrase {
-                    seq,
-                    wav: wav::encode(&c.pcm, resample::TARGET_RATE),
-                    rate: resample::TARGET_RATE,
-                    speech_ms: c.speech_ms,
-                });
+            match &out {
+                // Somebody downstream is listening continuously and decides
+                // for itself where a phrase ends, so nothing is cut here.
+                Output::Live(to) => to.write(&pcm),
+                Output::Phrases(hand) => {
+                    chunks.clear();
+                    chunker.push(&pcm, true, &mut chunks);
+                    for c in chunks.drain(..) {
+                        seq += 1;
+                        phrases.fetch_add(1, Ordering::Relaxed);
+                        hand(Phrase {
+                            seq,
+                            wav: wav::encode(&c.pcm, resample::TARGET_RATE),
+                            rate: resample::TARGET_RATE,
+                            speech_ms: c.speech_ms,
+                        });
+                    }
+                }
             }
         }
 
         if !on {
             // The key came up: hand over whatever was still open, then go
             // back to sleep.
-            if let Some(c) = chunker.flush() {
+            if let Output::Phrases(hand) = &out
+                && let Some(c) = chunker.flush()
+            {
                 seq += 1;
                 phrases.fetch_add(1, Ordering::Relaxed);
                 hand(Phrase {
@@ -304,12 +319,33 @@ mod tests {
     }
 
     #[test]
+    fn live_output_streams_instead_of_cutting_phrases() {
+        let (producer, consumer) = ring::ring(16_000 * 4);
+        let d = Dictation::arm(&cfg(fixture_cmd()), Output::Live(producer)).unwrap();
+        d.listen(true);
+        let mut pcm = Vec::new();
+        for _ in 0..300 {
+            consumer.drain(&mut pcm);
+            if pcm.len() > 8_000 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        d.listen(false);
+        drop(d);
+        // Half a second of 16 kHz audio, silence and all: nothing was cut out
+        // and nothing waited for a pause.
+        assert!(pcm.len() > 8_000, "only {} samples arrived", pcm.len());
+    }
+
+    #[test]
     fn a_held_key_turns_speech_into_numbered_phrases() {
         let got: Arc<Mutex<Vec<Phrase>>> = Arc::new(Mutex::new(Vec::new()));
         let sink = got.clone();
-        let d = Dictation::arm(&cfg(fixture_cmd()), move |p| {
-            sink.lock().unwrap().push(p);
-        })
+        let d = Dictation::arm(
+            &cfg(fixture_cmd()),
+            Output::Phrases(Box::new(move |p| sink.lock().unwrap().push(p))),
+        )
         .unwrap();
         d.listen(true);
         for _ in 0..200 {
@@ -336,9 +372,10 @@ mod tests {
     fn a_key_that_is_never_held_sends_nothing() {
         let got: Arc<Mutex<Vec<Phrase>>> = Arc::new(Mutex::new(Vec::new()));
         let sink = got.clone();
-        let d = Dictation::arm(&cfg(fixture_cmd()), move |p| {
-            sink.lock().unwrap().push(p);
-        })
+        let d = Dictation::arm(
+            &cfg(fixture_cmd()),
+            Output::Phrases(Box::new(move |p| sink.lock().unwrap().push(p))),
+        )
         .unwrap();
         std::thread::sleep(Duration::from_millis(400));
         assert_eq!(d.phrases(), 0);
@@ -352,9 +389,10 @@ mod tests {
         std::fs::write(&path, vec![0u8; 16_000 * 2 * 2]).unwrap();
         let got: Arc<Mutex<Vec<Phrase>>> = Arc::new(Mutex::new(Vec::new()));
         let sink = got.clone();
-        let d = Dictation::arm(&cfg(format!("cat {}", path.display())), move |p| {
-            sink.lock().unwrap().push(p);
-        })
+        let d = Dictation::arm(
+            &cfg(format!("cat {}", path.display())),
+            Output::Phrases(Box::new(move |p| sink.lock().unwrap().push(p))),
+        )
         .unwrap();
         d.listen(true);
         std::thread::sleep(Duration::from_millis(300));

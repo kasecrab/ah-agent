@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use ah_abi::{ChatRequest, Message, VoiceSettings};
 use ah_core::provider::openrouter::OpenRouter;
+use ah_voice::deepgram;
 use ah_core::provider::{Provider, StreamEvent};
 
 use super::Msg;
@@ -34,6 +35,8 @@ pub enum Event {
         seq: u64,
         message: String,
     },
+    /// Something Deepgram's socket said.
+    Live(deepgram::Event),
 }
 
 /// How the talk key behaves here, which is not a matter of opinion but of
@@ -74,6 +77,18 @@ pub struct Session {
     /// It is better at the job and cheaper, but it hands back the whole
     /// phrase at once and takes no context, so both paths are kept.
     stt: bool,
+    /// Deepgram's socket, when it is the one listening. Everything below it
+    /// belongs to that route and is untouched by the other two.
+    live: Option<deepgram::Live>,
+    /// Words the socket has settled on during this hold.
+    live_said: String,
+    /// The word or two still being decided. Replaced wholesale each time.
+    live_guess: String,
+    /// When the talk key came up, so the last words have a moment to land
+    /// before the grey text is committed.
+    released: Option<Instant>,
+    /// Audio actually sent, which is what Deepgram bills for.
+    pub audio_ms: u64,
     cfg: VoiceSettings,
     max_inflight: usize,
     /// Sticky-routing key, so every phrase of one dictation lands on the same
@@ -110,28 +125,68 @@ impl Session {
         route: String,
     ) -> Result<Self, String> {
         let (phrase_ms, max_chunk_ms, max_inflight) = cfg.dials();
-        let hand_tx = tx.clone();
-        let dictation = ah_voice::Dictation::arm(
-            &ah_voice::Config {
-                device: cfg.device.clone(),
-                capture_cmd,
-                sample_rate: cfg.sample_rate,
-                ring_ms: cfg.ring_ms,
-                phrase_ms,
-                max_chunk_ms,
-                preroll_ms: cfg.preroll_ms,
-                speech_ratio: cfg.speech_ratio,
-            },
-            move |p| {
-                let _ = hand_tx.send(Msg::Voice(Event::Phrase(p)));
-            },
-        )
-        .map_err(|e| e.to_string())?;
+        let audio = ah_voice::Config {
+            device: cfg.device.clone(),
+            capture_cmd,
+            sample_rate: cfg.sample_rate,
+            ring_ms: cfg.ring_ms,
+            phrase_ms,
+            max_chunk_ms,
+            preroll_ms: cfg.preroll_ms,
+            speech_ratio: cfg.speech_ratio,
+        };
+        // Deepgram listens continuously and finds the phrase boundaries
+        // itself, so on that route the audio is streamed rather than cut, and
+        // the local voice detector never runs.
+        let (live, out) = if cfg.live() {
+            let key = ah_core::auth::deepgram_key()
+                .ok_or("no Deepgram API key: run /voice and choose Deepgram again")?;
+            // Two seconds of headroom between the microphone thread and the
+            // socket thread, which is far more than either needs.
+            let (producer, consumer) = ah_voice::ring::ring(ah_voice::resample::TARGET_RATE as usize * 2);
+            let live_tx = tx.clone();
+            let live = deepgram::Live::open(
+                deepgram::Config {
+                    api_key: key,
+                    model: model.clone(),
+                    language: cfg.language.clone(),
+                    keyterms: cfg
+                        .prompt_append
+                        .split(',')
+                        .map(|t| t.trim().to_string())
+                        .filter(|t| !t.is_empty())
+                        .collect(),
+                    sample_rate: ah_voice::resample::TARGET_RATE,
+                    endpointing_ms: phrase_ms,
+                    idle_secs: cfg.idle_secs,
+                },
+                consumer,
+                move |e| {
+                    let _ = live_tx.send(Msg::Voice(Event::Live(e)));
+                },
+            )
+            .map_err(|e| e.to_string())?;
+            (Some(live), ah_voice::Output::Live(producer))
+        } else {
+            let hand_tx = tx.clone();
+            (
+                None,
+                ah_voice::Output::Phrases(Box::new(move |p| {
+                    let _ = hand_tx.send(Msg::Voice(Event::Phrase(p)));
+                })),
+            )
+        };
+        let dictation = ah_voice::Dictation::arm(&audio, out).map_err(|e| e.to_string())?;
         Ok(Self {
             dictation,
             provider,
             model,
             stt,
+            live,
+            live_said: String::new(),
+            live_guess: String::new(),
+            released: None,
+            audio_ms: 0,
             cfg: cfg.clone(),
             max_inflight,
             route,
@@ -164,7 +219,11 @@ impl Session {
 
     /// Anything on screen or on the wire that has not been committed yet.
     pub fn busy(&self) -> bool {
-        self.listening() || !self.chunks.is_empty() || !self.waiting.is_empty()
+        self.listening()
+            || !self.chunks.is_empty()
+            || !self.waiting.is_empty()
+            || !self.live_said.is_empty()
+            || !self.live_guess.is_empty()
     }
 
     // ---- the talk key ----------------------------------------------------
@@ -180,7 +239,11 @@ impl Session {
         }
         self.saw_repeat = false;
         self.listen_since = Some(Instant::now());
+        self.released = None;
         self.dictation.listen(true);
+        if let Some(l) = &self.live {
+            l.listen(true);
+        }
     }
 
     pub fn repeat(&mut self) {
@@ -208,9 +271,18 @@ impl Session {
     }
 
     fn stop_listening(&mut self) {
+        if let Some(since) = self.listen_since {
+            self.audio_ms += since.elapsed().as_millis() as u64;
+        }
         self.listen_since = None;
         self.last_key = None;
         self.dictation.listen(false);
+        if let Some(l) = &self.live {
+            // Asks Deepgram for what it is still holding rather than waiting
+            // out the endpointing silence.
+            l.listen(false);
+            self.released = Some(Instant::now());
+        }
     }
 
     /// Called from the event loop while listening. Ends a hold on terminals
@@ -253,6 +325,15 @@ impl Session {
     /// How often the event loop has to look in on us. `None` means nothing is
     /// waiting on a clock.
     pub fn wake_in(&self) -> Option<Duration> {
+        if self.is_live() {
+            // The socket thread wakes on its own; this is only about noticing
+            // that the last words have landed.
+            return if self.listen_since.is_some() {
+                Some(Duration::from_millis(if self.cfg.meter { 80 } else { 120 }))
+            } else {
+                self.released.map(|_| Duration::from_millis(120))
+            };
+        }
         if self.listen_since.is_none() {
             return (self.inflight > 0 || !self.waiting.is_empty())
                 .then(|| Duration::from_millis(200));
@@ -395,6 +476,32 @@ impl Session {
 
     // ---- results ---------------------------------------------------------
 
+    /// True while Deepgram is the one listening.
+    pub fn is_live(&self) -> bool {
+        self.live.is_some()
+    }
+
+    /// The socket is up, so the next phrase costs no handshake.
+    pub fn live_ready(&self) -> bool {
+        self.live.as_ref().is_some_and(|l| l.connected())
+    }
+
+    pub fn live_event(&mut self, ev: deepgram::Event) {
+        match ev {
+            // Interim words replace each other: Deepgram is refining one
+            // guess, not adding to it.
+            deepgram::Event::Interim(t) => self.live_guess = t,
+            deepgram::Event::Final(t) => {
+                join(&mut self.live_said, &t);
+                self.live_guess.clear();
+                self.requests += 1;
+            }
+            deepgram::Event::UtteranceEnd => self.live_guess.clear(),
+            deepgram::Event::Open => {}
+            deepgram::Event::Trouble(m) => self.note = Some(format!("Deepgram: {m}")),
+        }
+    }
+
     pub fn delta(&mut self, seq: u64, text: &str) {
         if let Some(c) = self.chunks.get_mut(&seq) {
             c.text.push_str(text);
@@ -428,6 +535,11 @@ impl Session {
     /// Everything transcribed so far, in the order it was spoken, whether or
     /// not the requests came back in that order.
     pub fn pending(&self) -> String {
+        if self.is_live() {
+            let mut out = self.live_said.clone();
+            join(&mut out, &self.live_guess);
+            return out;
+        }
         let mut out = String::new();
         for c in self.chunks.values() {
             join(&mut out, &c.text);
@@ -437,6 +549,14 @@ impl Session {
 
     /// True once the key is up and nothing is still on the wire.
     pub fn settled(&self) -> bool {
+        if self.is_live() {
+            let Some(at) = self.released else {
+                return false;
+            };
+            // The last words arrive a moment after the key comes up, so give
+            // them one — but never wait on a socket that has gone quiet.
+            return self.live_guess.is_empty() || at.elapsed() > SETTLE;
+        }
         !self.listening()
             && self.waiting.is_empty()
             && self.inflight == 0
@@ -448,6 +568,9 @@ impl Session {
     pub fn take(&mut self) -> String {
         let text = self.pending();
         self.chunks.clear();
+        self.live_said.clear();
+        self.live_guess.clear();
+        self.released = None;
         text
     }
 
@@ -456,8 +579,15 @@ impl Session {
         self.stop_listening();
         self.chunks.clear();
         self.waiting.clear();
+        self.live_said.clear();
+        self.live_guess.clear();
+        self.released = None;
     }
 }
+
+/// How long the last words get to arrive after the talk key comes up before
+/// the grey text is committed anyway.
+const SETTLE: Duration = Duration::from_millis(1200);
 
 /// Characters of the sentence so far sent with each phrase. Long enough to
 /// finish a clause, short enough not to matter on the bill.
