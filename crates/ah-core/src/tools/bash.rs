@@ -58,6 +58,7 @@ impl Tool for Bash {
             Err(e) => return ToolResult::err(format!("failed to spawn {shell}: {e}")),
         };
         if background {
+            job.announce();
             return ToolResult::ok(format!(
                 "started job {} in the background: {cmd}\n\
                  Read it with the jobs tool: {{\"action\": \"output\", \"id\": {}}}. \
@@ -85,6 +86,8 @@ impl Tool for Bash {
             text.push_str(&format!("\n[timed out after {} ms]", timeout.as_millis()));
             return ToolResult::err(text);
         }
+        // Nobody is waiting on it now, so its end is news.
+        job.announce();
         let (tail, _) = job.tail(20);
         let mut text = format!(
             "still running after {} ms, moved to the background as job {}.\n\

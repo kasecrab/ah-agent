@@ -2255,6 +2255,7 @@ mod tests {
         let job = crate::jobs::table()
             .spawn("sh", "true", &std::env::current_dir().unwrap(), 4096, 0)
             .unwrap();
+        job.announce();
         assert!(job.wait(Duration::from_secs(5)));
         let provider = MockProvider::new(vec![vec![
             StreamEvent::Text("ok".into()),

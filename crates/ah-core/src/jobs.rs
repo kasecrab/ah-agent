@@ -11,7 +11,7 @@
 use std::collections::VecDeque;
 use std::io::Read;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -153,6 +153,11 @@ pub struct Job {
     /// Bumped on every write, so a view can tell "changed" without locking.
     version: AtomicU64,
     reported: AtomicU32,
+    /// Whether the end of this job is news. A command run in the foreground is
+    /// reported by the call that ran it, so it announces nothing; one started
+    /// in the background, or moved there when it outran its timeout, has
+    /// nobody waiting on it and says so when it ends.
+    announce: AtomicBool,
     child: Mutex<Option<Child>>,
     open_pipes: AtomicU32,
     duration_ms: AtomicU64,
@@ -161,6 +166,11 @@ pub struct Job {
 impl Job {
     pub fn state(&self) -> State {
         *self.state.lock().unwrap()
+    }
+
+    /// Nobody is waiting on this one any more: when it ends, say so.
+    pub fn announce(&self) {
+        self.announce.store(true, Ordering::Relaxed);
     }
 
     pub fn owner(&self) -> u32 {
@@ -280,7 +290,9 @@ impl Job {
 
     /// True the first time this audience is told the job finished.
     fn claim(&self, who: Audience) -> bool {
-        !self.running() && self.reported.fetch_or(who.bit(), Ordering::SeqCst) & who.bit() == 0
+        !self.running()
+            && self.announce.load(Ordering::Relaxed)
+            && self.reported.fetch_or(who.bit(), Ordering::SeqCst) & who.bit() == 0
     }
 
     fn finish(&self, code: i32) {
@@ -366,6 +378,7 @@ impl Jobs {
             done: Condvar::new(),
             version: AtomicU64::new(0),
             reported: AtomicU32::new(0),
+            announce: AtomicBool::new(false),
             child: Mutex::new(Some(child)),
             open_pipes: AtomicU32::new(2),
             duration_ms: AtomicU64::new(0),
@@ -431,10 +444,14 @@ impl Jobs {
             .collect()
     }
 
-    /// Hand every job of `owner` to `to`. An agent that ends while a command
-    /// of its own is still running gives it back to the one above.
+    /// Hand what is left of `owner` to `to`. A command still running when its
+    /// agent ends goes to the one above, which hears about it when it ends;
+    /// one that already finished was that agent's business and is dropped,
+    /// rather than announced twice to somebody who never ran it.
     pub fn reparent_all(&self, owner: u32, to: u32) {
-        for j in self.jobs.lock().unwrap().iter() {
+        let mut jobs = self.jobs.lock().unwrap();
+        jobs.retain(|j| j.owner() != owner || j.running());
+        for j in jobs.iter() {
             if j.owner() == owner {
                 j.reparent(to);
             }
@@ -466,7 +483,10 @@ impl Jobs {
     /// without claiming the news.
     pub fn unheard(&self, who: Audience) -> bool {
         self.jobs.lock().unwrap().iter().any(|j| {
-            who.covers(j) && !j.running() && j.reported.load(Ordering::Relaxed) & who.bit() == 0
+            who.covers(j)
+                && !j.running()
+                && j.announce.load(Ordering::Relaxed)
+                && j.reported.load(Ordering::Relaxed) & who.bit() == 0
         })
     }
 
@@ -633,6 +653,7 @@ mod tests {
     fn a_finish_is_announced_once_per_audience() {
         let _guard = notice_lock();
         let j = table().spawn("sh", "true", &cwd(), 65536, 0).unwrap();
+        j.announce();
         assert!(j.wait(Duration::from_secs(5)));
         assert!(table().unheard(Audience::Model(0)));
         let mine = format!("job {} exited 0", j.id);
@@ -675,6 +696,8 @@ mod tests {
         let t = own_table();
         let mine = t.spawn("sh", "true", &cwd(), 65536, 0).unwrap();
         let theirs = t.spawn("sh", "true", &cwd(), 65536, 7).unwrap();
+        mine.announce();
+        theirs.announce();
         assert!(mine.wait(Duration::from_secs(5)));
         assert!(theirs.wait(Duration::from_secs(5)));
 
@@ -693,6 +716,8 @@ mod tests {
         let t = own_table();
         let mine = t.spawn("sh", "true", &cwd(), 65536, 0).unwrap();
         let theirs = t.spawn("sh", "true", &cwd(), 65536, 7).unwrap();
+        mine.announce();
+        theirs.announce();
         assert!(mine.wait(Duration::from_secs(5)));
         assert!(theirs.wait(Duration::from_secs(5)));
 
@@ -702,6 +727,17 @@ mod tests {
         // The subagent's job is still news to the view of that agent.
         assert!(t.unheard(Audience::Ui(7)));
         assert_eq!(t.notices(Audience::Ui(7)).len(), 1);
+    }
+
+    #[test]
+    fn a_command_somebody_waited_for_announces_nothing() {
+        let t = own_table();
+        // A foreground call never calls `announce`: the call itself reports.
+        let j = t.spawn("sh", "true", &cwd(), 65536, 0).unwrap();
+        assert!(j.wait(Duration::from_secs(5)));
+        assert!(!t.unheard(Audience::Ui(0)));
+        assert!(t.notices(Audience::Ui(0)).is_empty());
+        assert!(t.notices(Audience::Model(0)).is_empty());
     }
 
     #[test]
@@ -715,17 +751,28 @@ mod tests {
     }
 
     #[test]
-    fn a_job_left_behind_is_handed_back() {
+    fn a_command_still_running_is_handed_back_and_a_finished_one_is_dropped() {
         let t = own_table();
-        let j = t.spawn("sh", "true", &cwd(), 65536, 7).unwrap();
-        assert!(j.wait(Duration::from_secs(5)));
+        let over = t.spawn("sh", "true", &cwd(), 65536, 7).unwrap();
+        let going = t.spawn("sh", "sleep 30", &cwd(), 65536, 7).unwrap();
+        over.announce();
+        going.announce();
+        assert!(over.wait(Duration::from_secs(5)));
         t.reparent_all(7, 0);
-        assert_eq!(j.owner(), 0);
+
+        // What the agent already dealt with is gone, not re-announced.
+        assert!(t.get(over.id).is_none());
+        assert!(t.notices(Audience::Model(0)).is_empty());
+
+        // What outlived it is the main agent's now, and it hears when it ends.
+        assert_eq!(going.owner(), 0);
+        going.kill(Duration::from_millis(10));
+        assert!(going.wait(Duration::from_secs(5)));
         let heard = t.notices(Audience::Model(0));
         assert!(
             heard
                 .iter()
-                .any(|n| n.starts_with(&format!("job {} exited 0", j.id))),
+                .any(|n| n.starts_with(&format!("job {} exited", going.id))),
             "{heard:?}"
         );
     }
