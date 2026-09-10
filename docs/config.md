@@ -193,6 +193,7 @@ price.
 | `prompt_append` | `""` | words the model would get wrong: project names, identifiers, people |
 | `language` | `""` | spoken language; empty lets the model decide |
 | `hotkey_mode` | `"auto"` | `auto`, `push_to_talk` or `toggle`; `auto` uses what the terminal reports |
+| `dwell_ms` | `180` | how long the talk key must be held before it starts listening. A shorter press types the key instead, so the space bar still types spaces while dictation is on |
 | `release_grace_ms` | `700` | silence that counts as letting the talk key go, before the keyboard's repeat rate has been seen; after that a much shorter gap is used |
 | `max_listen_secs` | `300` | longest a toggled microphone stays on; holding a key needs no limit |
 | `device` | `""` | input device name; empty takes the system default |

@@ -13,11 +13,14 @@ is ever sent on its own: Enter still sends, exactly as it always did.
 /voice devices      pick the microphone
 ```
 
-`alt-v` does the same as bare `/voice`. While dictation is armed the talk key
-belongs to it, so it does not type a space — except on a line that starts with
-`/`, where it still does, or `/set voice.mode cheap` could not be typed.
-`Esc` drops a phrase that has not been committed yet; `/voice` or `alt-v`
-disarms and gives the key back for good.
+`alt-v` does the same as bare `/voice`. `Esc` drops a phrase that has not been
+committed yet; `/voice` or `alt-v` disarms.
+
+**The talk key still types.** A press and a quick release is an ordinary
+keystroke, so the space bar goes on typing spaces while dictation is armed;
+only holding it past `voice.dwell_ms` starts listening. When a hold is
+recognised, the keystrokes it had already produced are taken back out of the
+input box, so nothing is left behind.
 
 ## Who transcribes
 
@@ -213,15 +216,21 @@ is a shell command, it is read from `~/.config/ah/config.toml` or
 Holding a key looks different depending on what the terminal reports, so `ah`
 works it out rather than assuming.
 
-- **A release is reported.** Press starts, release stops. Exact, and nothing
-  is timed.
+- **A release is reported.** Holding past `voice.dwell_ms` (180 ms) starts
+  listening; the release stops it. A press and release inside that window is a
+  keystroke and types.
 - **No release.** A held key arrives as the same key pressed again and again,
-  at whatever rate the keyboard repeats. `ah` treats every one of those as the
-  key still being down, and a silence as letting go. The silence it waits for
-  starts at `voice.release_grace_ms` — wide, because a keyboard stays quiet for
-  half a second before it starts repeating — and narrows to a fraction of the
-  repeat rate as soon as that rate has been seen. A tap ends after the wide
-  gap; a hold ends about a tenth of a second after the key comes up.
+  at whatever rate the keyboard repeats, and nothing at all arrives between
+  the press and the first repeat. So a hold cannot be recognised on a clock
+  here: the giveaway is two key events closer together than a person could
+  type them, which is the second repeat. That lands about half a second in,
+  and the one or two spaces typed before it are taken back out. Once a hold is
+  under way a silence ends it — starting at `voice.release_grace_ms`, then
+  narrowing to a fraction of the observed repeat rate.
+
+  This is the case where `enable_kitty_keyboard = true` is worth having: with
+  releases reported, a hold is recognised in 180 ms and nothing is ever typed
+  and taken back.
 
 Either way a held key is one phrase. It is never treated as a series of
 presses that turn dictation on and off.

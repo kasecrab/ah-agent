@@ -148,13 +148,24 @@ impl Hold {
 const MIN_GAP: Duration = Duration::from_millis(90);
 /// A repeat has to be this much quieter than the gap for the gap to be sure.
 const GAP_FACTOR: u32 = 3;
+/// Two key events closer together than this are a keyboard repeating, not a
+/// person typing. Nobody taps the same key twice in a tenth of a second.
+const REPEAT_MAX: Duration = Duration::from_millis(120);
+/// A tap that was never followed by anything is over, and the keystrokes it
+/// produced are the user's to keep.
+const TAP_OVER: Duration = Duration::from_millis(900);
 
 /// What the talk key just asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Act {
-    Start,
+pub enum Act {
+    /// A hold has been recognised. `undo` is how many keystrokes already went
+    /// into the input box while it was still ambiguous, and have to come back
+    /// out before the words arrive.
+    Start { undo: usize },
     Stop,
     Nothing,
+    /// Not a hold, or not yet: let the key through and type it.
+    Type,
 }
 
 /// The talk key's own state, kept apart from the microphone and the socket so
@@ -171,10 +182,18 @@ struct Talk {
     gap: Duration,
     /// What the gap is before the repeat rate has been measured.
     first_gap: Duration,
+    /// Keystrokes typed while it was still unclear whether the key was being
+    /// tapped or held. They are real until a hold proves otherwise.
+    pending: usize,
+    /// True between a press and its release, on terminals that report one.
+    down: bool,
+    /// How long the key has to stay down before it counts as held rather than
+    /// typed.
+    dwell: Duration,
 }
 
 impl Talk {
-    fn new(mode: &str, first_gap_ms: u64) -> Self {
+    fn new(mode: &str, first_gap_ms: u64, dwell_ms: u64) -> Self {
         let first_gap = Duration::from_millis(first_gap_ms.max(MIN_GAP.as_millis() as u64));
         Self {
             hold: Hold::from_setting(mode),
@@ -182,50 +201,94 @@ impl Talk {
             last: None,
             gap: first_gap,
             first_gap,
+            pending: 0,
+            down: false,
+            dwell: Duration::from_millis(dwell_ms),
         }
     }
 
     fn press(&mut self, now: Instant, listening: bool) -> Act {
-        // A second key event during a hold is the keyboard repeating, and
-        // that is the only thing that says how long a silence has to be
-        // before it means the key came up. A keyboard waits half a second
-        // before it starts repeating, so this can be measured but never
-        // assumed.
-        if listening && let Some(prev) = self.last {
-            let apart = now.saturating_duration_since(prev);
-            if apart < self.gap {
+        self.down = true;
+        let apart = self.last.map(|prev| now.saturating_duration_since(prev));
+        self.last = Some(now);
+
+        // A toggle is a switch, not a hold: it flips on every press, and
+        // nothing about dwell or repeats applies to it.
+        if self.hold == Hold::Toggle {
+            if listening {
+                return Act::Stop;
+            }
+            self.gap = self.first_gap;
+            return Act::Start { undo: 0 };
+        }
+
+        if listening {
+            // The key is still down and the words are already coming. A
+            // second event during a hold is the keyboard repeating, which is
+            // the only thing that says how long a silence has to be before it
+            // means the key came up. Half a second passes before a keyboard
+            // starts repeating, so this can be measured but never assumed.
+            if let Some(apart) = apart
+                && apart < self.gap
+            {
                 self.gap = (apart * GAP_FACTOR).clamp(MIN_GAP, self.first_gap);
             }
-        }
-        self.last = Some(now);
-        if self.hold == Hold::Toggle && listening {
-            return Act::Stop;
-        }
-        // Already listening: the key is still down, not pressed afresh.
-        // Never toggle here — doing so on a terminal that repeats the key
-        // chops the audio into fragments.
-        if listening {
             return Act::Nothing;
         }
-        // A new hold waits out the repeat delay again.
-        self.gap = self.first_gap;
-        Act::Start
+
+        // Two events this close together are a keyboard repeating, not a
+        // person typing: the key is being held. Take back the spaces that
+        // went in while that was still in doubt.
+        if apart.is_some_and(|a| a <= REPEAT_MAX) {
+            self.gap = self.first_gap;
+            let undo = std::mem::take(&mut self.pending);
+            return Act::Start { undo };
+        }
+
+        // A press on its own says nothing yet. Let it type, and decide when
+        // either a release arrives (a tap) or it does not (a hold).
+        if apart.is_none_or(|a| a > TAP_OVER) {
+            self.pending = 0;
+        }
+        self.pending += 1;
+        Act::Type
     }
 
     fn release(&mut self, listening: bool) -> Act {
         self.saw_release = true;
+        self.down = false;
         if self.hold == Hold::Probing || self.hold == Hold::Gap {
             self.hold = Hold::Push;
         }
-        if self.hold != Hold::Toggle && listening {
-            Act::Stop
-        } else {
-            Act::Nothing
+        if listening && self.hold != Hold::Toggle {
+            return Act::Stop;
         }
+        // Let go before it counted as a hold: the keystrokes it produced were
+        // meant, and stay.
+        self.pending = 0;
+        Act::Nothing
     }
 
     fn tick(&mut self, now: Instant, listening: bool) -> Act {
-        if !listening || self.hold == Hold::Toggle {
+        if !listening {
+            // Held past the dwell without a release: that is a hold, and the
+            // keystrokes it produced were not meant. Only a terminal that has
+            // proved it reports releases can be believed about the key still
+            // being down; without one, the keyboard repeating is the only
+            // evidence there is, and it arrives on its own.
+            if self.hold != Hold::Toggle
+                && self.saw_release
+                && self.down
+                && self.pending > 0
+                && self.last.is_some_and(|l| now.saturating_duration_since(l) >= self.dwell)
+            {
+                self.gap = self.first_gap;
+                let undo = std::mem::take(&mut self.pending);
+                return Act::Start { undo };
+            }
+            return Act::Nothing;
+        }
+        if self.hold == Hold::Toggle {
             return Act::Nothing;
         }
         // A terminal that reports releases needs no clock: one will come.
@@ -358,7 +421,7 @@ impl Session {
             cost: 0.0,
             requests: 0,
             listen_since: None,
-            talk: Talk::new(&cfg.hotkey_mode, cfg.release_grace_ms),
+            talk: Talk::new(&cfg.hotkey_mode, cfg.release_grace_ms, cfg.dwell_ms),
             note: None,
             context: String::new(),
             tx,
@@ -390,27 +453,31 @@ impl Session {
 
     // ---- the talk key ----------------------------------------------------
 
-    pub fn press(&mut self) {
+    /// Returns what the key turned out to mean, so the caller can put right
+    /// what it typed while that was still unknown.
+    pub fn press(&mut self) -> Act {
         let listening = self.listening();
         let a = self.talk.press(Instant::now(), listening);
         self.act(a);
+        a
     }
 
     /// A repeat says the same thing a press does here: the key is still down.
-    pub fn repeat(&mut self) {
-        self.press();
+    pub fn repeat(&mut self) -> Act {
+        self.press()
     }
 
-    pub fn release(&mut self) {
+    pub fn release(&mut self) -> Act {
         let a = self.talk.release(self.listening());
         self.act(a);
+        a
     }
 
     fn act(&mut self, a: Act) {
         match a {
-            Act::Start => self.start_listening(),
+            Act::Start { .. } => self.start_listening(),
             Act::Stop => self.stop_listening(),
-            Act::Nothing => {}
+            Act::Nothing | Act::Type => {}
         }
     }
 
@@ -440,13 +507,12 @@ impl Session {
 
     /// Called from the event loop while listening. Ends a hold on terminals
     /// with no release event, and stops a toggle that has been left on.
-    pub fn tick(&mut self) {
-        let Some(since) = self.listen_since else {
-            return;
-        };
+    pub fn tick(&mut self) -> Act {
         // A toggled microphone has nobody holding a key to end it, so it is
         // the one thing that needs an outright limit.
-        if self.talk.hold == Hold::Toggle {
+        if self.talk.hold == Hold::Toggle
+            && let Some(since) = self.listen_since
+        {
             if since.elapsed().as_secs() >= self.cfg.max_listen_secs {
                 self.stop_listening();
                 self.note = Some(format!(
@@ -454,15 +520,21 @@ impl Session {
                     self.cfg.max_listen_secs
                 ));
             }
-            return;
+            return Act::Nothing;
         }
-        let a = self.talk.tick(Instant::now(), true);
+        let a = self.talk.tick(Instant::now(), self.listening());
         self.act(a);
+        a
     }
 
     /// How often the event loop has to look in on us. `None` means nothing is
     /// waiting on a clock.
     pub fn wake_in(&self) -> Option<Duration> {
+        // A key is down and it is not yet known whether it is being typed or
+        // held. That is decided on a clock, so the clock has to be looked at.
+        if self.listen_since.is_none() && self.talk.pending > 0 && self.talk.down {
+            return Some((self.talk.dwell / 3).max(Duration::from_millis(15)));
+        }
         if self.listen_since.is_some() {
             // While the key is down, the clock that decides the hold has
             // ended is the one that matters, and it has to be looked at
@@ -796,158 +868,179 @@ mod tests {
     use super::{Act, Hold, Talk};
     use std::time::{Duration, Instant};
 
-    /// WezTerm without the kitty keyboard protocol, measured on this machine:
-    /// no releases, no repeats, a plain press every 30 ms after a 500 ms
-    /// delay. This is the sequence that used to toggle listening 33 times a
-    /// second and reduce "can you hear me?" to "me".
-    fn wezterm_hold(talk: &mut Talk, t0: Instant, hold_ms: u64) -> (Vec<Act>, Instant) {
-        let mut acts = vec![talk.press(t0, false)];
-        let mut listening = true;
-        let mut at = 500;
-        while at <= hold_ms {
-            let now = t0 + Duration::from_millis(at);
-            // The event loop looks in before each key event.
-            let tick = talk.tick(now - Duration::from_millis(1), listening);
-            if tick == Act::Stop {
-                listening = false;
-            }
-            acts.push(tick);
-            let a = talk.press(now, listening);
-            if a == Act::Start {
-                listening = true;
-            }
-            if a == Act::Stop {
-                listening = false;
-            }
-            acts.push(a);
+    const DWELL: u64 = 180;
+
+    fn talk(mode: &str) -> Talk {
+        Talk::new(mode, 700, DWELL)
+    }
+
+    /// A terminal that reports releases, once it has proved it does.
+    fn kitty() -> Talk {
+        let mut t = talk("auto");
+        t.saw_release = true;
+        t
+    }
+
+    #[test]
+    fn a_tap_types_the_key_and_never_starts_listening() {
+        let mut t = kitty();
+        let t0 = Instant::now();
+        assert_eq!(t.press(t0, false), Act::Type, "a tap must type, not listen");
+        // Nothing has happened yet at 80 ms in.
+        assert_eq!(t.tick(t0 + Duration::from_millis(80), false), Act::Nothing);
+        assert_eq!(t.release(false), Act::Nothing);
+        // And it stays typed: the keystroke was meant.
+        assert_eq!(t.pending, 0);
+    }
+
+    #[test]
+    fn typing_a_run_of_spaces_never_starts_listening() {
+        let mut t = kitty();
+        let mut at = Instant::now();
+        for _ in 0..8 {
+            assert_eq!(t.press(at, false), Act::Type);
+            at += Duration::from_millis(140); // a brisk typist
+            assert_eq!(t.release(false), Act::Nothing);
+            assert_eq!(t.tick(at, false), Act::Nothing);
+            at += Duration::from_millis(60);
+        }
+    }
+
+    #[test]
+    fn holding_past_the_dwell_starts_listening_and_takes_the_key_back() {
+        let mut t = kitty();
+        let t0 = Instant::now();
+        assert_eq!(t.press(t0, false), Act::Type);
+        assert_eq!(t.tick(t0 + Duration::from_millis(DWELL - 40), false), Act::Nothing);
+        assert_eq!(
+            t.tick(t0 + Duration::from_millis(DWELL + 10), false),
+            Act::Start { undo: 1 },
+            "held past the dwell, so the typed key comes back out"
+        );
+    }
+
+    #[test]
+    fn a_keyboard_repeating_is_a_hold_even_with_no_release_reported() {
+        // WezTerm without the kitty protocol, measured on this machine: no
+        // releases at all, one press, then nothing until the 500 ms repeat
+        // delay, then one every 30 ms.
+        let mut t = talk("auto");
+        let t0 = Instant::now();
+        assert_eq!(t.press(t0, false), Act::Type);
+        // The dwell cannot be trusted here: nothing has said the key is still
+        // down, so it must not start on a clock alone.
+        assert_eq!(t.tick(t0 + Duration::from_millis(300), false), Act::Nothing);
+        // The first repeat is 500 ms later, which is still too far apart to
+        // tell from a person typing two spaces.
+        assert_eq!(t.press(t0 + Duration::from_millis(500), false), Act::Type);
+        // The second repeat, 30 ms after it, could only be a keyboard.
+        assert_eq!(
+            t.press(t0 + Duration::from_millis(530), false),
+            Act::Start { undo: 2 },
+            "both typed spaces come back out"
+        );
+    }
+
+    #[test]
+    fn a_hold_ends_a_gap_after_the_last_repeat() {
+        let mut t = talk("auto");
+        let t0 = Instant::now();
+        t.press(t0, false);
+        t.press(t0 + Duration::from_millis(500), false);
+        assert!(matches!(
+            t.press(t0 + Duration::from_millis(530), false),
+            Act::Start { .. }
+        ));
+        let mut at = 560;
+        while at < 2000 {
+            assert_eq!(
+                t.press(t0 + Duration::from_millis(at), true),
+                Act::Nothing,
+                "the hold was interrupted at {at} ms"
+            );
             at += 30;
         }
-        (acts, t0 + Duration::from_millis(hold_ms))
+        let last = t0 + Duration::from_millis(at - 30);
+        assert!(t.gap <= Duration::from_millis(120), "gap {:?}", t.gap);
+        assert_eq!(t.tick(last + Duration::from_millis(60), true), Act::Nothing);
+        assert_eq!(t.tick(last + Duration::from_millis(200), true), Act::Stop);
+        assert_eq!(t.hold, Hold::Gap);
     }
 
     #[test]
-    fn a_held_key_that_repeats_never_stops_and_starts_again() {
-        let mut talk = Talk::new("auto", 700);
+    fn a_release_ends_a_hold_at_once() {
+        let mut t = kitty();
         let t0 = Instant::now();
-        let (acts, _) = wezterm_hold(&mut talk, t0, 3300);
-        assert_eq!(acts[0], Act::Start);
-        assert!(
-            acts[1..].iter().all(|a| *a == Act::Nothing),
-            "the hold was interrupted: {:?}",
-            acts.iter()
-                .filter(|a| **a != Act::Nothing)
-                .collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn letting_go_of_a_repeating_key_stops_within_a_gap() {
-        let mut talk = Talk::new("auto", 700);
-        let t0 = Instant::now();
-        let (_, last) = wezterm_hold(&mut talk, t0, 3300);
-        // The repeat rate has been seen, so the gap is now short.
-        assert!(talk.gap <= Duration::from_millis(120), "gap {:?}", talk.gap);
-        assert_eq!(
-            talk.tick(last + Duration::from_millis(60), true),
-            Act::Nothing
-        );
-        assert_eq!(
-            talk.tick(last + Duration::from_millis(200), true),
-            Act::Stop
-        );
-        assert_eq!(talk.hold, Hold::Gap);
+        t.press(t0, false);
+        assert!(matches!(
+            t.tick(t0 + Duration::from_millis(DWELL + 10), false),
+            Act::Start { .. }
+        ));
+        assert_eq!(t.release(true), Act::Stop);
+        assert_eq!(t.hold, Hold::Push);
+        assert!(!t.gap_timed());
     }
 
     #[test]
     fn the_repeat_delay_does_not_end_a_hold_before_it_starts() {
-        let mut talk = Talk::new("auto", 700);
+        let mut t = talk("auto");
         let t0 = Instant::now();
-        assert_eq!(talk.press(t0, false), Act::Start);
-        // 500 ms of silence while the keyboard waits to start repeating.
-        for ms in [100, 200, 350, 450, 499] {
+        t.press(t0, false);
+        t.press(t0 + Duration::from_millis(500), false);
+        assert!(matches!(
+            t.press(t0 + Duration::from_millis(530), false),
+            Act::Start { .. }
+        ));
+        // A fresh hold waits out the repeat delay again rather than using the
+        // narrow gap the last one measured.
+        for ms in [560, 700, 900, 1000] {
             assert_eq!(
-                talk.tick(t0 + Duration::from_millis(ms), true),
+                t.tick(t0 + Duration::from_millis(ms), true),
                 Act::Nothing,
-                "ended the hold {ms} ms in, before the keyboard repeated"
+                "ended the hold at {ms} ms"
             );
         }
     }
 
     #[test]
-    fn a_tap_that_never_repeats_still_ends() {
-        let mut talk = Talk::new("auto", 700);
+    fn two_taps_far_apart_do_not_add_up_to_a_hold() {
+        let mut t = kitty();
         let t0 = Instant::now();
-        assert_eq!(talk.press(t0, false), Act::Start);
-        assert_eq!(
-            talk.tick(t0 + Duration::from_millis(600), true),
-            Act::Nothing
-        );
-        assert_eq!(talk.tick(t0 + Duration::from_millis(800), true), Act::Stop);
-    }
-
-    #[test]
-    fn a_terminal_that_reports_releases_is_exact_and_never_timed() {
-        let mut talk = Talk::new("auto", 700);
-        let t0 = Instant::now();
-        assert_eq!(talk.press(t0, false), Act::Start);
-        assert_eq!(talk.release(true), Act::Stop);
-        assert_eq!(talk.hold, Hold::Push);
-        assert!(!talk.gap_timed());
-        // A long silence mid-hold must not end it: the release will say so.
-        assert_eq!(talk.press(t0 + Duration::from_secs(1), false), Act::Start);
-        assert_eq!(
-            talk.tick(t0 + Duration::from_secs(30), true),
-            Act::Nothing,
-            "a terminal that reports releases should never be timed out"
-        );
-    }
-
-    #[test]
-    fn a_second_hold_waits_out_the_repeat_delay_again() {
-        let mut talk = Talk::new("auto", 700);
-        let t0 = Instant::now();
-        let (_, last) = wezterm_hold(&mut talk, t0, 1000);
-        assert_eq!(
-            talk.tick(last + Duration::from_millis(300), true),
-            Act::Stop
-        );
-        // The narrowed gap must not carry into the next hold, or the silence
-        // before the keyboard repeats would end it immediately.
-        let t1 = last + Duration::from_secs(2);
-        assert_eq!(talk.press(t1, false), Act::Start);
-        assert_eq!(
-            talk.tick(t1 + Duration::from_millis(400), true),
-            Act::Nothing
-        );
+        assert_eq!(t.press(t0, false), Act::Type);
+        t.release(false);
+        // Two seconds later, another tap. Nothing about that is a hold.
+        assert_eq!(t.press(t0 + Duration::from_secs(2), false), Act::Type);
+        assert_eq!(t.pending, 1, "the earlier tap should not still be counted");
     }
 
     #[test]
     fn toggle_is_only_ever_asked_for_by_hand() {
-        let mut talk = Talk::new("toggle", 700);
+        let mut t = talk("toggle");
         let t0 = Instant::now();
-        assert_eq!(talk.press(t0, false), Act::Start);
-        assert_eq!(talk.tick(t0 + Duration::from_secs(5), true), Act::Nothing);
-        assert_eq!(talk.press(t0 + Duration::from_secs(6), true), Act::Stop);
-    }
-
-    #[test]
-    fn forced_push_to_talk_still_ends_where_no_release_arrives() {
-        let mut talk = Talk::new("push_to_talk", 700);
-        let t0 = Instant::now();
-        assert_eq!(talk.press(t0, false), Act::Start);
+        assert_eq!(t.press(t0, false), Act::Start { undo: 0 });
+        assert_eq!(t.tick(t0 + Duration::from_secs(5), true), Act::Nothing);
         assert_eq!(
-            talk.tick(t0 + Duration::from_millis(900), true),
+            t.press(t0 + Duration::from_secs(6), true),
             Act::Stop,
-            "asking for push-to-talk on a terminal that cannot do it must not hang"
+            "a toggle has to be able to switch off again"
         );
     }
 
     #[test]
-    fn hold_falls_back_from_the_setting() {
-        assert_eq!(super::Hold::from_setting("auto"), super::Hold::Probing);
-        assert_eq!(super::Hold::from_setting("push_to_talk"), super::Hold::Push);
-        assert_eq!(super::Hold::from_setting("toggle"), super::Hold::Toggle);
-        assert_eq!(super::Hold::from_setting("nonsense"), super::Hold::Probing);
+    fn forced_push_to_talk_still_ends_where_no_release_arrives() {
+        let mut t = talk("push_to_talk");
+        let t0 = Instant::now();
+        t.press(t0, false);
+        t.press(t0 + Duration::from_millis(500), false);
+        assert!(matches!(
+            t.press(t0 + Duration::from_millis(530), false),
+            Act::Start { .. }
+        ));
+        assert_eq!(
+            t.tick(t0 + Duration::from_millis(1500), true),
+            Act::Stop,
+            "asking for push-to-talk on a terminal that cannot do it must not hang"
+        );
     }
 
     #[test]

@@ -771,6 +771,10 @@ pub struct VoiceSettings {
     /// `auto` watches what the terminal reports and picks the best it can:
     /// hold to talk where key releases arrive, otherwise a toggle.
     pub hotkey_mode: String,
+    /// How long the talk key has to stay down before it counts as being held
+    /// rather than typed. Below this it is an ordinary keystroke, so the
+    /// space bar still types spaces while dictation is armed.
+    pub dwell_ms: u64,
     /// Silence that counts as letting the talk key go, on terminals that
     /// report no release event. It has to outlast the delay a keyboard waits
     /// before it starts repeating, so it starts wide; once the repeat rate
@@ -826,6 +830,7 @@ impl Default for VoiceSettings {
             prompt_append: String::new(),
             language: String::new(),
             hotkey_mode: String::from("auto"),
+            dwell_ms: 180,
             release_grace_ms: 700,
             max_listen_secs: 300,
             device: String::new(),

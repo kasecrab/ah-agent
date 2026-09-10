@@ -1594,10 +1594,11 @@ impl App {
                         }
                         if let Some(v) = self.voice.as_mut() {
                             let was = v.listening();
-                            v.tick();
-                            if was {
+                            let act = v.tick();
+                            if was || act != voice::Act::Nothing {
                                 self.dirty = true;
                             }
+                            self.voice_act(act);
                             self.voice_settle();
                         }
                         None
@@ -3788,11 +3789,17 @@ impl App {
         let Some(v) = self.voice.as_mut() else {
             return false;
         };
-        match k.kind {
+        let act = match k.kind {
             KeyEventKind::Press => v.press(),
             KeyEventKind::Repeat => v.repeat(),
             KeyEventKind::Release => v.release(),
+        };
+        // Not a hold: let the key through and be typed like any other. This
+        // is what keeps the space bar usable while dictation is armed.
+        if act == voice::Act::Type {
+            return false;
         }
+        self.voice_act(act);
         if let Some(e) = self.voice.as_ref().and_then(|v| v.mic_trouble()) {
             self.push(Block::Error(format!("microphone: {e}")));
         }
@@ -3806,6 +3813,20 @@ impl App {
         self.voice_settle();
         self.dirty = true;
         true
+    }
+
+    /// A hold was recognised after the key had already typed itself. Take
+    /// those keystrokes back out before the spoken words arrive in their
+    /// place.
+    fn voice_act(&mut self, act: voice::Act) {
+        if let voice::Act::Start { undo } = act {
+            for _ in 0..undo {
+                self.editor.backspace();
+            }
+            if undo > 0 {
+                self.dirty = true;
+            }
+        }
     }
 
     /// Nothing else is holding the keyboard.
