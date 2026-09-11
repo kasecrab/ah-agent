@@ -5,3 +5,5 @@
 //! the link is in.
 
 pub mod cli;
+pub mod lock;
+pub mod publisher;

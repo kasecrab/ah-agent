@@ -541,7 +541,7 @@ pub struct StatusLine {
     /// What the row shows, left to right, separated by dots. `/statusline`
     /// edits this. Names: `favorite`, `model`, `effort`, `modalities`,
     /// `context`, `tokens`, `cost`, `plan`, `cwd`, `git`, `plugins`, `state`,
-    /// `session`.
+    /// `session`, `remote`.
     pub items: Vec<String>,
     /// A template that replaces `items` when set, drawn in one colour.
     /// Placeholders: `{model} {favorite} {effort} {modalities} {tokens_in}
@@ -565,6 +565,9 @@ impl Default for StatusLine {
                 "cost",
                 "cwd",
                 "git",
+                // Draws nothing at all unless a phone is being published to,
+                // so it costs the row nothing for anyone not using it.
+                "remote",
             ]
             .iter()
             .map(|s| String::from(*s))

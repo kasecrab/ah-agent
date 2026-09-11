@@ -5,6 +5,10 @@
 //! as one: it routes ciphertext and counts frames, and that is the whole of
 //! what it can do.
 
+/// The wire format, re-exported so nothing else has to name the crate it
+/// lives in: whatever talks to a relay does it through here.
+pub use ah_remote_proto as proto;
+
 pub mod code;
 pub mod crypto;
 pub mod link;

@@ -62,6 +62,9 @@ enum Msg {
     Usage(Result<usage::Remote, String>),
     /// A dictated phrase, or a word of one coming back.
     Voice(voice::Event),
+    /// Something the link to a phone wants said.
+    #[cfg(feature = "remote")]
+    Remote(crate::remote::publisher::Note),
 }
 
 /// Built-in slash commands, alphabetical: `(name, description, takes_args)`.
@@ -350,6 +353,9 @@ struct App {
     cwd: String,
     session_id: String,
     session_name: Option<String>,
+    /// The link to a phone, while one is being published to.
+    #[cfg(feature = "remote")]
+    publisher: Option<std::sync::Arc<crate::remote::publisher::Publisher>>,
     completion: Option<Completion>,
     picker: Option<Picker>,
     job_view: Option<jobs::View>,
@@ -499,9 +505,41 @@ fn run_inner(
     let session_name = engine.session.name.clone();
     let resumed: Vec<Message> = engine.session.messages.clone();
 
+    // Publishing to a phone, if this machine is paired, asked to, and no
+    // other window is already doing it.
+    #[cfg(feature = "remote")]
+    let publisher = {
+        let (notes_tx, notes_rx) = mpsc::channel();
+        let ui_tx = ui_tx.clone();
+        std::thread::Builder::new()
+            .name("ah-remote-notes".into())
+            .spawn(move || {
+                while let Ok(note) = notes_rx.recv() {
+                    if ui_tx.send(Msg::Remote(note)).is_err() {
+                        break;
+                    }
+                }
+            })
+            .expect("spawn remote notes");
+        crate::remote::publisher::start(
+            stack.settings(),
+            crate::remote::publisher::Live {
+                session: session_id.clone(),
+                name: session_name.clone(),
+                cwd: cwd.display().to_string(),
+                model: stack.settings().model.id.clone(),
+                ..Default::default()
+            },
+            notes_tx,
+        )
+        .map(std::sync::Arc::new)
+    };
+
     // Engine thread.
     {
         let ui_tx = ui_tx.clone();
+        #[cfg(feature = "remote")]
+        let publisher = publisher.clone();
         let (fwd_tx, fwd_rx) = mpsc::channel::<UiEvent>();
         std::thread::Builder::new()
             .name("ah-engine".into())
@@ -511,6 +549,10 @@ fn run_inner(
             .name("ah-engine-fwd".into())
             .spawn(move || {
                 while let Ok(ev) = fwd_rx.recv() {
+                    #[cfg(feature = "remote")]
+                    if let Some(p) = &publisher {
+                        p.observe(&ev);
+                    }
                     if ui_tx.send(Msg::Engine(ev)).is_err() {
                         break;
                     }
@@ -568,6 +610,8 @@ fn run_inner(
         always_allow: HashSet::new(),
         git_branch: ah_core::plugins::git_branch(&cwd),
         cwd: cwd.display().to_string(),
+        #[cfg(feature = "remote")]
+        publisher,
         session_id,
         session_name,
         completion: None,
@@ -1290,6 +1334,47 @@ impl App {
         }
     }
 
+    /// Tell the link what the session is now. Cheap, and called wherever any
+    /// of it can have changed, so a phone that asks is never told what it was
+    /// a turn ago.
+    #[cfg(feature = "remote")]
+    fn publish_live(&self) {
+        let Some(p) = self.publisher.as_ref() else {
+            return;
+        };
+        p.live(crate::remote::publisher::Live {
+            session: self.session_id.clone(),
+            name: self.session_name.clone(),
+            cwd: self.cwd.clone(),
+            model: self.settings().model.id.clone(),
+            busy: self.busy,
+            context_tokens: self.context_tokens,
+            context_window: self.context_window,
+            usage: self.usage,
+        });
+    }
+
+    #[cfg(not(feature = "remote"))]
+    fn publish_live(&self) {}
+
+    /// How the phone link is doing, in as few characters as it can be said.
+    /// Empty when nothing is being published, which is most of the time.
+    #[cfg(feature = "remote")]
+    fn remote_label(&self) -> String {
+        use crate::remote::publisher::State;
+        match self.publisher.as_ref().map(|p| p.state()) {
+            Some(State::Up) => "remote \u{25cf}".into(),
+            Some(State::Dialling) => "remote \u{25cc}".into(),
+            Some(State::Failed) => "remote \u{2715}".into(),
+            None => String::new(),
+        }
+    }
+
+    #[cfg(not(feature = "remote"))]
+    fn remote_label(&self) -> String {
+        String::new()
+    }
+
     fn status_ctx(&self) -> StatusContext {
         let state = match self.state {
             State::Idle => "idle".to_string(),
@@ -1306,6 +1391,7 @@ impl App {
             .map(|k| format!("★{k}"))
             .unwrap_or_default();
         let mut ctx = StatusContext {
+            remote: self.remote_label(),
             model: m.id.clone(),
             usage: self.usage,
             cwd: self.cwd.clone(),
@@ -1684,7 +1770,23 @@ impl App {
             Msg::Agents => self.agents_changed(),
             Msg::Voice(ev) => self.handle_voice(ev),
             Msg::Plan => self.dirty = true,
-            Msg::Engine(ev) => self.handle_engine(ev),
+            #[cfg(feature = "remote")]
+            Msg::Remote(note) => {
+                use crate::remote::publisher::Note;
+                let line = match note {
+                    Note::Attached(device) => format!("remote: \u{201c}{device}\u{201d} attached"),
+                    Note::Said(text) => text,
+                };
+                self.push(Block::Notice(line));
+                self.dirty = true;
+            }
+            Msg::Engine(ev) => {
+                self.handle_engine(ev);
+                // Anything the engine says can have moved what a phone would
+                // be told about this session, and none of it is expensive to
+                // hand over.
+                self.publish_live();
+            }
             Msg::Usage(res) => {
                 if let Some(p) = self.usage_pane.as_mut() {
                     p.loading = false;

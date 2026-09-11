@@ -211,6 +211,9 @@ pub struct StatusContext {
     pub favorite: String,
     /// Reasoning effort in use (`model.reasoning.effort`), or empty.
     pub effort: String,
+    /// How the link to a phone is doing, or empty when nothing is published.
+    #[serde(default)]
+    pub remote: String,
     /// Tokens in the conversation as of the last response, and the model's
     /// window (0 when unknown).
     #[serde(default)]

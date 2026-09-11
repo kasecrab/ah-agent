@@ -780,6 +780,7 @@ pub const STATUS_ITEMS: &[(&str, &str)] = &[
     ("plugins", "how many plugins are loaded"),
     ("state", "what the turn is doing"),
     ("session", "session id"),
+    ("remote", "whether a phone is being published to"),
 ];
 
 /// What stands between two items.
@@ -809,6 +810,7 @@ fn item_text(item: &str, ctx: &StatusContext) -> String {
     let usage = &ctx.usage;
     match item {
         "favorite" => ctx.favorite.clone(),
+        "remote" => ctx.remote.clone(),
         "model" => ctx.model.clone(),
         "effort" => ctx.effort.clone(),
         "modalities" => ctx.modalities.clone(),
@@ -990,6 +992,7 @@ mod tests {
 
     fn ctx() -> StatusContext {
         StatusContext {
+            remote: String::new(),
             model: "mock/model".into(),
             usage: Usage {
                 prompt_tokens: 42,
