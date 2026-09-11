@@ -171,6 +171,23 @@ theme Claude Code uses, so both look the same in the same terminal.
 Every action is a list of key strings; see `ah docs keys` for the syntax and
 the full default table.
 
+## [remote]
+
+Watching this session from a phone, through a relay of your own. `ah remote
+pair` sets it up; `ah docs remote` covers what the relay can and cannot see.
+Off by default: pairing a machine and publishing from it are separate
+decisions, and the first does not imply the second.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `false` | publish while the window is open |
+| `flush_ms` | `200` | how long text is gathered before a frame goes out |
+| `max_frame_bytes` | `16384` | largest frame built before sending early |
+| `max_event_bytes` | `65536` | longest single event; the rest is a note saying how much was left |
+| `outbox_bytes` | `262144` | frames held while the relay is unreachable |
+| `snapshot_messages` | `20` | messages of scrollback a phone gets on attaching |
+| `notice` | `true` | say in the transcript when a phone attaches |
+
 ## [voice]
 
 Dictation. `/voice` arms it, the `talk` key (Space) is held to listen, and the

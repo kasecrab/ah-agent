@@ -3,9 +3,12 @@
 Watching a session from a phone, and answering it.
 
 A run started at the desk keeps going whether or not anyone is watching. `ah
-remote` lets a phone watch it, say something into it, approve a tool call, or
-start a new session — without opening a port on this machine, and without
-anyone else being able to read a word of it.
+remote` lets a phone watch it — without opening a port on this machine, and
+without anyone else being able to read a word of it.
+
+Watching is all it does so far. Saying something back, answering a tool
+prompt, and starting a session from the phone are being built on top of the
+same link.
 
 ## How it fits together
 
@@ -48,25 +51,17 @@ ah remote forget     # make the code useless
 
 ## What the code is worth
 
-Treat it like a key. Whoever holds it can start a session on this machine and
-make an agent run commands in it. That is the feature, and it is also the whole
-of the risk.
+Treat it like a key. Whoever holds it sees everything the session says: what
+you asked, what the model answered, which files it read and what was in them.
+It cannot yet make the session do anything — but reading is not nothing, and
+the code is the only thing standing in the way of it.
 
-Two things follow, and both are defaults rather than advice:
+Publishing is off until you ask for it. Pairing a machine and publishing from
+it are separate decisions: `ah remote pair` does the first, `remote.enabled`
+the second.
 
-- **A session driven from a phone asks before it acts.** `ah` normally runs
-  tools without asking (`permissions.mode = "auto"`). Over the relay it is set
-  to `ask` regardless, so every tool call arrives on the phone as a question.
-  Set `remote.trust_paired_device = true` in your *user* config to turn that
-  off; it cannot be turned off from a project's own config.
-- **A phone can only start sessions where you allow it.** `remote.roots` lists
-  the directories it may open, and defaults to your home directory. Like the
-  relay URL, it is read from the environment or your user config only — a
-  repository you cloned has no business naming directories a phone may run an
-  agent in.
-
-`ah remote forget` ends it from this side. The relay keeps nothing readable
-either way.
+`ah remote forget` ends it from this side, and the relay keeps nothing
+readable either way.
 
 ## Settings
 
@@ -74,18 +69,13 @@ either way.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `enabled` | `false` | publish from the TUI when nothing else is publishing |
+| `enabled` | `false` | publish while the window is open |
 | `flush_ms` | `200` | how long text is gathered before a frame goes out |
-| `max_frame_bytes` | `16384` | largest frame the publisher will build |
-| `max_event_bytes` | `65536` | longest single event; the tail is cut with a note |
-| `ring_bytes` | `262144` | scrollback kept for a phone that attaches mid-turn |
+| `max_frame_bytes` | `16384` | largest frame built before sending early |
+| `max_event_bytes` | `65536` | longest single event; the rest is a note saying how much was left |
 | `outbox_bytes` | `262144` | frames held while the relay is unreachable |
-| `max_devices` | `4` | phones attached at once |
-| `max_sessions` | `4` | sessions the daemon will hold open |
-| `roots` | `[]` | directories a phone may start a session in; empty means `$HOME` |
-| `trust_paired_device` | `false` | let a remote session run tools without asking |
-| `pad` | `false` | pad frames so their size says less about the traffic |
-| `notice` | `true` | say in the transcript when a phone attaches or acts |
+| `snapshot_messages` | `20` | messages of scrollback a phone gets on attaching |
+| `notice` | `true` | say in the transcript when a phone attaches |
 
 ## Files and variables
 
@@ -94,7 +84,6 @@ either way.
 | `~/.config/ah/credentials.toml` | the pairing code and relay URL, owner-readable only |
 | `AH_REMOTE_CODE` | the pairing code, ahead of the file |
 | `AH_REMOTE_URL` | the relay, ahead of the file |
-| `AH_REMOTE_ROOTS` | directories a phone may start a session in, ahead of the config |
 
 ## When it will not connect
 

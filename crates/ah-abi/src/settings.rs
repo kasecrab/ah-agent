@@ -22,6 +22,7 @@ pub struct Settings {
     pub context: ContextSettings,
     pub agents: AgentSettings,
     pub voice: VoiceSettings,
+    pub remote: RemoteSettings,
     pub images: ImageSettings,
     /// Plugin-private or forward-compatible keys. Preserved through merges.
     #[serde(flatten)]
@@ -816,6 +817,47 @@ pub struct VoiceSettings {
     pub show_cost: bool,
     /// Draw the input level. It is the only part that redraws on a clock.
     pub meter: bool,
+}
+
+/// Driving this session from a phone, through a relay of your own.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RemoteSettings {
+    /// Publish this session while the window is open. Off, nothing is dialled
+    /// and a phone sees nothing, whether or not this machine is paired.
+    pub enabled: bool,
+    /// How long text from the model is gathered before a frame goes out. A
+    /// turn sends thousands of small pieces and a reader can only take one
+    /// screen at a time, so they travel in batches; anything a person has to
+    /// act on goes on its own regardless.
+    pub flush_ms: u64,
+    /// Largest frame the publisher will build before sending early.
+    pub max_frame_bytes: usize,
+    /// Longest a single event may be. What is left is replaced by a line
+    /// saying how much, rather than sending a whole file down a phone link.
+    pub max_event_bytes: usize,
+    /// Frames held while the relay is unreachable. Oldest go first, and the
+    /// phone is told there is a gap rather than quietly given less.
+    pub outbox_bytes: usize,
+    /// Messages of scrollback sent to a phone that has just attached.
+    pub snapshot_messages: usize,
+    /// Say in the transcript when a phone attaches or acts. Off, the link is
+    /// silent and only the status line shows it.
+    pub notice: bool,
+}
+
+impl Default for RemoteSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            flush_ms: 200,
+            max_frame_bytes: 16 * 1024,
+            max_event_bytes: 64 * 1024,
+            outbox_bytes: 256 * 1024,
+            snapshot_messages: 20,
+            notice: true,
+        }
+    }
 }
 
 impl Default for VoiceSettings {
