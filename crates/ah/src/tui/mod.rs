@@ -1791,6 +1791,7 @@ impl App {
                 use crate::remote::publisher::Note;
                 let line = match note {
                     Note::Attached(device) => format!("remote: \u{201c}{device}\u{201d} attached"),
+                    Note::Detached(device) => format!("remote: \u{201c}{device}\u{201d} left"),
                     Note::Said(text) => text,
                     // Another window asked for the pairing. Dropping the
                     // publisher releases the lock, which is how it gets it.

@@ -47,6 +47,8 @@ const HANDOVER: Duration = Duration::from_secs(3);
 pub enum Note {
     /// A phone attached, by the name it gave for itself.
     Attached(String),
+    /// And has stopped watching.
+    Detached(String),
     /// Something worth a line in the transcript.
     Said(String),
     /// A window wants the pairing. Whoever holds it should stand down.
@@ -85,6 +87,10 @@ struct Shared {
     /// What was last said about a session, so saying it again is free to ask
     /// for and costs nothing to refuse.
     last_state: Mutex<Option<ah_remote::proto::SessionState>>,
+    /// Which phones are watching. A phone attaches whenever it reconnects or
+    /// its screen comes back, which is often, and a transcript that said so
+    /// every time would be mostly that.
+    watching: Mutex<std::collections::HashSet<String>>,
 }
 
 /// What has gathered since the last frame went out.
@@ -138,6 +144,7 @@ impl Publisher {
             pending: Mutex::new(None),
             answered_by: Mutex::new(None),
             last_state: Mutex::new(None),
+            watching: Mutex::new(std::collections::HashSet::new()),
         });
 
         let (socket_tx, socket_rx) = mpsc::channel();
@@ -406,6 +413,9 @@ fn run(
                     id = crypto::new_link();
                     seal = sealer(&keys, &id);
                     openers.clear();
+                    // A new link is a new conversation with every phone, so
+                    // none of them counts as watching until it says so.
+                    lock(&shared.watching).clear();
                     shared.up.store(true, Ordering::Release);
                     outbox.insert(0, hello());
                     outbox.push(FromDesk::Sessions {
@@ -546,7 +556,7 @@ fn answer(
             }];
         }
         FromPhone::Attach { session, .. } => {
-            if shared.settings.notice {
+            if lock(&shared.watching).insert(device.clone()) && shared.settings.notice {
                 let _ = notes.send(Note::Attached(device));
             }
             let Some(state) = shared.sessions.state(&session) else {
@@ -562,7 +572,12 @@ fn answer(
                 },
             ];
         }
-        FromPhone::Detach { .. } => return Vec::new(),
+        FromPhone::Detach { .. } => {
+            if lock(&shared.watching).remove(&device) && shared.settings.notice {
+                let _ = notes.send(Note::Detached(device));
+            }
+            return Vec::new();
+        }
         FromPhone::GetBlob { session, path } => {
             return blob(&session, &path, shared.settings.max_frame_bytes);
         }

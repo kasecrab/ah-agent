@@ -413,6 +413,7 @@ pub fn serve(o: &Overrides, detach: bool) -> Result<(), AnyError> {
             while let Ok(note) = notes_rx.recv() {
                 match note {
                     Note::Attached(device) => println!("{device} attached"),
+                    Note::Detached(device) => println!("{device} left"),
                     Note::Said(text) => println!("{text}"),
                     // Nothing to hand over to: a window takes the lock by
                     // asking, and the publisher stands down on its own.
