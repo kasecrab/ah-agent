@@ -336,7 +336,7 @@ pub fn one_shot(
     }
 }
 
-fn install_ctrlc(cancel: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+pub fn install_ctrlc(cancel: std::sync::Arc<std::sync::atomic::AtomicBool>) {
     // SIGINT flips the cancel flag; a second one exits.
     #[cfg(unix)]
     {
@@ -380,7 +380,7 @@ pub fn subcommand(cmd: Command, o: &Overrides) -> Result<(), AnyError> {
         Command::Config { cmd } => config(o, cmd.unwrap_or(ConfigCmd::Show { origins: false })),
         Command::Docs { topic } => docs(topic.as_deref()),
         #[cfg(feature = "remote")]
-        Command::Remote { cmd } => crate::remote::cli::subcommand(cmd),
+        Command::Remote { cmd } => crate::remote::cli::subcommand(cmd, o),
         Command::Sessions => {
             for s in ah_core::session::summaries() {
                 println!(

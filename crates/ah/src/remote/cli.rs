@@ -6,9 +6,10 @@ use ah_remote::{code, crypto, provision, qr};
 use crate::RemoteCmd;
 use crate::app::AnyError;
 
-pub fn subcommand(cmd: RemoteCmd) -> Result<(), AnyError> {
+pub fn subcommand(cmd: RemoteCmd, o: &crate::Overrides) -> Result<(), AnyError> {
     match cmd {
         RemoteCmd::Pair { url } => pair(url),
+        RemoteCmd::Serve { detach } => crate::remote::daemon::serve(o, detach),
         RemoteCmd::Status => status(),
         RemoteCmd::Forget => forget(),
     }

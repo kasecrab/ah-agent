@@ -1,163 +1,139 @@
-//! Putting a session on the wire.
+//! Putting a machine's sessions on the wire.
 //!
-//! Every `UiEvent` the engine produces passes through [`Publisher::observe`],
+//! Every `UiEvent` an engine produces passes through [`Publisher::observe`],
 //! which does no work beyond putting it in a list: it is called from the
-//! thread the UI is waiting on, and a socket has no business being there. A
-//! thread of its own seals what has gathered and sends it.
+//! thread something else is waiting on, and a socket has no business being
+//! there. A thread of its own seals what has gathered and sends it.
 //!
 //! Text is gathered rather than sent as it arrives. A turn produces thousands
 //! of small pieces and nobody reads them one at a time, so they travel in
 //! batches; anything a person has to see on its own — a tool starting, an
-//! error, the end of a turn — goes immediately and is never folded into
-//! anything else.
+//! error, a question waiting on an answer — goes immediately and is never
+//! folded into anything else.
+//!
+//! What a session *is* lives behind [`Sessions`]. This file knows how to seal
+//! something and put it on a socket, and nothing else.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use ah_core::abi::{RemoteSettings, Usage};
+use ah_core::abi::RemoteSettings;
 use ah_core::agent::{AgentEvent, event_json};
 use ah_remote::crypto::{self, Keys, Opener, Sealer};
 use ah_remote::link::{Config, Event, Link};
-use ah_remote::proto::{
-    Bye, Dir, Envelope, FromDesk, FromPhone, Hello, PROTO, Role, SessionInfo, SessionState,
-};
+use ah_remote::proto::{Bye, Dir, Envelope, FromDesk, FromPhone, Hello, PROTO, Role};
 use serde_json::Value;
 
-use crate::app::{EngineCmd, Inbox, UiEvent};
+use crate::app::UiEvent;
 use crate::remote::lock::Lock;
+use crate::remote::sessions::{Act, Sessions};
 
-/// How often the thread looks at what has gathered. Short enough that the
-/// flush deadline is honoured to within a frame of itself.
+/// How often the thread looks at what has gathered.
 const TICK: Duration = Duration::from_millis(20);
+
+/// How often the holder looks to see whether a window is waiting for the
+/// pairing. Five times a second is free; fifty would be rude.
+const YIELD_CHECK: Duration = Duration::from_millis(200);
+
+/// How long a window waits for whoever is publishing to stand down before
+/// giving up and publishing nothing.
+const HANDOVER: Duration = Duration::from_secs(3);
 
 /// What the rest of the program is told about the link.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Note {
     /// A phone attached, by the name it gave for itself.
     Attached(String),
-    /// Something about the link worth a line in the transcript.
+    /// Something worth a line in the transcript.
     Said(String),
+    /// A window wants the pairing. Whoever holds it should stand down.
+    Yield,
 }
 
 /// Where the link is, for the status line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
-    /// Publishing.
     Up,
-    /// Dialling, or waiting to dial again.
     Dialling,
-    /// Not coming back without something changing.
     Failed,
 }
 
-/// The ways into the running session, cloned from the channels the window
-/// itself uses. A phone reaches the engine by exactly the same means as the
-/// keyboard does, which is why the two can answer the same question.
-pub struct Reach {
-    pub cmd: mpsc::Sender<EngineCmd>,
-    pub perm: mpsc::Sender<bool>,
-    pub ask: mpsc::Sender<ah_core::abi::Reply>,
-    pub cancel: Arc<AtomicBool>,
-    pub inbox: Arc<Inbox>,
-}
-
-/// What a phone is told about the session being watched.
-#[derive(Debug, Clone, Default)]
-pub struct Live {
-    pub session: String,
-    pub name: Option<String>,
-    pub cwd: String,
-    pub model: String,
-    pub busy: bool,
-    pub context_tokens: u64,
-    pub context_window: u64,
-    pub usage: Usage,
-}
-
-/// Publishes one session for as long as it is held.
+/// Publishes a machine's sessions for as long as it is held.
 pub struct Publisher {
     shared: Arc<Shared>,
     stop: Option<mpsc::Sender<()>>,
     thread: Option<std::thread::JoinHandle<()>>,
-    /// Held, not used: while this exists no other window publishes.
+    /// Held, not used: while this exists nothing else publishes.
     _lock: Lock,
 }
 
 struct Shared {
     settings: RemoteSettings,
     batch: Mutex<Batch>,
-    live: Mutex<Live>,
+    sessions: Arc<dyn Sessions>,
     up: AtomicBool,
     failed: AtomicBool,
-    /// The question on screen, if there is one. An answer for anything else
-    /// arrived too late and is dropped rather than applied to whatever came
-    /// next.
-    pending: AtomicU64,
-    /// Who answered the question with this number, when it was a phone.
+    /// The question on screen, as the session it belongs to and its number.
+    /// An answer for anything else arrived too late, and sending it on would
+    /// apply it to whatever came next.
+    pending: Mutex<Option<(String, u64)>>,
+    /// Who answered that question, when it was a phone.
     answered_by: Mutex<Option<(u64, String)>>,
-    reach: Reach,
 }
 
 /// What has gathered since the last frame went out.
 #[derive(Default)]
 struct Batch {
-    events: Vec<Value>,
+    /// Events by the session they belong to.
+    events: HashMap<String, Vec<Value>>,
+    /// Which session spoke first, so frames leave in that order.
+    order: Vec<String>,
     bytes: usize,
-    /// Set by an event nobody should have to wait 200 ms to see.
+    /// Set by an event nobody should have to wait for a batch to see.
     urgent: bool,
     /// Payloads that are not events, which never wait at all.
     ahead: Vec<FromDesk>,
 }
 
 /// Start publishing if everything it needs is in place: a pairing, a relay to
-/// reach it through, the setting turned on, and no other window already doing
-/// it. Any of those missing is an ordinary `None`, not a failure worth saying
-/// anything about.
+/// reach it through, the setting turned on, and nothing else already doing
+/// it. Any of those missing is an ordinary `None`.
 pub fn start(
     settings: &ah_core::abi::Settings,
-    live: Live,
-    reach: Reach,
+    sessions: Arc<dyn Sessions>,
     notes: mpsc::Sender<Note>,
 ) -> Option<Publisher> {
     let raw = ah_remote::code::parse(&ah_core::auth::remote_code()?)?;
     let url = ah_core::auth::remote_url()?;
-    Publisher::start(
-        &settings.remote,
-        url,
-        Keys::derive(&raw),
-        live,
-        reach,
-        notes,
-    )
+    Publisher::start(&settings.remote, url, Keys::derive(&raw), sessions, notes)
 }
 
 impl Publisher {
-    /// Start publishing, if this machine is paired, configured to, and not
-    /// already publishing from another window.
     pub fn start(
         settings: &RemoteSettings,
         url: String,
         keys: Keys,
-        live: Live,
-        reach: Reach,
+        sessions: Arc<dyn Sessions>,
         notes: mpsc::Sender<Note>,
     ) -> Option<Self> {
         if !settings.enabled {
             return None;
         }
-        let lock = Lock::take()?;
+        // Asking rather than simply taking: a daemon may be holding this,
+        // and a window opening is the one thing it stands down for.
+        let lock = ask_for_it(HANDOVER)?;
+
         let shared = Arc::new(Shared {
             settings: settings.clone(),
             batch: Mutex::new(Batch::default()),
-            live: Mutex::new(live),
+            sessions,
             up: AtomicBool::new(false),
             failed: AtomicBool::new(false),
-            pending: AtomicU64::new(0),
+            pending: Mutex::new(None),
             answered_by: Mutex::new(None),
-            reach,
         });
 
         let (socket_tx, socket_rx) = mpsc::channel();
@@ -190,46 +166,47 @@ impl Publisher {
         })
     }
 
-    /// One event from the engine. Called on the thread the UI is waiting on,
-    /// so it only ever adds to a list.
-    pub fn observe(&self, ev: &UiEvent) {
-        let session = || lock(&self.shared.live).session.clone();
+    /// One event from one session. Called on a thread something else is
+    /// waiting on, so it only ever adds to a list.
+    pub fn observe(&self, session: &str, ev: &UiEvent) {
         let ev = match ev {
             UiEvent::Agent(ev) => ev,
-            // A question waits for somebody, so it does not wait for a batch.
+            // A question is waiting on somebody, so it does not wait for a
+            // batch.
             UiEvent::AskPermission { id, call, reason } => {
-                self.shared.pending.store(*id, Ordering::Release);
+                *lock(&self.shared.pending) = Some((session.to_string(), *id));
                 return self.ahead(FromDesk::AskPermission {
-                    session: session(),
+                    session: session.to_string(),
                     id: *id,
                     call: call.clone(),
                     reason: reason.clone(),
                 });
             }
             UiEvent::AskUser { id, ask } => {
-                self.shared.pending.store(*id, Ordering::Release);
+                *lock(&self.shared.pending) = Some((session.to_string(), *id));
                 return self.ahead(FromDesk::AskUser {
-                    session: session(),
+                    session: session.to_string(),
                     id: *id,
                     ask: (**ask).clone(),
                 });
             }
             UiEvent::Answered { id } => {
-                self.shared.pending.store(0, Ordering::Release);
+                *lock(&self.shared.pending) = None;
                 let by = match lock(&self.shared.answered_by).take() {
                     Some((answered, who)) if answered == *id => who,
                     _ => "the desk".to_string(),
                 };
                 return self.ahead(FromDesk::Answered {
-                    session: session(),
+                    session: session.to_string(),
                     id: *id,
                     by,
                 });
             }
-            // Everything else the window hears about is either already in
-            // what a phone is told, or is none of its business.
+            // Everything else is either already in what a phone is told, or
+            // is none of its business.
             _ => return,
         };
+
         let urgent = matches!(
             ev,
             AgentEvent::ToolStart(_)
@@ -246,7 +223,11 @@ impl Publisher {
 
         let mut batch = lock(&self.shared.batch);
         batch.bytes += json.to_string().len();
-        fold(&mut batch.events, json);
+        if !batch.events.contains_key(session) {
+            batch.order.push(session.to_string());
+        }
+        let run = batch.events.entry(session.to_string()).or_default();
+        fold(run, json);
         batch.urgent |= urgent;
     }
 
@@ -255,10 +236,11 @@ impl Publisher {
         lock(&self.shared.batch).ahead.push(payload);
     }
 
-    /// Tell the link what the session is now, so a phone that asks is not
-    /// told what it was.
-    pub fn live(&self, live: Live) {
-        *lock(&self.shared.live) = live;
+    /// Tell every phone that a session has moved on.
+    pub fn state_changed(&self, session: &str) {
+        if let Some(state) = self.shared.sessions.state(session) {
+            self.ahead(FromDesk::State(state));
+        }
     }
 
     pub fn state(&self) -> State {
@@ -284,6 +266,36 @@ impl Drop for Publisher {
     }
 }
 
+/// Where a window says it wants the pairing.
+pub fn yield_path() -> std::path::PathBuf {
+    ah_core::paths::data_dir().join("remote.yield")
+}
+
+/// Ask whoever is publishing to stand down, and wait a little for them to.
+///
+/// The file is removed either way: left behind, it would keep the next holder
+/// standing down forever over a window that has long since gone.
+pub fn ask_for_it(patience: Duration) -> Option<Lock> {
+    if let Some(lock) = Lock::take() {
+        return Some(lock);
+    }
+    let path = yield_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(&path, b"");
+    let deadline = Instant::now() + patience;
+    while Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+        if let Some(lock) = Lock::take() {
+            let _ = std::fs::remove_file(&path);
+            return Some(lock);
+        }
+    }
+    let _ = std::fs::remove_file(&path);
+    None
+}
+
 /// Fold an event into what is already waiting, where folding loses nothing.
 fn fold(events: &mut Vec<Value>, next: Value) {
     let kind = next.get("type").and_then(|v| v.as_str()).unwrap_or("");
@@ -298,38 +310,35 @@ fn fold(events: &mut Vec<Value>, next: Value) {
         last["text"] = Value::String(format!("{head}{tail}"));
         return;
     }
-    if kind == "compact_progress" {
+    if kind == "compact_progress"
+        && let Some(last) = events.last_mut()
+        && last.get("type").and_then(|v| v.as_str()) == Some("compact_progress")
+    {
         // Only the latest count means anything; the ones before it were only
         // ever going to be replaced.
-        if let Some(last) = events.last_mut()
-            && last.get("type").and_then(|v| v.as_str()) == Some("compact_progress")
-        {
-            *last = next;
-            return;
-        }
+        *last = next;
+        return;
     }
     events.push(next);
 }
 
 /// Cut a single event down to something worth sending over a phone link.
 fn trim(event: &mut Value, max: usize) {
-    for field in ["text", "error", "summary"] {
-        let Some(Value::String(s)) = event.get_mut(field) else {
-            continue;
-        };
+    fn cut(s: &mut String, max: usize) {
         if s.len() > max {
             let left = s.len() - max;
             s.truncate(max);
             s.push_str(&format!("\n… [{left} bytes not sent to the phone]"));
         }
     }
+    for field in ["text", "error", "summary"] {
+        if let Some(Value::String(s)) = event.get_mut(field) {
+            cut(s, max);
+        }
+    }
     // A tool's output is the one that actually gets long.
-    if let Some(Value::String(s)) = event.pointer_mut("/result/output")
-        && s.len() > max
-    {
-        let left = s.len() - max;
-        s.truncate(max);
-        s.push_str(&format!("\n… [{left} bytes not sent to the phone]"));
+    if let Some(Value::String(s)) = event.pointer_mut("/result/output") {
+        cut(s, max);
     }
 }
 
@@ -351,9 +360,19 @@ fn run(
     let mut openers: HashMap<String, Opener> = HashMap::new();
     let mut outbox: Vec<FromDesk> = Vec::new();
     let mut last_flush = Instant::now();
+    let mut last_yield_check = Instant::now();
     let flush_after = Duration::from_millis(shared.settings.flush_ms);
 
     while let Err(RecvTimeoutError::Timeout) = stop.recv_timeout(TICK) {
+        // Somebody wanting the pairing is the one thing that ends this early.
+        if last_yield_check.elapsed() >= YIELD_CHECK {
+            last_yield_check = Instant::now();
+            if yield_path().exists() {
+                let _ = notes.send(Note::Yield);
+                break;
+            }
+        }
+
         // What the socket has to say first: a fresh link changes the key
         // everything after it is sealed under.
         while let Ok(ev) = socket.try_recv() {
@@ -366,12 +385,12 @@ fn run(
                     openers.clear();
                     shared.up.store(true, Ordering::Release);
                     outbox.insert(0, hello());
-                    outbox.push(FromDesk::State(state_of(&lock(&shared.live))));
+                    outbox.push(FromDesk::Sessions {
+                        list: shared.sessions.list(),
+                    });
                 }
                 Event::Frame(raw) => {
-                    if let Some(reply) = answer(&raw, &keys, &mut openers, &shared, &notes) {
-                        outbox.extend(reply);
-                    }
+                    outbox.extend(answer(&raw, &keys, &mut openers, &shared, &notes));
                 }
                 Event::Lost(_) => shared.up.store(false, Ordering::Release),
                 Event::Fatal(why) => {
@@ -391,11 +410,13 @@ fn run(
                 || batch.urgent;
             outbox.append(&mut batch.ahead);
             if due && !batch.events.is_empty() {
-                let session = lock(&shared.live).session.clone();
-                outbox.push(FromDesk::Events {
-                    session,
-                    evs: std::mem::take(&mut batch.events),
-                });
+                for session in std::mem::take(&mut batch.order) {
+                    if let Some(evs) = batch.events.remove(&session)
+                        && !evs.is_empty()
+                    {
+                        outbox.push(FromDesk::Events { session, evs });
+                    }
+                }
                 batch.bytes = 0;
                 batch.urgent = false;
                 last_flush = Instant::now();
@@ -406,9 +427,9 @@ fn run(
             continue;
         }
         if !shared.up.load(Ordering::Acquire) {
-            // Nowhere to put them yet. Keep what fits and drop the oldest:
-            // a phone that missed the middle of a turn is told there is a
-            // gap, which is better than a window that grows without end.
+            // Nowhere to put them yet. Keep what fits and drop the oldest: a
+            // phone that missed the middle of a turn is told there is a gap,
+            // which is better than a window that grows without end.
             trim_outbox(&mut outbox, shared.settings.outbox_bytes);
             continue;
         }
@@ -429,7 +450,7 @@ fn run(
         link.send(
             serde_json::to_string(&Envelope::publish(&hex(&id), seq, ct)).unwrap_or_default(),
         );
-        // Long enough for the socket thread to pick it up off the queue.
+        // Long enough for the socket thread to take it off the queue.
         std::thread::sleep(Duration::from_millis(60));
     }
 }
@@ -453,15 +474,14 @@ fn sealer(keys: &Keys, id: &[u8; crypto::LINK_BYTES]) -> Sealer {
     Sealer::new(keys.link_key(Dir::D2p, id, &none), Dir::D2p, *id, none)
 }
 
-/// What a phone asked for, and what it gets back. Read-only: what a phone can
-/// say that changes anything is not wired up yet.
+/// What a phone asked for, and what it gets back.
 fn answer(
     raw: &str,
     keys: &Keys,
     openers: &mut HashMap<String, Opener>,
     shared: &Shared,
     notes: &mpsc::Sender<Note>,
-) -> Option<Vec<FromDesk>> {
+) -> Vec<FromDesk> {
     let Ok(Envelope::Cmd {
         link,
         plink,
@@ -470,24 +490,23 @@ fn answer(
         ..
     }) = serde_json::from_str::<Envelope>(raw)
     else {
-        return None;
+        return Vec::new();
     };
-    let id = unhex(&link)?;
-    let phone = unhex(&plink)?;
+    let (Some(id), Some(phone)) = (unhex(&link), unhex(&plink)) else {
+        return Vec::new();
+    };
     let opener = openers
         .entry(plink.clone())
         .or_insert_with(|| Opener::new(keys.link_key(Dir::P2d, &id, &phone), Dir::P2d, id, phone));
-    let plain = opener.open(seq, &ct).ok()?;
-    let asked: FromPhone = serde_json::from_slice(plain).ok()?;
-
-    let live = lock(&shared.live).clone();
-    let reach = &shared.reach;
-    let say = |what: String| {
-        if shared.settings.notice {
-            let _ = notes.send(Note::Said(what));
-        }
+    let Ok(plain) = opener.open(seq, &ct) else {
+        return Vec::new();
     };
-    let ok = |error: Option<String>| {
+    let Ok(asked) = serde_json::from_slice::<FromPhone>(plain) else {
+        return Vec::new();
+    };
+
+    let device = device_name(&plink);
+    let ack = |error: Option<String>| {
         vec![FromDesk::Ack {
             cmd_seq: seq,
             ok: error.is_none(),
@@ -495,118 +514,118 @@ fn answer(
         }]
     };
 
-    Some(match asked {
-        FromPhone::List => vec![FromDesk::Sessions {
-            list: sessions(&live),
-        }],
-        FromPhone::Attach { device, .. } => {
+    // Reading is answered here: it is the same answer whoever owns the
+    // sessions, and none of it changes anything.
+    let (session, act) = match asked {
+        FromPhone::List => {
+            return vec![FromDesk::Sessions {
+                list: shared.sessions.list(),
+            }];
+        }
+        FromPhone::Attach { session, .. } => {
             if shared.settings.notice {
                 let _ = notes.send(Note::Attached(device));
             }
-            let (messages, truncated) = snapshot(&live, shared.settings.snapshot_messages);
-            vec![
-                FromDesk::State(state_of(&live)),
+            let Some(state) = shared.sessions.state(&session) else {
+                return ack(Some("no such session".into()));
+            };
+            let (messages, truncated) = snapshot(&session, shared.settings.snapshot_messages);
+            return vec![
+                FromDesk::State(state),
                 FromDesk::Snapshot {
-                    session: live.session.clone(),
+                    session,
                     messages,
                     truncated,
                 },
-            ]
+            ];
         }
-        FromPhone::Detach { .. } => Vec::new(),
+        FromPhone::Detach { .. } => return Vec::new(),
+        FromPhone::GetBlob { session, path } => {
+            return blob(&session, &path, shared.settings.max_frame_bytes);
+        }
 
-        // Said while the turn is running, it goes to the mailbox the loop
-        // reads between requests; said while nothing is running, it starts a
-        // turn. The phone does not have to know which, and cannot know it
-        // without being wrong about it sometimes.
-        FromPhone::Submit { text, images, .. } => {
-            say(format!("remote: \u{201c}{}\u{201d}", first_line(&text)));
-            if live.busy {
-                reach.inbox.push(text);
-            } else {
-                let _ = reach.cmd.send(EngineCmd::Submit { text, images });
-            }
-            ok(None)
+        FromPhone::Submit {
+            session,
+            text,
+            images,
+        } => (session, Act::Submit { text, images }),
+        FromPhone::Interrupt { session } => (session, Act::Interrupt),
+        FromPhone::Compact { session, focus } => (session, Act::Compact(focus)),
+        FromPhone::Clear { session } => (session, Act::Clear),
+        FromPhone::Rename { session, name } => (session, Act::Rename(name)),
+        FromPhone::Resume { session } => (session, Act::Resume),
+        FromPhone::NewSession { cwd, model, prompt } => {
+            (String::new(), Act::Start { cwd, model, prompt })
         }
-        FromPhone::Interrupt { .. } => {
-            // The same flag Esc sets, so a turn stopped from a phone stops
-            // the way a turn stopped at the keyboard does.
-            reach.cancel.store(true, Ordering::Relaxed);
-            say("remote: stopped".into());
-            ok(None)
-        }
-        FromPhone::AnswerPermission { id, allow, .. } => {
-            if shared.pending.load(Ordering::Acquire) != id {
-                // Answered already, or answered by somebody else. Sending it
-                // on would apply it to whatever question came next.
-                ok(Some("that question has been answered".into()))
-            } else {
-                *lock(&shared.answered_by) = Some((id, device_name(openers, &plink)));
-                let _ = reach.perm.send(allow);
-                say(format!(
-                    "remote: {}",
-                    if allow { "allowed" } else { "denied" }
-                ));
-                ok(None)
-            }
-        }
-        FromPhone::AnswerAsk { id, reply, .. } => {
-            if shared.pending.load(Ordering::Acquire) != id {
-                ok(Some("that question has been answered".into()))
-            } else {
-                *lock(&shared.answered_by) = Some((id, device_name(openers, &plink)));
-                let _ = reach.ask.send(reply);
-                say("remote: answered".into());
-                ok(None)
-            }
-        }
-        FromPhone::Compact { focus, .. } => {
-            let _ = reach.cmd.send(EngineCmd::Compact(focus));
-            ok(None)
-        }
-        FromPhone::Clear { .. } => {
-            let _ = reach.cmd.send(EngineCmd::Clear);
-            say("remote: cleared".into());
-            ok(None)
-        }
-        FromPhone::Rename { name, .. } => {
-            let _ = reach.cmd.send(EngineCmd::Rename(name));
-            ok(None)
-        }
-        FromPhone::GetBlob { path, .. } => blob(&live, &path, shared.settings.max_frame_bytes),
 
-        // Starting a session somewhere else is not this window's to give.
-        FromPhone::Resume { .. } | FromPhone::NewSession { .. } => ok(Some(
-            "this window publishes one session; starting another needs the daemon".into(),
-        )),
-    })
+        // An answer is only an answer to the question that is on screen.
+        // Anything else arrived too late, and sending it on would apply it to
+        // whatever came next.
+        FromPhone::AnswerPermission { session, id, allow } => {
+            let Some(asked) = asking(shared, &session, id) else {
+                return ack(Some("that question has been answered".into()));
+            };
+            *lock(&shared.answered_by) = Some((id, device));
+            (asked, Act::AllowTool(allow))
+        }
+        FromPhone::AnswerAsk { session, id, reply } => {
+            let Some(asked) = asking(shared, &session, id) else {
+                return ack(Some("that question has been answered".into()));
+            };
+            *lock(&shared.answered_by) = Some((id, device));
+            (asked, Act::Answer(reply))
+        }
+    };
+
+    let said = act.said();
+    match shared.sessions.act(&session, act) {
+        Ok(started) => {
+            if let Some(text) = said
+                && shared.settings.notice
+            {
+                let _ = notes.send(Note::Said(text));
+            }
+            let mut out = ack(None);
+            if started.is_some() {
+                out.push(FromDesk::Sessions {
+                    list: shared.sessions.list(),
+                });
+            }
+            out
+        }
+        Err(why) => ack(Some(why)),
+    }
 }
 
-/// The first line of what was said, for a transcript that should not be
-/// swamped by a phone pasting an essay into it.
-fn first_line(text: &str) -> String {
-    let line = text.lines().next().unwrap_or("").trim();
-    if line.chars().count() > 60 {
-        format!("{}\u{2026}", line.chars().take(60).collect::<String>())
-    } else {
-        line.to_string()
+/// Whether this is an answer to the question that is actually on screen, and
+/// if so which session asked it.
+///
+/// A phone that has not attached to anything names no session, and there is
+/// only ever one question outstanding, so the number is enough to know what
+/// it is answering. Naming the wrong session is a different matter and is
+/// refused.
+fn asking(shared: &Shared, session: &str, id: u64) -> Option<String> {
+    match &*lock(&shared.pending) {
+        Some((asked, pending)) if *pending == id && (session.is_empty() || asked == session) => {
+            Some(asked.clone())
+        }
+        _ => None,
     }
 }
 
 /// Which phone this was, as far as anything here knows: the first characters
 /// of the link it seals under. Nothing a person named, and nothing that
 /// follows it between connections.
-fn device_name(openers: &HashMap<String, Opener>, plink: &str) -> String {
-    let _ = openers;
+fn device_name(plink: &str) -> String {
     format!("phone {}", &plink[..plink.len().min(8)])
 }
 
-/// A file the session produced, in pieces small enough to travel.
+/// A file a session produced, in pieces small enough to travel.
 ///
-/// Only what this session drew, and only by a path that is still inside the
+/// Only what that session drew, and only by a path that is still inside the
 /// directory it draws into once every `..` in it has been resolved: the path
 /// came from a phone, and a phone is not this machine.
-fn blob(live: &Live, path: &str, chunk: usize) -> Vec<FromDesk> {
+fn blob(session: &str, path: &str, chunk: usize) -> Vec<FromDesk> {
     let deny = |why: &str| {
         vec![FromDesk::Ack {
             cmd_seq: 0,
@@ -614,8 +633,7 @@ fn blob(live: &Live, path: &str, chunk: usize) -> Vec<FromDesk> {
             error: Some(why.to_string()),
         }]
     };
-    let dir = ah_core::paths::session_images_dir(&live.session);
-    let Ok(dir) = dir.canonicalize() else {
+    let Ok(dir) = ah_core::paths::session_images_dir(session).canonicalize() else {
         return deny("this session has drawn nothing");
     };
     let Ok(full) = std::path::Path::new(path).canonicalize() else {
@@ -656,45 +674,15 @@ fn blob(live: &Live, path: &str, chunk: usize) -> Vec<FromDesk> {
         .collect()
 }
 
-/// Every session on this machine, with the live one marked.
-fn sessions(live: &Live) -> Vec<SessionInfo> {
-    ah_core::session::summaries()
-        .into_iter()
-        .map(|s| SessionInfo {
-            live: s.id == live.session,
-            id: s.id,
-            name: s.name,
-            title: s.title,
-            cwd: s.cwd,
-            model: s.model,
-            started_ms: s.started_ms as u64,
-            messages: s.messages as u32,
-        })
-        .collect()
-}
-
-/// The tail of the conversation, read from the session file rather than kept
-/// in memory: it is the same text, and it survives this window restarting.
-fn snapshot(live: &Live, want: usize) -> (Vec<ah_core::abi::Message>, bool) {
-    let Ok(session) = ah_core::session::Session::open(&live.session) else {
+/// The tail of a conversation, read from the session file rather than kept in
+/// memory: it is the same text, and it survives this process restarting.
+fn snapshot(session: &str, want: usize) -> (Vec<ah_core::abi::Message>, bool) {
+    let Ok(session) = ah_core::session::Session::open(session) else {
         return (Vec::new(), false);
     };
     let total = session.messages.len();
     let from = total.saturating_sub(want);
     (session.messages[from..].to_vec(), from > 0)
-}
-
-fn state_of(live: &Live) -> SessionState {
-    SessionState {
-        session: live.session.clone(),
-        busy: live.busy,
-        model: live.model.clone(),
-        cwd: live.cwd.clone(),
-        name: live.name.clone(),
-        context_tokens: live.context_tokens,
-        context_window: live.context_window,
-        usage: live.usage,
-    }
 }
 
 fn hello() -> FromDesk {
@@ -703,8 +691,18 @@ fn hello() -> FromDesk {
         os: std::env::consts::OS.to_string(),
         ah_version: env!("CARGO_PKG_VERSION").to_string(),
         proto: PROTO,
-        holder: "tui".into(),
+        holder: holder().into(),
     })
+}
+
+/// Whether a window or the daemon is publishing, which is the only thing a
+/// phone can use to tell one from the other.
+fn holder() -> &'static str {
+    if std::env::var_os("AH_REMOTE_DAEMON").is_some() {
+        "daemon"
+    } else {
+        "tui"
+    }
 }
 
 fn hostname() -> String {
@@ -845,17 +843,14 @@ mod files {
     use super::*;
 
     /// A session with one drawing in it, and a data directory of its own.
-    fn drawn(dir: &std::path::Path) -> Live {
+    fn drawn(dir: &std::path::Path) -> String {
         // SAFETY: every test that moves this variable holds the same guard.
         unsafe { std::env::set_var("AH_DATA_DIR", dir) };
-        let live = Live {
-            session: "abc123".into(),
-            ..Default::default()
-        };
-        let images = ah_core::paths::session_images_dir(&live.session);
+        let session = String::from("abc123");
+        let images = ah_core::paths::session_images_dir(&session);
         std::fs::create_dir_all(&images).unwrap();
         std::fs::write(images.join("drawing.png"), vec![7u8; 3000]).unwrap();
-        live
+        session
     }
 
     fn refused(out: &[FromDesk]) -> Option<String> {
@@ -872,10 +867,10 @@ mod files {
         let _env = crate::remote::env_guard();
         let dir = std::env::temp_dir().join(format!("ah-blob-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let live = drawn(&dir);
-        let path = ah_core::paths::session_images_dir(&live.session).join("drawing.png");
+        let session = drawn(&dir);
+        let path = ah_core::paths::session_images_dir(&session).join("drawing.png");
 
-        let out = blob(&live, path.to_str().unwrap(), 1024);
+        let out = blob(&session, path.to_str().unwrap(), 1024);
         assert!(
             out.len() > 1,
             "3000 bytes does not fit in one frame: {}",
@@ -907,8 +902,8 @@ mod files {
         let _env = crate::remote::env_guard();
         let dir = std::env::temp_dir().join(format!("ah-blob-out-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let live = drawn(&dir);
-        let images = ah_core::paths::session_images_dir(&live.session);
+        let session = drawn(&dir);
+        let images = ah_core::paths::session_images_dir(&session);
 
         // The path comes from a phone, so it is not taken at its word. Every
         // one of these resolves outside the session's own directory.
@@ -918,7 +913,7 @@ mod files {
             images.join("..").display().to_string(),
         ] {
             assert!(
-                refused(&blob(&live, &attempt, 1024)).is_some(),
+                refused(&blob(&session, &attempt, 1024)).is_some(),
                 "it handed over {attempt}"
             );
         }
@@ -930,22 +925,12 @@ mod files {
         let _env = crate::remote::env_guard();
         let dir = std::env::temp_dir().join(format!("ah-blob-none-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let live = drawn(&dir);
-        let path = ah_core::paths::session_images_dir(&live.session).join("nothing.png");
+        let session = drawn(&dir);
+        let path = ah_core::paths::session_images_dir(&session).join("nothing.png");
         assert_eq!(
-            refused(&blob(&live, path.to_str().unwrap(), 1024)).as_deref(),
+            refused(&blob(&session, path.to_str().unwrap(), 1024)).as_deref(),
             Some("no such file")
         );
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn a_long_line_is_shortened_for_the_transcript() {
-        assert_eq!(first_line("hello\nthere"), "hello");
-        assert_eq!(first_line("   spaced   "), "spaced");
-        let long = "w".repeat(200);
-        let cut = first_line(&long);
-        assert!(cut.chars().count() <= 61, "{} chars", cut.chars().count());
-        assert!(cut.ends_with('\u{2026}'));
     }
 }

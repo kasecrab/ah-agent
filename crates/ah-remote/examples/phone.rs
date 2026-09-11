@@ -10,7 +10,8 @@
 //!     cargo run -p ah-remote --example phone
 //!
 //! Type a message and press return to send it. `/list`, `/attach <id>`,
-//! `/interrupt`, `/y`, `/n` and `/quit` do what they look like.
+//! `/new <dir>`, `/resume <id>`, `/interrupt`, `/y`, `/n` and `/quit` do what
+//! they look like.
 
 use std::io::BufRead;
 use std::sync::mpsc;
@@ -194,9 +195,17 @@ impl Phone {
             FromDesk::Hello(h) => println!("— {} ({}), ah {}", h.host, h.os, h.ah_version),
             FromDesk::Sessions { list } => {
                 println!("— {} session(s)", list.len());
-                for s in list {
+                for s in &list {
                     let live = if s.live { "*" } else { " " };
                     println!("  {live} {} {} — {}", s.id, s.model, s.title);
+                }
+                // With nothing attached yet, the running one is the one
+                // anything typed here is meant for.
+                if self.session.is_empty()
+                    && let Some(live) = list.iter().find(|s| s.live)
+                {
+                    self.session = live.id.clone();
+                    println!("— talking to {}", live.id);
                 }
             }
             FromDesk::State(s) => println!(
@@ -217,12 +226,19 @@ impl Phone {
                 }
             }
             FromDesk::AskPermission {
-                id, call, reason, ..
+                session,
+                id,
+                call,
+                reason,
             } => {
+                // Answer the session that asked, not whichever one was being
+                // watched when the question arrived.
+                self.session = session;
                 self.ask = Some(id);
                 println!("? {} — {reason}  (/y or /n)", call.function.name);
             }
-            FromDesk::AskUser { id, ask, .. } => {
+            FromDesk::AskUser { session, id, ask } => {
+                self.session = session;
                 self.ask = Some(id);
                 for q in &ask.questions {
                     println!("? {}", q.question);
@@ -260,6 +276,16 @@ impl Phone {
                 id: self.ask.take()?,
                 allow: line == "/y",
             },
+            _ if line.starts_with("/new ") => FromPhone::NewSession {
+                cwd: line[5..].trim().to_string(),
+                model: None,
+                prompt: None,
+            },
+            _ if line.starts_with("/resume ") => {
+                let id = line[8..].trim().to_string();
+                self.session = id.clone();
+                FromPhone::Resume { session: id }
+            }
             _ if line.starts_with("/attach ") => {
                 let id = line[8..].trim().to_string();
                 self.session = id.clone();

@@ -51,6 +51,7 @@ One-shot mode keeps the session in memory only; the TUI writes a session file
 | `ah config init [--force]` | write a commented default config |
 | `ah sessions` | stored sessions |
 | `ah remote pair [--url URL]` | make a pairing and show it as a QR code and a typed code. The URL is remembered, so it is needed once. Anyone holding the code can start a session on this machine |
+| `ah remote serve [--detach]` | publish this machine's sessions with no window open, so a phone can start and resume them. `--detach` carries on in the background and writes to `<data dir>/remote.log` |
 | `ah remote status` | whether this machine is paired, and to which relay |
 | `ah remote forget` | forget the pairing, so no phone holding it can reach this machine |
 | `ah docs [TOPIC]` | list these pages, or print one |

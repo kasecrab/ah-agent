@@ -179,6 +179,12 @@ pub enum RemoteCmd {
         #[arg(long, value_name = "URL")]
         url: Option<String>,
     },
+    /// Publish this machine's sessions with no window open.
+    Serve {
+        /// Carry on in the background and give the terminal back.
+        #[arg(long)]
+        detach: bool,
+    },
     /// Whether this machine is paired, and to what.
     Status,
     /// Forget the pairing, so no phone holding it can reach this machine.

@@ -187,6 +187,9 @@ decisions, and the first does not imply the second.
 | `outbox_bytes` | `262144` | frames held while the relay is unreachable |
 | `snapshot_messages` | `20` | messages of scrollback a phone gets on attaching |
 | `notice` | `true` | say in the transcript when a phone attaches |
+| `roots` | `[]` | directories `ah remote serve` may start a session in; empty means `$HOME` |
+| `trust_paired_device` | `false` | let sessions the daemon starts run tools without asking |
+| `max_sessions` | `4` | sessions the daemon holds open at once |
 
 ## [voice]
 

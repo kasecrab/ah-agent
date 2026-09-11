@@ -7,8 +7,8 @@ remote` lets a phone watch it, say something into it, and answer the questions
 it asks — without opening a port on this machine, and without anyone else
 being able to read a word of it.
 
-Starting a session from the phone, rather than joining the one already open,
-is still to come.
+With `ah remote serve` running, a phone can also start sessions and bring
+old ones back with no window open at all.
 
 ## How it fits together
 
@@ -70,6 +70,31 @@ Publishing is off until you ask for it. Pairing a machine and publishing from
 it are separate decisions: `ah remote pair` does the first, `remote.enabled`
 the second.
 
+## With nobody at the keyboard
+
+```
+ah remote serve             # publishes until stopped
+ah remote serve --detach    # carries on in the background
+```
+
+A window publishes the one session it has. The daemon publishes the machine:
+a phone can list what is on disk, bring one back, or start a new one. Each
+session gets an engine of its own, with settings read from the directory it
+runs in rather than from wherever the daemon happens to be standing.
+
+Two things it does that a window does not, because nobody is watching it:
+
+- **Sessions it starts ask before running tools**, however this machine is
+  otherwise configured. `remote.trust_paired_device = true` turns that off.
+- **It will only start a session where you said it may.** `remote.roots`
+  lists those directories and defaults to your home directory. Both settings
+  are read from the environment or your own config and nowhere else — a
+  repository you cloned cannot widen either by being cloned.
+
+Only one of them publishes at a time. Opening a window takes the pairing from
+the daemon, which stands down within a few seconds and picks it up again when
+the window closes; the phone sees the link change and carries on.
+
 ## Answering from either end
 
 A tool prompt goes to both screens at once and the first answer wins; the
@@ -97,6 +122,9 @@ readable either way.
 | `outbox_bytes` | `262144` | frames held while the relay is unreachable |
 | `snapshot_messages` | `20` | messages of scrollback a phone gets on attaching |
 | `notice` | `true` | say in the transcript when a phone attaches |
+| `roots` | `[]` | directories `ah remote serve` may start a session in; empty means `$HOME` |
+| `trust_paired_device` | `false` | let sessions the daemon starts run tools without asking |
+| `max_sessions` | `4` | sessions the daemon holds open at once |
 
 ## Files and variables
 
@@ -105,6 +133,8 @@ readable either way.
 | `~/.config/ah/credentials.toml` | the pairing code and relay URL, owner-readable only |
 | `AH_REMOTE_CODE` | the pairing code, ahead of the file |
 | `AH_REMOTE_URL` | the relay, ahead of the file |
+| `AH_REMOTE_ROOTS` | directories the daemon may start a session in, colon separated, ahead of the config |
+| `<data dir>/remote.log` | what a detached `ah remote serve` has to say |
 
 ## When it will not connect
 

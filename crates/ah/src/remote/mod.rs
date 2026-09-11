@@ -5,8 +5,11 @@
 //! the link is in.
 
 pub mod cli;
+pub mod daemon;
 pub mod lock;
 pub mod publisher;
+pub mod sessions;
+pub mod window;
 
 /// The environment belongs to the process, and cargo runs these tests side by
 /// side in it. Anything that points `AH_DATA_DIR` somewhere of its own waits

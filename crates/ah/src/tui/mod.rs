@@ -353,9 +353,13 @@ struct App {
     cwd: String,
     session_id: String,
     session_name: Option<String>,
-    /// The link to a phone, while one is being published to.
+    /// The link to a phone and the session it is offering, while one is
+    /// being published.
     #[cfg(feature = "remote")]
-    publisher: Option<std::sync::Arc<crate::remote::publisher::Publisher>>,
+    publisher: Option<(
+        std::sync::Arc<crate::remote::publisher::Publisher>,
+        std::sync::Arc<crate::remote::window::Window>,
+    )>,
     completion: Option<Completion>,
     picker: Option<Picker>,
     job_view: Option<jobs::View>,
@@ -523,25 +527,25 @@ fn run_inner(
                 }
             })
             .expect("spawn remote notes");
-        crate::remote::publisher::start(
-            stack.settings(),
-            crate::remote::publisher::Live {
-                session: session_id.clone(),
-                name: session_name.clone(),
-                cwd: cwd.display().to_string(),
-                model: stack.settings().model.id.clone(),
-                ..Default::default()
-            },
-            crate::remote::publisher::Reach {
+        let window = std::sync::Arc::new(crate::remote::window::Window::new(
+            crate::remote::window::Reach {
                 cmd: eng_tx.clone(),
                 perm: perm_tx.clone(),
                 ask: ask_tx.clone(),
                 cancel: cancel.clone(),
                 inbox: inbox.clone(),
             },
-            notes_tx,
-        )
-        .map(std::sync::Arc::new)
+            crate::remote::window::Live {
+                session: session_id.clone(),
+                name: session_name.clone(),
+                cwd: cwd.display().to_string(),
+                model: stack.settings().model.id.clone(),
+                ..Default::default()
+            },
+        ));
+        crate::remote::publisher::start(stack.settings(), window.clone(), notes_tx)
+            .map(std::sync::Arc::new)
+            .map(|p| (p, window))
     };
 
     // Engine thread.
@@ -549,6 +553,8 @@ fn run_inner(
         let ui_tx = ui_tx.clone();
         #[cfg(feature = "remote")]
         let publisher = publisher.clone();
+        #[cfg(feature = "remote")]
+        let published_session = session_id.clone();
         let (fwd_tx, fwd_rx) = mpsc::channel::<UiEvent>();
         std::thread::Builder::new()
             .name("ah-engine".into())
@@ -559,8 +565,8 @@ fn run_inner(
             .spawn(move || {
                 while let Ok(ev) = fwd_rx.recv() {
                     #[cfg(feature = "remote")]
-                    if let Some(p) = &publisher {
-                        p.observe(&ev);
+                    if let Some((p, _)) = &publisher {
+                        p.observe(&published_session, &ev);
                     }
                     if ui_tx.send(Msg::Engine(ev)).is_err() {
                         break;
@@ -1348,10 +1354,10 @@ impl App {
     /// a turn ago.
     #[cfg(feature = "remote")]
     fn publish_live(&self) {
-        let Some(p) = self.publisher.as_ref() else {
+        let Some((publisher, window)) = self.publisher.as_ref() else {
             return;
         };
-        p.live(crate::remote::publisher::Live {
+        window.update(crate::remote::window::Live {
             session: self.session_id.clone(),
             name: self.session_name.clone(),
             cwd: self.cwd.clone(),
@@ -1361,6 +1367,7 @@ impl App {
             context_window: self.context_window,
             usage: self.usage,
         });
+        publisher.state_changed(&self.session_id);
     }
 
     #[cfg(not(feature = "remote"))]
@@ -1371,7 +1378,7 @@ impl App {
     #[cfg(feature = "remote")]
     fn remote_label(&self) -> String {
         use crate::remote::publisher::State;
-        match self.publisher.as_ref().map(|p| p.state()) {
+        match self.publisher.as_ref().map(|(p, _)| p.state()) {
             Some(State::Up) => "remote \u{25cf}".into(),
             Some(State::Dialling) => "remote \u{25cc}".into(),
             Some(State::Failed) => "remote \u{2715}".into(),
@@ -1785,6 +1792,12 @@ impl App {
                 let line = match note {
                     Note::Attached(device) => format!("remote: \u{201c}{device}\u{201d} attached"),
                     Note::Said(text) => text,
+                    // Another window asked for the pairing. Dropping the
+                    // publisher releases the lock, which is how it gets it.
+                    Note::Yield => {
+                        self.publisher = None;
+                        "remote: handed the pairing to another window".to_string()
+                    }
                 };
                 self.push(Block::Notice(line));
                 self.dirty = true;

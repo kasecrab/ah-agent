@@ -52,6 +52,7 @@ prints the resolved locations.
 | `AH_LOG_LEVEL` | `error`, `warn`, `info` or `debug` |
 | `AH_REMOTE_CODE` | pairing code for a phone, ahead of the credentials file |
 | `AH_REMOTE_URL` | the relay to pair against, ahead of the credentials file |
+| `AH_REMOTE_ROOTS` | directories `ah remote serve` may start a session in, ahead of the config |
 | `SHELL` | shell used by the `bash` tool when `tools.shell` is empty |
 
 ## Customisation map

@@ -847,6 +847,17 @@ pub struct RemoteSettings {
     /// Say in the transcript when a phone attaches or acts. Off, the link is
     /// silent and only the status line shows it.
     pub notice: bool,
+    /// Directories `ah remote serve` will start a session in, on a phone's
+    /// asking. Empty means the home directory. Read from the environment or
+    /// your own config only, never from a project's: a repository has no
+    /// business naming directories a phone may run an agent in.
+    pub roots: Vec<String>,
+    /// Let sessions the daemon starts run tools without asking. Off, they are
+    /// forced to ask however this machine is otherwise configured — nobody is
+    /// at that keyboard to notice. Read from the same trusted places.
+    pub trust_paired_device: bool,
+    /// Sessions `ah remote serve` will hold open at once.
+    pub max_sessions: usize,
 }
 
 impl Default for RemoteSettings {
@@ -859,6 +870,9 @@ impl Default for RemoteSettings {
             outbox_bytes: 256 * 1024,
             snapshot_messages: 20,
             notice: true,
+            roots: Vec::new(),
+            trust_paired_device: false,
+            max_sessions: 4,
         }
     }
 }
