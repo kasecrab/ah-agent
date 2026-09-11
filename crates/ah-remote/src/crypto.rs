@@ -568,4 +568,44 @@ mod vectors {
         println!("stale_ts {stale}");
         println!("sig_stale {}", keys.sign_connect(Role::Desk, stale, nonce));
     }
+
+    /// Everything the Android half has to reproduce, so the two can be
+    /// checked against each other without either one running.
+    ///
+    /// `cargo test -p ah-remote --lib vectors::dump_for_the_phone -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn dump_for_the_phone() {
+        let code = [9u8; CODE_BYTES];
+        let keys = Keys::derive(&code);
+        let link = [0x11u8; LINK_BYTES];
+        let plink = [0x22u8; LINK_BYTES];
+        let d2p = keys.link_key(Dir::D2p, &link, &plink);
+        let p2d = keys.link_key(Dir::P2d, &link, &plink);
+
+        println!("code_shown {}", crate::code::format(&code));
+        println!("hub {}", keys.hub_id);
+        println!("relay_key {}", BASE64URL_NOPAD.encode(&keys.relay_key));
+        println!("link {}", HEXLOWER.encode(&link));
+        println!("plink {}", HEXLOWER.encode(&plink));
+        println!("k_d2p {}", BASE64URL_NOPAD.encode(&d2p));
+        println!("k_p2d {}", BASE64URL_NOPAD.encode(&p2d));
+
+        // A frame the phone has to be able to open, sealed the way the
+        // desktop seals one.
+        let mut seal = Sealer::new(d2p, Dir::D2p, link, [0u8; LINK_BYTES]);
+        let plain = br#"{"k":"notice","text":"the kettle is on"}"#;
+        let (seq, ct) = seal.seal(plain);
+        println!("d2p_seq {seq}");
+        println!("d2p_ct {ct}");
+        println!("d2p_plain {}", String::from_utf8_lossy(plain));
+
+        // And one the phone has to be able to make, which the desktop opens.
+        let mut up = Sealer::new(p2d, Dir::P2d, link, plink);
+        let plain = br#"{"k":"list"}"#;
+        let (seq, ct) = up.seal(plain);
+        println!("p2d_seq {seq}");
+        println!("p2d_ct {ct}");
+        println!("p2d_plain {}", String::from_utf8_lossy(plain));
+    }
 }

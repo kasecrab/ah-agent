@@ -82,6 +82,9 @@ struct Shared {
     pending: Mutex<Option<(String, u64)>>,
     /// Who answered that question, when it was a phone.
     answered_by: Mutex<Option<(u64, String)>>,
+    /// What was last said about a session, so saying it again is free to ask
+    /// for and costs nothing to refuse.
+    last_state: Mutex<Option<ah_remote::proto::SessionState>>,
 }
 
 /// What has gathered since the last frame went out.
@@ -134,6 +137,7 @@ impl Publisher {
             failed: AtomicBool::new(false),
             pending: Mutex::new(None),
             answered_by: Mutex::new(None),
+            last_state: Mutex::new(None),
         });
 
         let (socket_tx, socket_rx) = mpsc::channel();
@@ -236,10 +240,29 @@ impl Publisher {
         lock(&self.shared.batch).ahead.push(payload);
     }
 
-    /// Tell every phone that a session has moved on.
+    /// Tell every phone that a session has moved on, if it has.
+    ///
+    /// Called after every event the engine produces, which is thousands a
+    /// turn, so the first thing it does is notice that almost none of them
+    /// change anything a phone would be shown.
     pub fn state_changed(&self, session: &str) {
-        if let Some(state) = self.shared.sessions.state(session) {
-            self.ahead(FromDesk::State(state));
+        let Some(state) = self.shared.sessions.state(session) else {
+            return;
+        };
+        let mut last = lock(&self.shared.last_state);
+        if last.as_ref() == Some(&state) {
+            return;
+        }
+        // A turn ending is when a new session first has anything in it, and
+        // so the moment the list of them is worth sending again.
+        let ended = last.as_ref().is_some_and(|was| was.busy) && !state.busy;
+        *last = Some(state.clone());
+        drop(last);
+        self.ahead(FromDesk::State(state));
+        if ended {
+            self.ahead(FromDesk::Sessions {
+                list: self.shared.sessions.list(),
+            });
         }
     }
 

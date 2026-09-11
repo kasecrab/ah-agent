@@ -68,11 +68,11 @@ impl Window {
 
 impl Sessions for Window {
     fn list(&self) -> Vec<SessionInfo> {
-        let live = lock(&self.live).session.clone();
-        ah_core::session::summaries()
+        let live = lock(&self.live).clone();
+        let mut out: Vec<SessionInfo> = ah_core::session::summaries()
             .into_iter()
             .map(|s| SessionInfo {
-                live: s.id == live,
+                live: s.id == live.session,
                 id: s.id,
                 name: s.name,
                 title: s.title,
@@ -81,7 +81,25 @@ impl Sessions for Window {
                 started_ms: s.started_ms as u64,
                 messages: s.messages as u32,
             })
-            .collect()
+            .collect();
+        // A session nobody has said anything in yet is not on disk to be
+        // found, and the open window is the one a phone most wants to see.
+        if !out.iter().any(|s| s.live) {
+            out.insert(
+                0,
+                SessionInfo {
+                    id: live.session.clone(),
+                    name: live.name.clone(),
+                    title: String::from("a new session"),
+                    cwd: live.cwd.clone(),
+                    model: live.model.clone(),
+                    started_ms: 0,
+                    messages: 0,
+                    live: true,
+                },
+            );
+        }
+        out
     }
 
     fn state(&self, session: &str) -> Option<SessionState> {
