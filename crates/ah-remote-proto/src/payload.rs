@@ -58,6 +58,11 @@ pub struct Hello {
     pub proto: u8,
     /// `tui` or `daemon`: which one currently holds the publishing lock.
     pub holder: String,
+    /// Where a phone may start a session, when this machine will start one at
+    /// all. Empty from a window, which publishes the session it already has
+    /// and opens no others, so a phone can offer the choice or not offer it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roots: Vec<String>,
 }
 
 /// Why a link is closing, so the other end knows whether to wait.
@@ -126,6 +131,11 @@ pub enum FromDesk {
     Ack {
         cmd_seq: u64,
         ok: bool,
+        /// The session a command made, for `resume` and `new_session`. The
+        /// list that follows would say as much, but only by elimination, and
+        /// a phone holding a stale list would eliminate the wrong one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
@@ -240,8 +250,23 @@ mod tests {
         round_trip_desk(FromDesk::Ack {
             cmd_seq: 4,
             ok: false,
+            session: None,
             error: Some("no such session".to_string()),
         });
+        round_trip_desk(FromDesk::Ack {
+            cmd_seq: 5,
+            ok: true,
+            session: Some("01J8".to_string()),
+            error: None,
+        });
+        round_trip_desk(FromDesk::Hello(Hello {
+            host: "desk".to_string(),
+            os: "linux".to_string(),
+            ah_version: "0.1.0".to_string(),
+            proto: 1,
+            holder: "daemon".to_string(),
+            roots: vec!["/home/rabe".to_string()],
+        }));
         round_trip_desk(FromDesk::Bye {
             reason: Bye::TuiTakingOver,
         });
@@ -280,6 +305,19 @@ mod tests {
     #[test]
     fn a_kind_this_build_does_not_know_is_refused_whole() {
         assert!(serde_json::from_str::<FromPhone>(r#"{"k":"self_destruct"}"#).is_err());
+    }
+
+    /// A phone built against the older shape has to keep working, and a
+    /// desktop built against the older shape has to be readable here.
+    #[test]
+    fn a_hello_without_roots_is_still_a_hello() {
+        let h: Hello = serde_json::from_str(
+            r#"{"host":"desk","os":"linux","ah_version":"0.1.0","proto":1,"holder":"tui"}"#,
+        )
+        .unwrap();
+        assert!(h.roots.is_empty());
+        let text = serde_json::to_string(&h).unwrap();
+        assert!(!text.contains("roots"), "{text}");
     }
 
     #[test]

@@ -192,7 +192,12 @@ impl Phone {
 
     fn show(&mut self, payload: FromDesk) {
         match payload {
-            FromDesk::Hello(h) => println!("— {} ({}), ah {}", h.host, h.os, h.ah_version),
+            FromDesk::Hello(h) => {
+                println!("— {} ({}), ah {}", h.host, h.os, h.ah_version);
+                for root in &h.roots {
+                    println!("  /new may go under {root}");
+                }
+            }
             FromDesk::Sessions { list } => {
                 println!("— {} session(s)", list.len());
                 for s in &list {
@@ -250,7 +255,15 @@ impl Phone {
                 }
                 println!("— answered by {by}");
             }
-            FromDesk::Ack { ok, error, .. } => {
+            FromDesk::Ack {
+                ok, session, error, ..
+            } => {
+                // A started or resumed session is named here, so there is no
+                // guessing which of the list that follows is the new one.
+                if let Some(started) = session.filter(|_| ok) {
+                    self.session = started;
+                    println!("— talking to {}", self.session);
+                }
                 if !ok {
                     println!("— refused: {}", error.unwrap_or_default());
                 }

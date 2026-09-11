@@ -417,7 +417,7 @@ fn run(
                     // none of them counts as watching until it says so.
                     lock(&shared.watching).clear();
                     shared.up.store(true, Ordering::Release);
-                    outbox.insert(0, hello());
+                    outbox.insert(0, hello(shared.sessions.as_ref()));
                     outbox.push(FromDesk::Sessions {
                         list: shared.sessions.list(),
                     });
@@ -543,6 +543,7 @@ fn answer(
         vec![FromDesk::Ack {
             cmd_seq: seq,
             ok: error.is_none(),
+            session: None,
             error,
         }]
     };
@@ -623,7 +624,16 @@ fn answer(
             {
                 let _ = notes.send(Note::Said(text));
             }
-            let mut out = ack(None);
+            // A session that did not exist a moment ago is named on the ack
+            // itself. Working it out from the list that follows means
+            // comparing against whatever the phone last saw, which is one
+            // stale list away from opening the wrong session.
+            let mut out = vec![FromDesk::Ack {
+                cmd_seq: seq,
+                ok: true,
+                session: started.clone(),
+                error: None,
+            }];
             if started.is_some() {
                 out.push(FromDesk::Sessions {
                     list: shared.sessions.list(),
@@ -668,6 +678,7 @@ fn blob(session: &str, path: &str, chunk: usize) -> Vec<FromDesk> {
         vec![FromDesk::Ack {
             cmd_seq: 0,
             ok: false,
+            session: None,
             error: Some(why.to_string()),
         }]
     };
@@ -723,13 +734,14 @@ fn snapshot(session: &str, want: usize) -> (Vec<ah_core::abi::Message>, bool) {
     (session.messages[from..].to_vec(), from > 0)
 }
 
-fn hello() -> FromDesk {
+fn hello(sessions: &dyn Sessions) -> FromDesk {
     FromDesk::Hello(Hello {
         host: hostname(),
         os: std::env::consts::OS.to_string(),
         ah_version: env!("CARGO_PKG_VERSION").to_string(),
         proto: PROTO,
         holder: holder().into(),
+        roots: sessions.roots(),
     })
 }
 

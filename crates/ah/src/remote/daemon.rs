@@ -240,6 +240,10 @@ impl Sessions for Machine {
         })
     }
 
+    fn roots(&self) -> Vec<String> {
+        self.roots.iter().map(|r| r.display().to_string()).collect()
+    }
+
     fn act(&self, session: &str, act: Act) -> Result<Option<String>, String> {
         // The two that make a session rather than needing one.
         match act {

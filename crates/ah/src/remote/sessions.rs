@@ -63,6 +63,15 @@ pub trait Sessions: Send + Sync {
 
     /// Do it. `Ok(Some(id))` names a session that did not exist before.
     fn act(&self, session: &str, act: Act) -> Result<Option<String>, String>;
+
+    /// Where this machine will start a session, if it will start one at all.
+    ///
+    /// Empty means it will not, which is a window's answer: it has the one
+    /// session it was opened with. A phone asks so it can offer the choice
+    /// rather than make somebody type a path it may then refuse.
+    fn roots(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// The first line of something, short enough for a status area.
