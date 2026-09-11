@@ -1,0 +1,15 @@
+[package]
+name = "ah-remote-proto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The ah remote wire format, compiled natively by the harness and to wasm32 by the relay"
+
+[features]
+default = ["std"]
+std = ["serde/std", "serde_json/std", "ah-abi/std"]
+
+[dependencies]
+ah-abi = { path = "../ah-abi", default-features = false }
+serde.workspace = true
+serde_json.workspace = true

@@ -1,6 +1,13 @@
 [workspace]
 resolver = "3"
-members = ["crates/ah-abi", "crates/ah-core", "crates/ah-plugin-sdk", "crates/ah-voice", "crates/ah"]
+members = [
+    "crates/ah-abi",
+    "crates/ah-core",
+    "crates/ah-plugin-sdk",
+    "crates/ah-remote-proto",
+    "crates/ah-voice",
+    "crates/ah",
+]
 exclude = ["plugins"]
 
 [workspace.package]
