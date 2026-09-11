@@ -1130,7 +1130,7 @@ mod tests {
         );
     }
 
-    use super::{Spoken, SETTLE};
+    use super::{SETTLE, Spoken};
 
     #[test]
     fn nothing_settles_while_the_key_is_still_down() {

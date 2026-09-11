@@ -339,9 +339,12 @@ struct App {
     banner_at: Option<usize>,
     plugin_commands: Vec<(String, SlashCommandSpec)>,
     plugin_count: u32,
-    pending_perm: Option<(ToolCall, String)>,
+    pending_perm: Option<(u64, ToolCall, String)>,
     /// The question the `ask_user` tool put on screen, while it is unanswered.
     ask: Option<ask::View>,
+    /// Which question `ask` is showing, so an answer from somewhere else takes
+    /// down the right one.
+    ask_id: u64,
     always_allow: HashSet<String>,
     git_branch: String,
     cwd: String,
@@ -560,6 +563,7 @@ fn run_inner(
         key_warned: false,
         banner_at: None,
         pending_perm: None,
+        ask_id: 0,
         ask: None,
         always_allow: HashSet::new(),
         git_branch: ah_core::plugins::git_branch(&cwd),
@@ -3153,9 +3157,10 @@ impl App {
                 self.dirty = true;
             }
             UiEvent::Slash(out, name, stage) => self.slash_result(&name, *out, stage),
-            UiEvent::AskUser(a) => match ask::View::new(*a) {
+            UiEvent::AskUser { id, ask } => match ask::View::new(*ask) {
                 Some(v) => {
                     self.ask = Some(v);
+                    self.ask_id = id;
                     self.set_state(State::Asking);
                     self.dirty = true;
                 }
@@ -3163,11 +3168,24 @@ impl App {
                     let _ = self.ask_tx.send(Reply::Dismissed);
                 }
             },
-            UiEvent::AskPermission { call, reason } => {
+            UiEvent::AskPermission { id, call, reason } => {
                 if self.always_allow.contains(&call.function.name) {
                     let _ = self.perm_tx.send(true);
                 } else {
-                    self.pending_perm = Some((call, reason));
+                    self.pending_perm = Some((id, call, reason));
+                    self.dirty = true;
+                }
+            }
+            // Answered elsewhere — from a phone, or by this screen a moment
+            // ago. Either way the box comes down and nothing is sent back.
+            UiEvent::Answered { id } => {
+                if self.pending_perm.as_ref().is_some_and(|(p, ..)| *p == id) {
+                    self.pending_perm = None;
+                    self.dirty = true;
+                }
+                if self.ask.is_some() && self.ask_id == id {
+                    self.ask = None;
+                    self.set_state(State::Idle);
                     self.dirty = true;
                 }
             }
@@ -4315,7 +4333,7 @@ impl App {
             }
         }
 
-        if let Some((call, _)) = &self.pending_perm {
+        if let Some((_, call, _)) = &self.pending_perm {
             let name = call.function.name.clone();
             match k.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
@@ -5012,7 +5030,7 @@ impl App {
         if !self.queue.is_empty() {
             self.draw_queue(f, queue_area, &pal, layout.paste_collapse_lines);
         }
-        if let Some((call, reason)) = &self.pending_perm {
+        if let Some((_, call, reason)) = &self.pending_perm {
             let block = pal.block(true).title(" permission ");
             let inner = block.inner(perm_area);
             f.render_widget(Clear, perm_area);

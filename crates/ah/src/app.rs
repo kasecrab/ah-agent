@@ -1,7 +1,7 @@
 //! Shared runtime: settings, plugins, provider, and the engine owning the conversation.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
@@ -149,12 +149,24 @@ pub enum UiEvent {
     /// Result of a plugin slash command: output, command name, stage.
     Slash(Box<SlashCommandOut>, String, SlashStage),
     AskPermission {
+        /// Which question this is. Answers can come from more than one screen
+        /// now, and a slow one must not be taken for an answer to the next.
+        id: u64,
         call: ToolCall,
         reason: String,
     },
     /// The `ask_user` tool wants an answer. The turn is stopped until one is
     /// sent back down the answer channel.
-    AskUser(Box<Ask>),
+    AskUser {
+        id: u64,
+        ask: Box<Ask>,
+    },
+    /// The question with this id is over: someone answered it. Whoever is
+    /// still showing it takes it down, and nothing is sent back — the turn
+    /// already has what it was waiting for.
+    Answered {
+        id: u64,
+    },
     Busy(bool),
     Resumed {
         id: String,
@@ -629,6 +641,9 @@ pub struct ChannelIo {
     perm_rx: Mutex<Receiver<bool>>,
     ask_rx: Mutex<Receiver<Reply>>,
     pub cancel: Arc<AtomicBool>,
+    /// Numbers every question this driver asks. Only ever read by whoever is
+    /// deciding whether an answer it received is still wanted.
+    next_prompt: AtomicU64,
 }
 
 impl ChannelIo {
@@ -643,6 +658,7 @@ impl ChannelIo {
             perm_rx: Mutex::new(perm_rx),
             ask_rx: Mutex::new(ask_rx),
             cancel,
+            next_prompt: AtomicU64::new(1),
         }
     }
 }
@@ -653,12 +669,14 @@ impl AgentIo for ChannelIo {
     }
     fn ask_permission(&self, call: &ToolCall, reason: &str) -> bool {
         let rx = lock(&self.perm_rx);
+        let id = self.next_prompt.fetch_add(1, Ordering::Relaxed);
         // Anything left from an earlier prompt goes before this one is asked;
         // draining afterwards would race the answer to this one and eat it.
         while rx.try_recv().is_ok() {}
         if self
             .tx
             .send(UiEvent::AskPermission {
+                id,
                 call: call.clone(),
                 reason: reason.into(),
             })
@@ -666,26 +684,35 @@ impl AgentIo for ChannelIo {
         {
             return false;
         }
-        match rx.recv() {
+        let answer = match rx.recv() {
             Ok(v) => v && !self.cancel.load(Ordering::Relaxed),
             Err(_) => false,
-        }
+        };
+        // Whoever is still holding this question on screen can put it down.
+        let _ = self.tx.send(UiEvent::Answered { id });
+        answer
     }
     fn ask_user(&self, ask: &Ask) -> Reply {
         let rx = lock(&self.ask_rx);
+        let id = self.next_prompt.fetch_add(1, Ordering::Relaxed);
         while rx.try_recv().is_ok() {}
         if self
             .tx
-            .send(UiEvent::AskUser(Box::new(ask.clone())))
+            .send(UiEvent::AskUser {
+                id,
+                ask: Box::new(ask.clone()),
+            })
             .is_err()
         {
             return Reply::Unavailable;
         }
-        match rx.recv() {
+        let reply = match rx.recv() {
             Ok(_) if self.cancel.load(Ordering::Relaxed) => Reply::Dismissed,
             Ok(r) => r,
             Err(_) => Reply::Unavailable,
-        }
+        };
+        let _ = self.tx.send(UiEvent::Answered { id });
+        reply
     }
 }
 
