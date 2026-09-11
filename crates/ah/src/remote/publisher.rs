@@ -12,7 +12,7 @@
 //! anything else.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -26,7 +26,7 @@ use ah_remote::proto::{
 };
 use serde_json::Value;
 
-use crate::app::UiEvent;
+use crate::app::{EngineCmd, Inbox, UiEvent};
 use crate::remote::lock::Lock;
 
 /// How often the thread looks at what has gathered. Short enough that the
@@ -51,6 +51,17 @@ pub enum State {
     Dialling,
     /// Not coming back without something changing.
     Failed,
+}
+
+/// The ways into the running session, cloned from the channels the window
+/// itself uses. A phone reaches the engine by exactly the same means as the
+/// keyboard does, which is why the two can answer the same question.
+pub struct Reach {
+    pub cmd: mpsc::Sender<EngineCmd>,
+    pub perm: mpsc::Sender<bool>,
+    pub ask: mpsc::Sender<ah_core::abi::Reply>,
+    pub cancel: Arc<AtomicBool>,
+    pub inbox: Arc<Inbox>,
 }
 
 /// What a phone is told about the session being watched.
@@ -81,6 +92,13 @@ struct Shared {
     live: Mutex<Live>,
     up: AtomicBool,
     failed: AtomicBool,
+    /// The question on screen, if there is one. An answer for anything else
+    /// arrived too late and is dropped rather than applied to whatever came
+    /// next.
+    pending: AtomicU64,
+    /// Who answered the question with this number, when it was a phone.
+    answered_by: Mutex<Option<(u64, String)>>,
+    reach: Reach,
 }
 
 /// What has gathered since the last frame went out.
@@ -101,11 +119,19 @@ struct Batch {
 pub fn start(
     settings: &ah_core::abi::Settings,
     live: Live,
+    reach: Reach,
     notes: mpsc::Sender<Note>,
 ) -> Option<Publisher> {
     let raw = ah_remote::code::parse(&ah_core::auth::remote_code()?)?;
     let url = ah_core::auth::remote_url()?;
-    Publisher::start(&settings.remote, url, Keys::derive(&raw), live, notes)
+    Publisher::start(
+        &settings.remote,
+        url,
+        Keys::derive(&raw),
+        live,
+        reach,
+        notes,
+    )
 }
 
 impl Publisher {
@@ -116,6 +142,7 @@ impl Publisher {
         url: String,
         keys: Keys,
         live: Live,
+        reach: Reach,
         notes: mpsc::Sender<Note>,
     ) -> Option<Self> {
         if !settings.enabled {
@@ -128,6 +155,9 @@ impl Publisher {
             live: Mutex::new(live),
             up: AtomicBool::new(false),
             failed: AtomicBool::new(false),
+            pending: AtomicU64::new(0),
+            answered_by: Mutex::new(None),
+            reach,
         });
 
         let (socket_tx, socket_rx) = mpsc::channel();
@@ -163,10 +193,42 @@ impl Publisher {
     /// One event from the engine. Called on the thread the UI is waiting on,
     /// so it only ever adds to a list.
     pub fn observe(&self, ev: &UiEvent) {
-        let UiEvent::Agent(ev) = ev else {
-            // Everything else the UI hears about is either already reflected
-            // in what a phone is told, or is none of its business.
-            return;
+        let session = || lock(&self.shared.live).session.clone();
+        let ev = match ev {
+            UiEvent::Agent(ev) => ev,
+            // A question waits for somebody, so it does not wait for a batch.
+            UiEvent::AskPermission { id, call, reason } => {
+                self.shared.pending.store(*id, Ordering::Release);
+                return self.ahead(FromDesk::AskPermission {
+                    session: session(),
+                    id: *id,
+                    call: call.clone(),
+                    reason: reason.clone(),
+                });
+            }
+            UiEvent::AskUser { id, ask } => {
+                self.shared.pending.store(*id, Ordering::Release);
+                return self.ahead(FromDesk::AskUser {
+                    session: session(),
+                    id: *id,
+                    ask: (**ask).clone(),
+                });
+            }
+            UiEvent::Answered { id } => {
+                self.shared.pending.store(0, Ordering::Release);
+                let by = match lock(&self.shared.answered_by).take() {
+                    Some((answered, who)) if answered == *id => who,
+                    _ => "the desk".to_string(),
+                };
+                return self.ahead(FromDesk::Answered {
+                    session: session(),
+                    id: *id,
+                    by,
+                });
+            }
+            // Everything else the window hears about is either already in
+            // what a phone is told, or is none of its business.
+            _ => return,
         };
         let urgent = matches!(
             ev,
@@ -186,6 +248,11 @@ impl Publisher {
         batch.bytes += json.to_string().len();
         fold(&mut batch.events, json);
         batch.urgent |= urgent;
+    }
+
+    /// Something that should not wait for the next batch.
+    fn ahead(&self, payload: FromDesk) {
+        lock(&self.shared.batch).ahead.push(payload);
     }
 
     /// Tell the link what the session is now, so a phone that asks is not
@@ -414,6 +481,20 @@ fn answer(
     let asked: FromPhone = serde_json::from_slice(plain).ok()?;
 
     let live = lock(&shared.live).clone();
+    let reach = &shared.reach;
+    let say = |what: String| {
+        if shared.settings.notice {
+            let _ = notes.send(Note::Said(what));
+        }
+    };
+    let ok = |error: Option<String>| {
+        vec![FromDesk::Ack {
+            cmd_seq: seq,
+            ok: error.is_none(),
+            error,
+        }]
+    };
+
     Some(match asked {
         FromPhone::List => vec![FromDesk::Sessions {
             list: sessions(&live),
@@ -433,14 +514,146 @@ fn answer(
             ]
         }
         FromPhone::Detach { .. } => Vec::new(),
-        // Everything else is a phone asking this session to do something,
-        // which it cannot yet. Saying so beats silence.
-        _ => vec![FromDesk::Ack {
-            cmd_seq: seq,
-            ok: false,
-            error: Some("this build can be watched but not driven".into()),
-        }],
+
+        // Said while the turn is running, it goes to the mailbox the loop
+        // reads between requests; said while nothing is running, it starts a
+        // turn. The phone does not have to know which, and cannot know it
+        // without being wrong about it sometimes.
+        FromPhone::Submit { text, images, .. } => {
+            say(format!("remote: \u{201c}{}\u{201d}", first_line(&text)));
+            if live.busy {
+                reach.inbox.push(text);
+            } else {
+                let _ = reach.cmd.send(EngineCmd::Submit { text, images });
+            }
+            ok(None)
+        }
+        FromPhone::Interrupt { .. } => {
+            // The same flag Esc sets, so a turn stopped from a phone stops
+            // the way a turn stopped at the keyboard does.
+            reach.cancel.store(true, Ordering::Relaxed);
+            say("remote: stopped".into());
+            ok(None)
+        }
+        FromPhone::AnswerPermission { id, allow, .. } => {
+            if shared.pending.load(Ordering::Acquire) != id {
+                // Answered already, or answered by somebody else. Sending it
+                // on would apply it to whatever question came next.
+                ok(Some("that question has been answered".into()))
+            } else {
+                *lock(&shared.answered_by) = Some((id, device_name(openers, &plink)));
+                let _ = reach.perm.send(allow);
+                say(format!(
+                    "remote: {}",
+                    if allow { "allowed" } else { "denied" }
+                ));
+                ok(None)
+            }
+        }
+        FromPhone::AnswerAsk { id, reply, .. } => {
+            if shared.pending.load(Ordering::Acquire) != id {
+                ok(Some("that question has been answered".into()))
+            } else {
+                *lock(&shared.answered_by) = Some((id, device_name(openers, &plink)));
+                let _ = reach.ask.send(reply);
+                say("remote: answered".into());
+                ok(None)
+            }
+        }
+        FromPhone::Compact { focus, .. } => {
+            let _ = reach.cmd.send(EngineCmd::Compact(focus));
+            ok(None)
+        }
+        FromPhone::Clear { .. } => {
+            let _ = reach.cmd.send(EngineCmd::Clear);
+            say("remote: cleared".into());
+            ok(None)
+        }
+        FromPhone::Rename { name, .. } => {
+            let _ = reach.cmd.send(EngineCmd::Rename(name));
+            ok(None)
+        }
+        FromPhone::GetBlob { path, .. } => blob(&live, &path, shared.settings.max_frame_bytes),
+
+        // Starting a session somewhere else is not this window's to give.
+        FromPhone::Resume { .. } | FromPhone::NewSession { .. } => ok(Some(
+            "this window publishes one session; starting another needs the daemon".into(),
+        )),
     })
+}
+
+/// The first line of what was said, for a transcript that should not be
+/// swamped by a phone pasting an essay into it.
+fn first_line(text: &str) -> String {
+    let line = text.lines().next().unwrap_or("").trim();
+    if line.chars().count() > 60 {
+        format!("{}\u{2026}", line.chars().take(60).collect::<String>())
+    } else {
+        line.to_string()
+    }
+}
+
+/// Which phone this was, as far as anything here knows: the first characters
+/// of the link it seals under. Nothing a person named, and nothing that
+/// follows it between connections.
+fn device_name(openers: &HashMap<String, Opener>, plink: &str) -> String {
+    let _ = openers;
+    format!("phone {}", &plink[..plink.len().min(8)])
+}
+
+/// A file the session produced, in pieces small enough to travel.
+///
+/// Only what this session drew, and only by a path that is still inside the
+/// directory it draws into once every `..` in it has been resolved: the path
+/// came from a phone, and a phone is not this machine.
+fn blob(live: &Live, path: &str, chunk: usize) -> Vec<FromDesk> {
+    let deny = |why: &str| {
+        vec![FromDesk::Ack {
+            cmd_seq: 0,
+            ok: false,
+            error: Some(why.to_string()),
+        }]
+    };
+    let dir = ah_core::paths::session_images_dir(&live.session);
+    let Ok(dir) = dir.canonicalize() else {
+        return deny("this session has drawn nothing");
+    };
+    let Ok(full) = std::path::Path::new(path).canonicalize() else {
+        return deny("no such file");
+    };
+    if !full.starts_with(&dir) {
+        return deny("not this session's to give");
+    }
+    let Ok(bytes) = std::fs::read(&full) else {
+        return deny("no such file");
+    };
+    let mime = match full.extension().and_then(|e| e.to_str()) {
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("webp") => "image/webp",
+        Some("gif") => "image/gif",
+        _ => "application/octet-stream",
+    };
+    let id = full
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file")
+        .to_string();
+    // Base64 grows by a third, so the pieces are cut from the smaller number.
+    let per = (chunk * 3 / 4).max(1024);
+    let chunks: Vec<&[u8]> = bytes.chunks(per).collect();
+    let last = chunks.len().saturating_sub(1);
+    chunks
+        .iter()
+        .enumerate()
+        .map(|(i, piece)| FromDesk::Blob {
+            id: id.clone(),
+            mime: mime.to_string(),
+            seq: i as u32,
+            last: i == last,
+            b64: ah_remote::base64(piece),
+        })
+        .collect()
 }
 
 /// Every session on this machine, with the live one marked.
@@ -624,5 +837,115 @@ mod tests {
             1,
             "dropping the only frame says nothing at all"
         );
+    }
+}
+
+#[cfg(test)]
+mod files {
+    use super::*;
+
+    /// A session with one drawing in it, and a data directory of its own.
+    fn drawn(dir: &std::path::Path) -> Live {
+        // SAFETY: every test that moves this variable holds the same guard.
+        unsafe { std::env::set_var("AH_DATA_DIR", dir) };
+        let live = Live {
+            session: "abc123".into(),
+            ..Default::default()
+        };
+        let images = ah_core::paths::session_images_dir(&live.session);
+        std::fs::create_dir_all(&images).unwrap();
+        std::fs::write(images.join("drawing.png"), vec![7u8; 3000]).unwrap();
+        live
+    }
+
+    fn refused(out: &[FromDesk]) -> Option<String> {
+        match out.first() {
+            Some(FromDesk::Ack {
+                ok: false, error, ..
+            }) => error.clone(),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_drawing_comes_back_in_pieces_that_fit() {
+        let _env = crate::remote::env_guard();
+        let dir = std::env::temp_dir().join(format!("ah-blob-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let live = drawn(&dir);
+        let path = ah_core::paths::session_images_dir(&live.session).join("drawing.png");
+
+        let out = blob(&live, path.to_str().unwrap(), 1024);
+        assert!(
+            out.len() > 1,
+            "3000 bytes does not fit in one frame: {}",
+            out.len()
+        );
+        let mut seen = Vec::new();
+        for (i, piece) in out.iter().enumerate() {
+            let FromDesk::Blob {
+                seq,
+                last,
+                b64,
+                mime,
+                ..
+            } = piece
+            else {
+                panic!("not a file: {piece:?}");
+            };
+            assert_eq!(*seq as usize, i, "the pieces are numbered in order");
+            assert_eq!(*last, i == out.len() - 1, "only the last says it is last");
+            assert_eq!(mime, "image/png");
+            seen.push(b64.clone());
+        }
+        assert!(!seen.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_path_out_of_the_session_is_refused() {
+        let _env = crate::remote::env_guard();
+        let dir = std::env::temp_dir().join(format!("ah-blob-out-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let live = drawn(&dir);
+        let images = ah_core::paths::session_images_dir(&live.session);
+
+        // The path comes from a phone, so it is not taken at its word. Every
+        // one of these resolves outside the session's own directory.
+        for attempt in [
+            "/etc/passwd".to_string(),
+            images.join("../../../../etc/passwd").display().to_string(),
+            images.join("..").display().to_string(),
+        ] {
+            assert!(
+                refused(&blob(&live, &attempt, 1024)).is_some(),
+                "it handed over {attempt}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_that_is_not_there_is_not_pretended_about() {
+        let _env = crate::remote::env_guard();
+        let dir = std::env::temp_dir().join(format!("ah-blob-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let live = drawn(&dir);
+        let path = ah_core::paths::session_images_dir(&live.session).join("nothing.png");
+        assert_eq!(
+            refused(&blob(&live, path.to_str().unwrap(), 1024)).as_deref(),
+            Some("no such file")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_long_line_is_shortened_for_the_transcript() {
+        assert_eq!(first_line("hello\nthere"), "hello");
+        assert_eq!(first_line("   spaced   "), "spaced");
+        let long = "w".repeat(200);
+        let cut = first_line(&long);
+        assert!(cut.chars().count() <= 61, "{} chars", cut.chars().count());
+        assert!(cut.ends_with('\u{2026}'));
     }
 }

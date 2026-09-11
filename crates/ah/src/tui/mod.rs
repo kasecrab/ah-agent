@@ -501,6 +501,8 @@ fn run_inner(
     let (perm_tx, perm_rx) = mpsc::channel::<bool>();
     let (ask_tx, ask_rx) = mpsc::channel::<Reply>();
     let cancel = engine.cancel.clone();
+    #[cfg(feature = "remote")]
+    let inbox = engine.inbox.clone();
     let session_id = engine.session.id.clone();
     let session_name = engine.session.name.clone();
     let resumed: Vec<Message> = engine.session.messages.clone();
@@ -529,6 +531,13 @@ fn run_inner(
                 cwd: cwd.display().to_string(),
                 model: stack.settings().model.id.clone(),
                 ..Default::default()
+            },
+            crate::remote::publisher::Reach {
+                cmd: eng_tx.clone(),
+                perm: perm_tx.clone(),
+                ask: ask_tx.clone(),
+                cancel: cancel.clone(),
+                inbox: inbox.clone(),
             },
             notes_tx,
         )

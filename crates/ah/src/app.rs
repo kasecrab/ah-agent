@@ -189,6 +189,13 @@ pub type PluginLoad = (
 #[derive(Default)]
 pub struct Inbox(Mutex<Vec<String>>);
 
+impl Inbox {
+    /// Leave something for the loop to find between requests.
+    pub fn push(&self, text: impl Into<String>) {
+        lock(&self.0).push(text.into());
+    }
+}
+
 impl ah_core::agent::Mailbox for Inbox {
     fn take(&self) -> Vec<String> {
         std::mem::take(&mut *lock(&self.0))

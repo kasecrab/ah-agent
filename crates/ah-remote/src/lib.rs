@@ -9,6 +9,12 @@
 /// lives in: whatever talks to a relay does it through here.
 pub use ah_remote_proto as proto;
 
+/// Base64 for the one thing that travels outside a sealed frame: a file a
+/// phone asked to see.
+pub fn base64(bytes: &[u8]) -> String {
+    data_encoding::BASE64.encode(bytes)
+}
+
 pub mod code;
 pub mod crypto;
 pub mod link;

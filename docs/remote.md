@@ -3,12 +3,12 @@
 Watching a session from a phone, and answering it.
 
 A run started at the desk keeps going whether or not anyone is watching. `ah
-remote` lets a phone watch it — without opening a port on this machine, and
-without anyone else being able to read a word of it.
+remote` lets a phone watch it, say something into it, and answer the questions
+it asks — without opening a port on this machine, and without anyone else
+being able to read a word of it.
 
-Watching is all it does so far. Saying something back, answering a tool
-prompt, and starting a session from the phone are being built on top of the
-same link.
+Starting a session from the phone, rather than joining the one already open,
+is still to come.
 
 ## How it fits together
 
@@ -51,14 +51,35 @@ ah remote forget     # make the code useless
 
 ## What the code is worth
 
-Treat it like a key. Whoever holds it sees everything the session says: what
-you asked, what the model answered, which files it read and what was in them.
-It cannot yet make the session do anything — but reading is not nothing, and
-the code is the only thing standing in the way of it.
+Treat it like a key — the same key as the keyboard.
+
+Whoever holds it sees everything the session says, and can say things into it.
+A prompt sent from a phone runs in the session you have open, under the
+permissions you gave it: if the window is in `auto`, that prompt runs tools
+without asking, exactly as if you had typed it yourself. Nothing about the
+link makes it safer than sitting down at the machine, and it is not meant to
+be: the pairing code is the whole of the boundary.
+
+What the link does do is show its working. Anything a phone sends appears in
+the transcript in front of you — the message, an interruption, an answer to a
+tool prompt — so a session being driven from elsewhere never looks like a
+session doing things on its own. `remote.notice = false` turns that off, which
+is a strange thing to want.
 
 Publishing is off until you ask for it. Pairing a machine and publishing from
 it are separate decisions: `ah remote pair` does the first, `remote.enabled`
 the second.
+
+## Answering from either end
+
+A tool prompt goes to both screens at once and the first answer wins; the
+other is dropped rather than applied to whatever question came next, and the
+box on the losing screen comes down by itself saying who answered it.
+
+A message sent while a turn is running does not queue behind it. It goes into
+the same mailbox a subagent's messages use, which the loop reads between
+requests — so it reaches the model in the middle of the work rather than after
+it. Sent while nothing is running, it simply starts a turn.
 
 `ah remote forget` ends it from this side, and the relay keeps nothing
 readable either way.

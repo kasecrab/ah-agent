@@ -69,13 +69,14 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn one_at_a_time_and_the_next_one_gets_it() {
+        let _env = crate::remote::env_guard();
         // The lock is keyed to a path, so the test needs a data dir of its
         // own or it fights whatever else is running on this machine.
         let dir = std::env::temp_dir().join(format!("ah-lock-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let old = std::env::var_os("AH_DATA_DIR");
-        // SAFETY: the variable is put back below, and no other test in this
-        // binary reads it.
+        // SAFETY: the guard above keeps every other test that reads this
+        // variable out while it is moved, and it is put back below.
         unsafe { std::env::set_var("AH_DATA_DIR", &dir) };
 
         let first = Lock::take();
