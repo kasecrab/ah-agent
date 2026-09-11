@@ -222,11 +222,23 @@ fn unset_markers(v: &mut Value) {
 mod tests {
     use super::*;
 
+    /// The environment belongs to the process, not to a test, and cargo runs
+    /// tests side by side in it. Anything that sets `AH_CONFIG_DIR` or reads a
+    /// path derived from it waits here first, or it will occasionally see the
+    /// directory another test was borrowing.
+    static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        ENV.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn a_remembered_choice_survives_and_is_added_to() {
+        let _env = env_guard();
         let dir = std::env::temp_dir().join(format!("ah-state-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
-        // SAFETY: single-threaded test, and the variable is put back below.
+        // SAFETY: no other test reads the environment while the guard is held,
+        // and the variable is put back below.
         let old = std::env::var_os("AH_CONFIG_DIR");
         unsafe { std::env::set_var("AH_CONFIG_DIR", &dir) };
 
@@ -260,6 +272,7 @@ mod tests {
 
     #[test]
     fn capture_cmd_is_refused_from_a_project_file() {
+        let _env = env_guard();
         let mut s = SettingsStack::new();
         s.push(
             Origin::File("/some/repo/.ah/config.toml".into()),
@@ -278,6 +291,7 @@ mod tests {
 
     #[test]
     fn capture_cmd_is_taken_from_the_user_config() {
+        let _env = env_guard();
         let mut s = SettingsStack::new();
         s.push(
             Origin::File(crate::paths::user_config_file()),
