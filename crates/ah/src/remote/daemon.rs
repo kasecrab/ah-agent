@@ -426,6 +426,9 @@ pub fn serve(o: &Overrides, detach: bool) -> Result<(), AnyError> {
     // Publishing comes and goes: a window takes the pairing while it is open,
     // and this picks it up again when the window closes.
     let mut publisher: Option<Publisher> = None;
+    // What was last said about the link, so the only lines printed are the
+    // ones that are news.
+    let mut said: Option<publisher::State> = None;
     let mut settings_for_publisher = crate::app::load_settings(o)?.settings().clone();
     // Publishing is what this command is for, whatever the config says about
     // windows doing it.
@@ -439,9 +442,31 @@ pub fn serve(o: &Overrides, detach: bool) -> Result<(), AnyError> {
                 notes_tx.clone(),
             );
             if publisher.is_some() {
-                println!("publishing");
+                println!("dialling the relay");
             }
         }
+        // Saying "publishing" before the socket is up would be saying it
+        // whether or not the relay is even reachable.
+        if let Some(p) = publisher.as_ref() {
+            let now = p.state();
+            if said != Some(now) {
+                said = Some(now);
+                match now {
+                    publisher::State::Up => {
+                        println!(
+                            "publishing. A phone can now list what is here, bring a session back, or start one"
+                        );
+                    }
+                    publisher::State::Dialling => {
+                        println!("the relay is not answering; trying again")
+                    }
+                    publisher::State::Failed => {
+                        println!("the relay will not have us; `ah remote status` says more")
+                    }
+                }
+            }
+        }
+
         match events_rx.recv_timeout(RETRY) {
             Ok((session, ev)) => {
                 machine.note(&session, &ev);
