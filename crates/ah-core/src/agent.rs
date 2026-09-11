@@ -136,6 +136,134 @@ pub struct TurnSummary {
     pub cancelled: bool,
 }
 
+/// One event as a flat JSON object, for `--json` and for anything watching from
+/// off the machine. Written out by hand rather than derived: ten of the
+/// variants are newtypes over values that are not maps, which an internally
+/// tagged enum cannot carry, and these shapes are published in
+/// `docs/commands.md`.
+pub fn event_json(ev: &AgentEvent) -> Value {
+    use serde_json::json;
+    match ev {
+        AgentEvent::RequestStart { turn } => json!({"type": "request_start", "turn": turn}),
+        AgentEvent::Text(t) => json!({"type": "text", "text": t}),
+        AgentEvent::Reasoning(t) => json!({"type": "reasoning", "text": t}),
+        AgentEvent::AssistantMessage(m) => json!({"type": "assistant", "message": m}),
+        AgentEvent::Usage(u) => json!({"type": "usage", "usage": u}),
+        AgentEvent::ToolStart(c) => json!({"type": "tool_start", "call": c}),
+        AgentEvent::ToolEnd {
+            call,
+            result,
+            duration_ms,
+        } => {
+            json!({"type": "tool_end", "call": call, "result": result, "duration_ms": duration_ms})
+        }
+        AgentEvent::ToolDenied { call, reason } => {
+            json!({"type": "tool_denied", "call": call, "reason": reason})
+        }
+        AgentEvent::ToolMessage(m) => json!({"type": "tool_message", "message": m}),
+        AgentEvent::Image {
+            path,
+            mime,
+            width,
+            height,
+            bytes,
+        } => json!({
+            "type": "image", "path": path, "mime": mime,
+            "width": width, "height": height, "bytes": bytes
+        }),
+        AgentEvent::Notice(n) => json!({"type": "notice", "text": n}),
+        AgentEvent::SettingsPatch(p) => json!({"type": "settings_patch", "patch": p}),
+        AgentEvent::Retry {
+            attempt,
+            wait_ms,
+            error,
+        } => json!({"type": "retry", "attempt": attempt, "wait_ms": wait_ms, "error": error}),
+        AgentEvent::Error(e) => json!({"type": "error", "error": e}),
+        AgentEvent::Compacting { auto } => json!({"type": "compacting", "auto": auto}),
+        AgentEvent::CompactProgress { done, budget } => {
+            json!({"type": "compact_progress", "done": done, "budget": budget})
+        }
+        AgentEvent::Compacted {
+            before,
+            after,
+            summary,
+        } => json!({"type": "compacted", "before": before, "after": after, "summary": summary}),
+        AgentEvent::TurnEnd(s) => {
+            json!({"type": "turn_end", "requests": s.requests, "tool_calls": s.tool_calls, "usage": s.usage, "cancelled": s.cancelled})
+        }
+    }
+}
+
+/// The way back, for a reader on the other end of a pipe or a socket. A shape
+/// this build does not know comes back as `None` rather than as a guess:
+/// skipping an event is better than mistaking it for one it is not.
+pub fn event_from_json(v: &Value) -> Option<AgentEvent> {
+    fn text(v: &Value, key: &str) -> Option<String> {
+        Some(v.get(key)?.as_str()?.to_string())
+    }
+    fn num(v: &Value, key: &str) -> Option<u64> {
+        v.get(key)?.as_u64()
+    }
+    fn of<T: serde::de::DeserializeOwned>(v: &Value, key: &str) -> Option<T> {
+        serde_json::from_value(v.get(key)?.clone()).ok()
+    }
+
+    Some(match v.get("type")?.as_str()? {
+        "request_start" => AgentEvent::RequestStart {
+            turn: num(v, "turn")? as u32,
+        },
+        "text" => AgentEvent::Text(text(v, "text")?),
+        "reasoning" => AgentEvent::Reasoning(text(v, "text")?),
+        "assistant" => AgentEvent::AssistantMessage(of(v, "message")?),
+        "usage" => AgentEvent::Usage(of(v, "usage")?),
+        "tool_start" => AgentEvent::ToolStart(of(v, "call")?),
+        "tool_end" => AgentEvent::ToolEnd {
+            call: of(v, "call")?,
+            result: of(v, "result")?,
+            duration_ms: num(v, "duration_ms")?,
+        },
+        "tool_denied" => AgentEvent::ToolDenied {
+            call: of(v, "call")?,
+            reason: text(v, "reason")?,
+        },
+        "tool_message" => AgentEvent::ToolMessage(of(v, "message")?),
+        "image" => AgentEvent::Image {
+            path: PathBuf::from(text(v, "path")?),
+            mime: text(v, "mime")?,
+            width: num(v, "width")? as u32,
+            height: num(v, "height")? as u32,
+            bytes: num(v, "bytes")? as usize,
+        },
+        "notice" => AgentEvent::Notice(text(v, "text")?),
+        "settings_patch" => AgentEvent::SettingsPatch(v.get("patch")?.clone()),
+        "retry" => AgentEvent::Retry {
+            attempt: num(v, "attempt")? as u32,
+            wait_ms: num(v, "wait_ms")?,
+            error: text(v, "error")?,
+        },
+        "error" => AgentEvent::Error(text(v, "error")?),
+        "compacting" => AgentEvent::Compacting {
+            auto: v.get("auto")?.as_bool()?,
+        },
+        "compact_progress" => AgentEvent::CompactProgress {
+            done: num(v, "done")?,
+            budget: num(v, "budget")?,
+        },
+        "compacted" => AgentEvent::Compacted {
+            before: num(v, "before")?,
+            after: num(v, "after")?,
+            summary: text(v, "summary")?,
+        },
+        "turn_end" => AgentEvent::TurnEnd(TurnSummary {
+            usage: of(v, "usage")?,
+            requests: num(v, "requests")? as u32,
+            tool_calls: num(v, "tool_calls")? as u32,
+            cancelled: v.get("cancelled")?.as_bool()?,
+        }),
+        _ => return None,
+    })
+}
+
 /// Rough byte size of a request prompt: what the provider bills as input.
 fn prompt_bytes(system: &str, messages: &[Message], tools_bytes: usize) -> usize {
     let msgs: usize = messages
@@ -2454,5 +2582,107 @@ mod tests {
         let d = date_string();
         assert_eq!(d.len(), 10);
         assert!(d.starts_with("20"));
+    }
+
+    /// Every variant, once. The encoder's `match` is exhaustive and the
+    /// compiler will say so; the decoder matches on a `&str` and cannot be
+    /// told anything, so this list is the reminder.
+    fn all_events() -> Vec<AgentEvent> {
+        let call = ToolCall {
+            id: "c1".into(),
+            kind: "function".into(),
+            function: ToolFunction {
+                name: "bash".into(),
+                arguments: r#"{"command":"ls"}"#.into(),
+            },
+        };
+        let message = Message::assistant("hello");
+        let usage = Usage {
+            prompt_tokens: 12,
+            completion_tokens: 34,
+            ..Default::default()
+        };
+
+        vec![
+            AgentEvent::RequestStart { turn: 3 },
+            AgentEvent::Text("a word".into()),
+            AgentEvent::Reasoning("a thought".into()),
+            AgentEvent::AssistantMessage(message.clone()),
+            AgentEvent::Usage(usage),
+            AgentEvent::ToolStart(call.clone()),
+            AgentEvent::ToolEnd {
+                call: call.clone(),
+                result: ToolResult {
+                    output: "out".into(),
+                    is_error: false,
+                    diff: None,
+                },
+                duration_ms: 17,
+            },
+            AgentEvent::ToolDenied {
+                call: call.clone(),
+                reason: "user declined".into(),
+            },
+            AgentEvent::ToolMessage(message),
+            AgentEvent::Image {
+                path: PathBuf::from("/tmp/a b/pic.png"),
+                mime: "image/png".into(),
+                width: 640,
+                height: 480,
+                bytes: 1024,
+            },
+            AgentEvent::Notice("something happened".into()),
+            AgentEvent::SettingsPatch(serde_json::json!({"model": {"id": "x"}})),
+            AgentEvent::Retry {
+                attempt: 2,
+                wait_ms: 500,
+                error: "timed out".into(),
+            },
+            AgentEvent::Error("it broke".into()),
+            AgentEvent::Compacting { auto: true },
+            AgentEvent::CompactProgress {
+                done: 10,
+                budget: 100,
+            },
+            AgentEvent::Compacted {
+                before: 900,
+                after: 120,
+                summary: "we talked".into(),
+            },
+            AgentEvent::TurnEnd(TurnSummary {
+                usage,
+                requests: 2,
+                tool_calls: 1,
+                cancelled: false,
+            }),
+        ]
+    }
+
+    #[test]
+    fn every_event_survives_the_round_trip() {
+        let all = all_events();
+        assert_eq!(all.len(), 18, "a variant was added without a line here");
+        for ev in all {
+            let json = event_json(&ev);
+            assert_eq!(
+                event_from_json(&json).as_ref(),
+                Some(&ev),
+                "{json} did not come back as it went out"
+            );
+        }
+    }
+
+    #[test]
+    fn an_event_this_build_does_not_know_is_skipped() {
+        assert_eq!(
+            event_from_json(&serde_json::json!({"type": "dancing"})),
+            None
+        );
+        assert_eq!(
+            event_from_json(&serde_json::json!({"text": "no type"})),
+            None
+        );
+        // The right name with the wrong shape is not a guess either.
+        assert_eq!(event_from_json(&serde_json::json!({"type": "text"})), None);
     }
 }

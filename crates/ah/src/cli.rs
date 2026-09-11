@@ -20,7 +20,7 @@ struct PrintIo {
 impl AgentIo for PrintIo {
     fn emit(&self, ev: AgentEvent) {
         if self.json {
-            let v = event_json(&ev);
+            let v = ah_core::agent::event_json(&ev);
             let mut out = std::io::stdout().lock();
             let _ = writeln!(out, "{v}");
             let _ = out.flush();
@@ -292,59 +292,6 @@ fn one_line(s: &str, max: usize) -> String {
         format!("{}…", flat.chars().take(max).collect::<String>())
     } else {
         flat
-    }
-}
-
-fn event_json(ev: &AgentEvent) -> serde_json::Value {
-    use serde_json::json;
-    match ev {
-        AgentEvent::RequestStart { turn } => json!({"type": "request_start", "turn": turn}),
-        AgentEvent::Text(t) => json!({"type": "text", "text": t}),
-        AgentEvent::Reasoning(t) => json!({"type": "reasoning", "text": t}),
-        AgentEvent::AssistantMessage(m) => json!({"type": "assistant", "message": m}),
-        AgentEvent::Usage(u) => json!({"type": "usage", "usage": u}),
-        AgentEvent::ToolStart(c) => json!({"type": "tool_start", "call": c}),
-        AgentEvent::ToolEnd {
-            call,
-            result,
-            duration_ms,
-        } => {
-            json!({"type": "tool_end", "call": call, "result": result, "duration_ms": duration_ms})
-        }
-        AgentEvent::ToolDenied { call, reason } => {
-            json!({"type": "tool_denied", "call": call, "reason": reason})
-        }
-        AgentEvent::ToolMessage(m) => json!({"type": "tool_message", "message": m}),
-        AgentEvent::Image {
-            path,
-            mime,
-            width,
-            height,
-            bytes,
-        } => json!({
-            "type": "image", "path": path, "mime": mime,
-            "width": width, "height": height, "bytes": bytes
-        }),
-        AgentEvent::Notice(n) => json!({"type": "notice", "text": n}),
-        AgentEvent::SettingsPatch(p) => json!({"type": "settings_patch", "patch": p}),
-        AgentEvent::Retry {
-            attempt,
-            wait_ms,
-            error,
-        } => json!({"type": "retry", "attempt": attempt, "wait_ms": wait_ms, "error": error}),
-        AgentEvent::Error(e) => json!({"type": "error", "error": e}),
-        AgentEvent::Compacting { auto } => json!({"type": "compacting", "auto": auto}),
-        AgentEvent::CompactProgress { done, budget } => {
-            json!({"type": "compact_progress", "done": done, "budget": budget})
-        }
-        AgentEvent::Compacted {
-            before,
-            after,
-            summary,
-        } => json!({"type": "compacted", "before": before, "after": after, "summary": summary}),
-        AgentEvent::TurnEnd(s) => {
-            json!({"type": "turn_end", "requests": s.requests, "tool_calls": s.tool_calls, "usage": s.usage, "cancelled": s.cancelled})
-        }
     }
 }
 
