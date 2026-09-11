@@ -183,6 +183,18 @@ pub type PluginLoad = (
     Vec<(String, SlashCommandSpec)>,
 );
 
+/// Messages that arrived while a turn was running. The loop reads it between
+/// requests, so what is said mid-turn reaches the model without waiting for
+/// the turn to finish and without landing in the middle of a tool call.
+#[derive(Default)]
+pub struct Inbox(Mutex<Vec<String>>);
+
+impl ah_core::agent::Mailbox for Inbox {
+    fn take(&self) -> Vec<String> {
+        std::mem::take(&mut *lock(&self.0))
+    }
+}
+
 /// Provider, tools, plugins and session. Runs one turn at a time.
 pub struct Engine {
     pub provider: Option<Arc<dyn Provider>>,
@@ -193,6 +205,8 @@ pub struct Engine {
     pub cwd: PathBuf,
     pub session: Session,
     pub cancel: Arc<AtomicBool>,
+    /// Where anything said to this session while it is busy waits its turn.
+    pub inbox: Arc<Inbox>,
     pub total_usage: Usage,
     /// Conversation size as of the last response.
     pub context_tokens: u64,
@@ -232,6 +246,7 @@ impl Engine {
             cwd,
             session,
             cancel: Arc::new(AtomicBool::new(false)),
+            inbox: Arc::new(Inbox::default()),
             total_usage: Usage::default(),
             context_tokens: 0,
             info: None,
@@ -323,6 +338,7 @@ impl Engine {
             context_tokens,
             session,
             settings_value,
+            inbox,
             ..
         } = self;
         let shared = provider.clone()?;
@@ -344,6 +360,7 @@ impl Engine {
             )) as Arc<dyn Spawner + Sync>
         });
         let mut a = Agent::new(borrowed, registry, hooks, settings, cwd.clone(), cancel);
+        a.mailbox = Some(inbox.clone());
         a.session_id = session.id.clone();
         a.output_modalities = modalities;
         a.image_dir = Some(match settings.images.dir.trim() {
