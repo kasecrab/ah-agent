@@ -1,0 +1,23 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ah-relay",
+  // What `worker-build` writes. `main` points at the shim it generates rather
+  // than at the Rust source.
+  "main": "build/worker/shim.mjs",
+  // 2024-04-03 or later for Durable Object RPC. No `nodejs_compat`: WebCrypto
+  // is a global here and nothing in this Worker needs a node shim.
+  "compatibility_date": "2026-09-01",
+  "workers_dev": true,
+  "observability": { "enabled": true, "head_sampling_rate": 0.1 },
+  "build": { "command": "worker-build --release" },
+
+  "durable_objects": {
+    "bindings": [{ "name": "HUB", "class_name": "Hub" }]
+  },
+  // SQLite-backed is the only kind the free plan offers, and the only kind
+  // this Worker's storage code is written against.
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Hub"] }]
+
+  // No `account_id`: it would put an account in the repository and break this
+  // file for anyone else. Set CLOUDFLARE_ACCOUNT_ID in the environment.
+}

@@ -1,0 +1,6 @@
+# wasm-bindgen puts the wrappers that catch a JavaScript exception into a table
+# of external references, and cannot build that table unless the feature that
+# defines it is on. Without this the bundle step stops at "externref table
+# required for catch wrappers".
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+reference-types"]

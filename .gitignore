@@ -2,6 +2,11 @@
 /target/
 /plugins/target/
 **/target/
+# worker-build writes here, and the rule above does not reach it
+/relay/build/
+node_modules/
+# wrangler caches the account it deployed as, name and all
+.wrangler/
 
 # rustfmt backups
 **/*.rs.bk

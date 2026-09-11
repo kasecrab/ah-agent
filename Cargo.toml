@@ -9,7 +9,7 @@ members = [
     "crates/ah-voice",
     "crates/ah",
 ]
-exclude = ["plugins"]
+exclude = ["plugins", "relay"]
 
 [workspace.package]
 version = "0.1.0"
