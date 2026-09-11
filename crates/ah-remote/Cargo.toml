@@ -13,3 +13,11 @@ serde_json = { workspace = true, features = ["std"] }
 ring = "0.17"
 # Already compiled: tungstenite uses it for the handshake key.
 data-encoding = "2"
+# The same selection `ah-voice` makes: the root store comes from the copy
+# `ureq` already pulls in rather than a second one bundled alongside it.
+tungstenite = { version = "0.30", default-features = false, features = ["handshake", "__rustls-tls"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
+# The same HTTP client `ah-core` already links, for the one plain request
+# pairing makes.
+ureq = { version = "3", default-features = false, features = ["rustls", "json"] }

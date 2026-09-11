@@ -1,7 +1,7 @@
 //! `ah remote`: pairing, and what the link is doing.
 
 use ah_core::auth;
-use ah_remote::{code, crypto, qr};
+use ah_remote::{code, crypto, provision, qr};
 
 use crate::RemoteCmd;
 use crate::app::AnyError;
@@ -32,6 +32,19 @@ fn pair(url: Option<String>) -> Result<(), AnyError> {
     let raw = crypto::new_code();
     let shown = code::format(&raw);
     let keys = crypto::Keys::derive(&raw);
+
+    // The relay is told first. Writing the pairing down before it is accepted
+    // would leave a machine believing in one the relay has never heard of.
+    match provision::provision(&url, &keys) {
+        Ok(()) => {}
+        // Two codes deriving the same hub is not a thing that happens; a hub
+        // that is taken means this code was made before and is being made
+        // again, which a fresh one settles.
+        Err(provision::Error::Taken) => {
+            return Err("that pairing already exists. Try again.".into());
+        }
+        Err(e) => return Err(format!("{e}").into()),
+    }
     auth::save_remote(&shown, &url)?;
 
     let link = format!(
@@ -71,6 +84,14 @@ fn status() -> Result<(), AnyError> {
     println!("paired");
     println!("  relay {url}");
     println!("  hub   {}…", &keys.hub_id[..8]);
+    println!(
+        "  {}",
+        if provision::reachable(&url) {
+            "the relay is answering"
+        } else {
+            "the relay is not answering"
+        }
+    );
     Ok(())
 }
 

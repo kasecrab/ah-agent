@@ -7,4 +7,6 @@
 
 pub mod code;
 pub mod crypto;
+pub mod link;
+pub mod provision;
 pub mod qr;
