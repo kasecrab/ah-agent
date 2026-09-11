@@ -1,0 +1,15 @@
+[package]
+name = "ah-remote"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The encrypted link between an ah session and a phone, through a relay that only ever sees ciphertext"
+
+[dependencies]
+ah-remote-proto = { path = "../ah-remote-proto" }
+serde_json = { workspace = true, features = ["std"] }
+# Already compiled as rustls's provider, so none of this is a new download.
+# This crate is the first to use its aead, hkdf, hmac and rand modules.
+ring = "0.17"
+# Already compiled: tungstenite uses it for the handshake key.
+data-encoding = "2"
