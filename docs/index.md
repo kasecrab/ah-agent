@@ -17,13 +17,14 @@ everything else. These pages are embedded in the binary. `ah docs` lists them an
 | plugins | `ah docs plugins` | writing, building and installing wasm plugins: manifest, hooks, payloads, host calls |
 | sessions | `ah docs sessions` | session files, resume, naming, `/clear`, compaction, history and model cache |
 | voice | `ah docs voice` | dictation: the talk key, the model that transcribes, what it costs, where the audio goes |
+| remote | `ah docs remote` | watching a session from a phone: pairing, what the relay can see, what the code is worth |
 
 ## Where things live
 
 | Path | Purpose |
 |---|---|
 | `~/.config/ah/config.toml` | user configuration (`ah config init` writes the defaults with comments) |
-| `~/.config/ah/credentials.toml` | OpenRouter key stored by `ah login`, mode 600 |
+| `~/.config/ah/credentials.toml` | OpenRouter and Deepgram keys, and the phone pairing code, mode 600 |
 | `~/.config/ah/favorites.toml` | favorites managed by `/favorite` |
 | `~/.config/ah/state.toml` | choices a picker settled: the voice provider, model and microphone |
 | `~/.config/ah/plugins/*.wasm` | user plugins (`sources.json` beside them records git origins) |
@@ -49,6 +50,9 @@ prints the resolved locations.
 | `AH_DATA_DIR` | replaces `~/.local/share/ah` |
 | `AH_LOG` | `1` logs to `<data dir>/ah.log`; a path logs there instead |
 | `AH_LOG_LEVEL` | `error`, `warn`, `info` or `debug` |
+| `AH_REMOTE_CODE` | pairing code for a phone, ahead of the credentials file |
+| `AH_REMOTE_URL` | the relay to pair against, ahead of the credentials file |
+| `AH_REMOTE_ROOTS` | directories a phone may start a session in, ahead of the config |
 | `SHELL` | shell used by the `bash` tool when `tools.shell` is empty |
 
 ## Customisation map

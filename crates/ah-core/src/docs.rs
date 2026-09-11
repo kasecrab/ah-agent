@@ -49,6 +49,11 @@ pub const TOPICS: &[Topic] = &[
         text: include_str!("../../../docs/sessions.md"),
     },
     Topic {
+        name: "remote",
+        summary: "watching a session from a phone: pairing, what the relay can see, what the code is worth",
+        text: include_str!("../../../docs/remote.md"),
+    },
+    Topic {
         name: "voice",
         summary: "dictation: the talk key, the model that transcribes, what it costs, where the audio goes",
         text: include_str!("../../../docs/voice.md"),
