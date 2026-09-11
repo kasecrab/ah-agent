@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 ah-abi = { path = "../ah-abi" }
 ah-core = { path = "../ah-core" }
+ah-remote = { path = "../ah-remote", optional = true }
 ah-voice = { path = "../ah-voice", default-features = false }
 serde = { workspace = true, features = ["std"] }
 serde_json = { workspace = true, features = ["std"] }
@@ -23,10 +24,14 @@ pulldown-cmark = { version = "0.13", default-features = false }
 dirs = "7"
 
 [features]
-default = ["mic", "live"]
+default = ["mic", "live", "remote"]
 # Record from the system microphone. Off, `/voice` needs a recorder on PATH
 # or `voice.capture_cmd`, and nothing links an audio library.
 mic = ["ah-voice/mic"]
 # Dictation against Deepgram's live socket. Off, only the OpenRouter routes
 # are offered and no TLS client but `ureq`'s is linked.
 live = ["ah-voice/live"]
+# Drive this session from a phone, through a relay of your own. Off, `ah
+# remote` is not a subcommand and nothing links the pairing code, the seal or
+# the QR encoder.
+remote = ["dep:ah-remote"]

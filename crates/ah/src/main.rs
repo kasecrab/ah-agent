@@ -3,6 +3,8 @@
 mod app;
 mod cli;
 mod plugin_source;
+#[cfg(feature = "remote")]
+mod remote;
 mod tui;
 
 use std::io::IsTerminal;
@@ -121,6 +123,12 @@ pub enum Command {
     },
     /// List stored sessions.
     Sessions,
+    /// Pair this machine with a phone, and see what the link is doing.
+    #[cfg(feature = "remote")]
+    Remote {
+        #[command(subcommand)]
+        cmd: RemoteCmd,
+    },
     /// Print the built-in documentation: `ah docs` lists topics, `ah docs plugins` prints one.
     Docs {
         /// Topic name (config, keys, commands, instructions, skills, plugins, sessions).
@@ -160,6 +168,21 @@ pub enum PluginCmd {
         /// Only this plugin (default: every one with a recorded source).
         name: Option<String>,
     },
+}
+
+#[cfg(feature = "remote")]
+#[derive(Subcommand, Debug)]
+pub enum RemoteCmd {
+    /// Make a new pairing and show the code to scan.
+    Pair {
+        /// The relay to pair against. Remembered, so it is needed once.
+        #[arg(long, value_name = "URL")]
+        url: Option<String>,
+    },
+    /// Whether this machine is paired, and to what.
+    Status,
+    /// Forget the pairing, so no phone holding it can reach this machine.
+    Forget,
 }
 
 #[derive(Subcommand, Debug)]

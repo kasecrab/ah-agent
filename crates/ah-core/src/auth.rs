@@ -11,6 +11,14 @@ struct Credentials {
     /// Dictation against Deepgram's live socket. Nothing else uses it.
     #[serde(default)]
     deepgram_api_key: Option<String>,
+    /// The pairing code a phone was given, as typed characters. Everything the
+    /// remote link needs is derived from it, so this is the only part worth
+    /// keeping and the only part worth guarding.
+    #[serde(default)]
+    remote_code: Option<String>,
+    /// The relay that pairing was made against.
+    #[serde(default)]
+    remote_url: Option<String>,
 }
 
 /// Where the active key came from.
@@ -84,6 +92,58 @@ pub fn save_deepgram_key(key: &str) -> Result<()> {
     let key = key.trim();
     creds.deepgram_api_key = (!key.is_empty()).then(|| key.to_string());
     write_credentials(&creds)
+}
+
+/// Where the secrets are kept, for a command that wants to say so.
+pub fn credentials_path() -> std::path::PathBuf {
+    crate::paths::credentials_file()
+}
+
+/// The pairing code, from the environment or the credentials file.
+///
+/// Deliberately the same two places the Deepgram key comes from, and
+/// deliberately not the settings: a relay named by a repository's own
+/// `.ah/config.toml` would be somebody else's relay, and a pairing code found
+/// there would be somebody else's code.
+pub fn remote_code() -> Option<String> {
+    from_env_or_file("AH_REMOTE_CODE", |c| c.remote_code)
+}
+
+/// The relay URL, from the same two places and for the same reason.
+pub fn remote_url() -> Option<String> {
+    from_env_or_file("AH_REMOTE_URL", |c| c.remote_url)
+}
+
+/// Store a pairing. Both halves are written together because neither is any
+/// use without the other.
+pub fn save_remote(code: &str, url: &str) -> Result<()> {
+    let mut creds = read_credentials().unwrap_or_default();
+    creds.remote_code = Some(code.trim().to_string());
+    creds.remote_url = Some(url.trim().to_string());
+    write_credentials(&creds)
+}
+
+/// Forget the pairing. The relay keeps nothing readable, so this is the whole
+/// of what revoking leaves behind on this machine.
+pub fn clear_remote() -> Result<()> {
+    let mut creds = read_credentials().unwrap_or_default();
+    creds.remote_code = None;
+    creds.remote_url = None;
+    write_credentials(&creds)
+}
+
+fn from_env_or_file(var: &str, pick: impl Fn(Credentials) -> Option<String>) -> Option<String> {
+    if let Some(v) = std::env::var(var)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+    {
+        return Some(v);
+    }
+    read_credentials()
+        .and_then(pick)
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
 }
 
 fn read_credentials() -> Option<Credentials> {

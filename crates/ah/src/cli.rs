@@ -379,6 +379,8 @@ pub fn subcommand(cmd: Command, o: &Overrides) -> Result<(), AnyError> {
         Command::Plugin { cmd } => plugin(o, cmd),
         Command::Config { cmd } => config(o, cmd.unwrap_or(ConfigCmd::Show { origins: false })),
         Command::Docs { topic } => docs(topic.as_deref()),
+        #[cfg(feature = "remote")]
+        Command::Remote { cmd } => crate::remote::cli::subcommand(cmd),
         Command::Sessions => {
             for s in ah_core::session::summaries() {
                 println!(
