@@ -87,6 +87,26 @@ pub fn load_settings(o: &Overrides) -> Result<SettingsStack, AnyError> {
     Ok(stack)
 }
 
+/// What a directory or a plugin asked for and was not given, in one line per
+/// setting.
+///
+/// Silence would be the wrong answer twice over: somebody who wrote a project
+/// config in good faith needs to know why it did nothing, and somebody who
+/// just cloned a repository that tried to redirect their API key very much
+/// needs to know that it did.
+pub fn refusals(stack: &SettingsStack) -> Vec<String> {
+    stack
+        .ignored()
+        .iter()
+        .map(|(origin, key)| {
+            format!(
+                "{} tried to set {key}, which only your own config may set",
+                origin.describe()
+            )
+        })
+        .collect()
+}
+
 pub fn resolve_cwd(o: &Overrides) -> Result<PathBuf, AnyError> {
     Ok(match &o.cwd {
         Some(d) => {

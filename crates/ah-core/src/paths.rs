@@ -90,5 +90,12 @@ pub fn plugin_state_dir() -> PathBuf {
 
 /// Directories scanned for `*.wasm` plugins, in load order.
 pub fn plugin_dirs() -> Vec<PathBuf> {
-    vec![config_dir().join("plugins"), project_dir().join("plugins")]
+    vec![config_dir().join("plugins"), project_plugin_dir()]
+}
+
+/// Where a repository keeps plugins of its own. Read only when the user's own
+/// config says to: a `.wasm` in a directory somebody cloned is a program
+/// somebody else wrote, and it is loaded before the first turn.
+pub fn project_plugin_dir() -> PathBuf {
+    project_dir().join("plugins")
 }

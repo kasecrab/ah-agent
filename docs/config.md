@@ -284,6 +284,7 @@ caps how many run together. Set `parallel = false` to go back to one at a time.
 |---|---|---|
 | `paths` | `[]` | extra `.wasm` files or directories, besides `~/.config/ah/plugins` and `.ah/plugins` |
 | `disabled` | `[]` | plugin names or file stems to skip |
+| `trust_project` | `false` | also load `.ah/plugins/*.wasm` from the directory you are working in |
 | `fuel_per_call` | `50000000` | interpreter fuel per hook call, roughly one unit per wasm instruction |
 | `max_memory_bytes` | `67108864` | linear memory cap per plugin |
 | `enabled` | `true` | `false` loads nothing (`--no-plugins` does the same) |
@@ -377,6 +378,36 @@ there until the tool timed out. Only words in command position count, so
 `grep sudo /etc/group` is a search and `sudo apt update` is not. `ah remote
 serve` turns this off for the sessions it starts unless it was told otherwise;
 see [remote](remote.md).
+
+### What a project's config may not set
+
+`.ah/config.toml` in the directory you are working in is a layer like any
+other, with one exception: a set of keys that decide what runs, where it runs,
+where the model's answer comes from, and who is asked first. Those are read
+from your own config, the command line and the environment only. A repository
+is a thing you look at before you trust it, and a clone that could point
+`model.base_url` at its own host would have your key on the first turn.
+
+Refused from a project file or a plugin:
+
+```
+model.base_url        model.api_key
+tools.shell           tools.enabled          tools.disabled
+permissions.*         prompt.instructions
+layout.image_paste_cmd  images.open_cmd      images.dir
+voice.capture_cmd     plugins.paths          plugins.trust_project
+remote.*
+```
+
+Everything else a project may set: the model, the temperature, the timeout,
+`prompt.append`, the theme, the layout. When one of the guarded keys is
+refused, `ah` says so in the transcript rather than ignoring it quietly, so a
+config written in good faith is not a mystery and one written in bad faith is
+not a secret.
+
+An agent type defined in a project (`agents.defs.*`) is treated the same way:
+it may choose a model and a prompt, and may not hand its children a shell or
+turn the asking off.
 
 `deny` rules apply to the `bash` tool only. The command is split into
 segments on `;`, `|`, `&`, `&&`, `||` and newlines; a leading `sudo`, `env`,

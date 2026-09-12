@@ -1083,6 +1083,16 @@ impl<'a> Agent<'a> {
                 )));
             }
         }
+        // Some files decide what this program does next: whether anybody is
+        // asked, which host the key is sent to, what runs at startup. Writing
+        // one is asked about in every mode, and the prompt says what the file
+        // is for rather than only naming it — approving `Write(config.toml)`
+        // without being told it is the file that governs the asking is not
+        // really approving anything.
+        if let Some(what) = writes_its_own_rules(&call, cwd) {
+            must_ask = true;
+            ask_reason = what;
+        }
         if must_ask && !io.ask_permission(&call, &ask_reason) {
             io.emit(AgentEvent::ToolDenied {
                 call,
@@ -1458,6 +1468,42 @@ pub mod test_support {
             self.answer.clone().unwrap_or(Reply::Unavailable)
         }
     }
+}
+
+/// Whether a tool call writes one of the files that decide how this program
+/// behaves, and what to say about it if so.
+///
+/// The model reaches these the same way it reaches any other path, and a write
+/// to one of them is not an edit, it is a change to the rules the next turn
+/// runs under. `~/.config/ah/config.toml` holds `permissions.mode`;
+/// `credentials.toml` holds the key; the plugin directories hold programs that
+/// run before the first request.
+fn writes_its_own_rules(call: &ToolCall, cwd: &str) -> Option<String> {
+    if !matches!(
+        call.function.name.as_str(),
+        "write_file" | "edit_file" | "multi_edit"
+    ) {
+        return None;
+    }
+    let args: Value = serde_json::from_str(&call.function.arguments).ok()?;
+    let raw = args.get("path").and_then(|p| p.as_str())?;
+    let path = crate::tools::resolve_path(std::path::Path::new(cwd), raw);
+    // Compared as written rather than canonicalised: the file may not exist
+    // yet, and a symlink into one of these directories is answered by the
+    // directory check below rather than by resolving it.
+    let config = crate::paths::config_dir();
+    let data = crate::paths::data_dir();
+    if path.starts_with(&config) || path.starts_with(&data) {
+        let what = if path == crate::paths::credentials_file() {
+            "this is the file your API key and pairing code are kept in"
+        } else if path.parent().is_some_and(|p| p.ends_with("plugins")) {
+            "a program in here runs before the first request of every session"
+        } else {
+            "this is the config that decides which tools are asked about, which host the key is sent to, and what runs at startup"
+        };
+        return Some(what.to_string());
+    }
+    None
 }
 
 #[cfg(test)]
@@ -1890,6 +1936,31 @@ mod tests {
             })
             .expect("no compacted event");
         assert_eq!(before, 200);
+    }
+
+    #[test]
+    fn writing_the_rules_is_asked_about_even_in_auto_mode() {
+        let call = |path: &str| ToolCall {
+            id: "1".into(),
+            kind: "function".into(),
+            function: ah_abi::ToolFunction {
+                name: "write_file".into(),
+                arguments: serde_json::json!({"path": path, "content": "x"}).to_string(),
+            },
+        };
+        let cwd = "/tmp";
+        let config = crate::paths::user_config_file();
+        let creds = crate::paths::credentials_file();
+        assert!(writes_its_own_rules(&call(config.to_str().unwrap()), cwd).is_some());
+        let about_keys = writes_its_own_rules(&call(creds.to_str().unwrap()), cwd).unwrap();
+        assert!(about_keys.contains("API key"), "{about_keys}");
+        // Ordinary work is left alone.
+        assert!(writes_its_own_rules(&call("src/main.rs"), cwd).is_none());
+        assert!(writes_its_own_rules(&call("/tmp/notes.md"), cwd).is_none());
+        // And reading is not writing.
+        let mut read = call(config.to_str().unwrap());
+        read.function.name = "read_file".into();
+        assert!(writes_its_own_rules(&read, cwd).is_none());
     }
 
     #[test]

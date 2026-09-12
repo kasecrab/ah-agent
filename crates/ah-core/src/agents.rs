@@ -1051,7 +1051,19 @@ pub fn child_settings(
 
     merge_patch(&mut v, &patch);
     if !def.settings.is_null() {
-        merge_patch(&mut v, &def.settings);
+        // An agent type is a settings patch from wherever the settings came
+        // from, which includes a repository. It may say which model to use and
+        // what to put in the prompt; it may not hand its own children a shell,
+        // turn the asking off, or reach root — all of which the bars above and
+        // the parent's own permissions have just decided.
+        let mut theirs = def.settings.clone();
+        for key in crate::settings::GUARDED {
+            crate::settings::take(&mut theirs, key);
+        }
+        merge_patch(&mut v, &theirs);
+        // And whatever it said about tools, the bars still hold: a child
+        // cannot be given back a tool the parent would have had to approve.
+        merge_patch(&mut v, &patch);
     }
     serde_json::from_value(v).map_err(|e| format!("agent type settings: {e}"))
 }

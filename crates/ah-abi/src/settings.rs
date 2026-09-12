@@ -517,6 +517,11 @@ pub struct PluginSettings {
     pub paths: Vec<String>,
     pub disabled: Vec<String>,
     /// Interpreter fuel budget per hook call. Roughly one unit per wasm instruction.
+    /// Load `.ah/plugins/*.wasm` from the directory you are working in. Off,
+    /// only your own plugin directory is read: a plugin that arrived with a
+    /// repository is a program somebody else wrote, running on your machine
+    /// before the first turn, with the same reach as the rest of this one.
+    pub trust_project: bool,
     pub fuel_per_call: u64,
     /// Max linear memory per plugin in bytes.
     pub max_memory_bytes: u64,
@@ -528,6 +533,7 @@ impl Default for PluginSettings {
         Self {
             paths: Vec::new(),
             disabled: Vec::new(),
+            trust_project: false,
             fuel_per_call: 50_000_000,
             max_memory_bytes: 64 * 1024 * 1024,
             enabled: true,

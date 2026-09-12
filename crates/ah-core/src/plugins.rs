@@ -71,6 +71,19 @@ fn pack(ptr: i32, len: i32) -> (usize, usize) {
     (ptr as u32 as usize, len as u32 as usize)
 }
 
+/// The settings as a plugin is allowed to see them.
+///
+/// A plugin is a program somebody else wrote. It has no business with the API
+/// key, and handing it over to every one of them turns a theme into something
+/// that can bill the user's account.
+fn without_secrets(settings: &Value) -> Value {
+    let mut out = settings.clone();
+    if let Some(model) = out.get_mut("model").and_then(Value::as_object_mut) {
+        model.remove("api_key");
+    }
+    out
+}
+
 /// Every `*.wasm` the settings point at, in load order. `load` walks this and
 /// the cache keys itself on it, so the two cannot disagree about which files a
 /// load would have read.
@@ -79,7 +92,14 @@ pub fn discover(settings: &Settings, cwd: &str) -> Vec<PathBuf> {
         return Vec::new();
     }
     let mut files: Vec<PathBuf> = Vec::new();
-    let mut dirs = crate::paths::plugin_dirs();
+    // The user's own directory always; the working directory's only if the
+    // user's own config said so. A plugin reaches every variable in the
+    // environment and every file this process can read, and it runs before
+    // anything has been asked.
+    let mut dirs = vec![crate::paths::config_dir().join("plugins")];
+    if settings.plugins.trust_project {
+        dirs.push(crate::paths::project_plugin_dir());
+    }
     for p in &settings.plugins.paths {
         let pb = crate::tools::resolve_path(Path::new(cwd), p);
         if pb.is_dir() {
@@ -230,7 +250,7 @@ impl PluginHost {
             pending: Vec::new(),
             kv,
             kv_path,
-            settings: settings_value.clone(),
+            settings: without_secrets(settings_value),
             cwd: cwd.into(),
             log: Vec::new(),
         };

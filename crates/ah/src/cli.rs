@@ -303,6 +303,9 @@ pub fn one_shot(
 ) -> Result<(), AnyError> {
     let cwd = app::resolve_cwd(o)?;
     let mut stack = app::load_settings(o)?;
+    for line in app::refusals(&stack) {
+        eprintln!("\x1b[33m{line}\x1b[0m");
+    }
     let mut engine = Engine::new(&stack, cwd, resume, resume.is_some())?;
     let (reports, patches, _) = engine.load_plugins();
     for r in &reports {

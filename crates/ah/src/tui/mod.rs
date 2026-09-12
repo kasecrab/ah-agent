@@ -342,6 +342,9 @@ struct App {
     banner_at: Option<usize>,
     plugin_commands: Vec<(String, SlashCommandSpec)>,
     plugin_count: u32,
+    /// How many settings refusals have already been put in the transcript, so
+    /// a reload does not say the same ones again.
+    refusals_said: usize,
     pending_perm: Option<(u64, ToolCall, String)>,
     /// The question the `ask_user` tool put on screen, while it is unanswered.
     ask: Option<ask::View>,
@@ -615,6 +618,7 @@ fn run_inner(
         cursor: None,
         compact_progress: None,
         plugin_status: None,
+        refusals_said: 0,
         plugin_commands,
         plugin_count,
         key_warned: false,
@@ -3240,6 +3244,16 @@ impl App {
                 }
                 if let Some(f) = failed {
                     self.push(Block::Error(f));
+                }
+                // Said after the plugins are on the stack rather than at
+                // startup, because a plugin is one of the things that can be
+                // refused and it is not there yet when the window opens.
+                for line in app::refusals(&self.stack)
+                    .into_iter()
+                    .skip(self.refusals_said)
+                {
+                    self.refusals_said += 1;
+                    self.push(Block::Error(line));
                 }
                 self.refresh_from_settings(&[]);
                 self.plugin_status = None;
