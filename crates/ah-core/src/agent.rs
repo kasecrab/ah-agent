@@ -384,9 +384,15 @@ pub struct Agent<'a> {
     pub cancel: &'a AtomicBool,
     /// Hard stop on runaway tool loops.
     pub max_requests: u32,
-    /// 0 for the agent the user talks to, else the id of the subagent this
-    /// loop is. It tags the jobs the loop starts and keeps their news apart.
+    /// The id this loop's jobs and subagents are filed under. 0 for the agent
+    /// the user talks to in a window; a subagent uses its own id, and a daemon
+    /// gives each of its sessions one of its own so that two sessions in one
+    /// process cannot read, kill or answer each other's work.
     pub agent_id: u32,
+    /// Whether this loop is a subagent, as opposed to one somebody is talking
+    /// to. It used to be `agent_id != 0`, which stopped being the same
+    /// question once a main loop could have an id of its own.
+    pub child: bool,
     /// Id of the session this turn belongs to, empty when there is none. It
     /// rides along as the provider's sticky-routing key.
     pub session_id: String,
@@ -440,6 +446,7 @@ impl<'a> Agent<'a> {
             cancel,
             max_requests: 200,
             agent_id: 0,
+            child: false,
             session_id: String::new(),
             context_window: 0,
             context_tokens: 0,
@@ -807,7 +814,7 @@ impl<'a> Agent<'a> {
                     // shows them in that agent's view, not in the conversation
                     // the user is having. The main loop's news goes out the
                     // other way, from the table straight to the transcript.
-                    if self.agent_id != 0 {
+                    if self.child {
                         io.emit(AgentEvent::Notice(note.clone()));
                     }
                     messages.push(Message::user(format!("[background] {note}")));
@@ -815,7 +822,7 @@ impl<'a> Agent<'a> {
                 for note in
                     crate::agents::table().notices(crate::agents::Audience::Model(self.agent_id))
                 {
-                    if self.agent_id != 0 {
+                    if self.child {
                         io.emit(AgentEvent::Notice(note.clone()));
                     }
                     messages.push(Message::user(format!("[agent] {note}")));

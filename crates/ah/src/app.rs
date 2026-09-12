@@ -242,6 +242,15 @@ pub struct Engine {
     info: Option<(String, ah_core::models::ModelInfo)>,
     /// Whether this session has already been told its window is unknown.
     warned_no_window: bool,
+    /// Which plan store this engine's thread uses. Empty means the one a
+    /// window shares with its UI thread, which is every window; the daemon
+    /// names each session, because several engines in one process had one plan
+    /// between them.
+    pub plan_key: String,
+    /// What this engine's jobs and subagents are filed under. 0 in a window;
+    /// the daemon gives each session one of its own, so two sessions in one
+    /// process cannot reach each other's work.
+    pub owner: u32,
 }
 
 impl Engine {
@@ -278,6 +287,8 @@ impl Engine {
             context_tokens: 0,
             info: None,
             warned_no_window: false,
+            plan_key: String::new(),
+            owner: 0,
         };
         e.rebuild_provider();
         e.rebuild_registry();
@@ -366,6 +377,7 @@ impl Engine {
             session,
             settings_value,
             inbox,
+            owner,
             ..
         } = self;
         let shared = provider.clone()?;
@@ -382,12 +394,17 @@ impl Engine {
                 settings_value.clone(),
                 cwd.clone(),
                 session.id.clone(),
-                0,
+                *owner,
                 0,
             )) as Arc<dyn Spawner + Sync>
         });
         let mut a = Agent::new(borrowed, registry, hooks, settings, cwd.clone(), cancel);
         a.mailbox = Some(inbox.clone());
+        // 0 in a window, where there is one of these. The daemon gives each
+        // session its own, so the jobs one session starts and the subagents it
+        // spawns are not reachable from another: they are filed under the
+        // owner, and every main loop being owner 0 made them all one pile.
+        a.agent_id = *owner;
         a.session_id = session.id.clone();
         a.output_modalities = modalities;
         a.image_dir = Some(match settings.images.dir.trim() {
@@ -589,6 +606,13 @@ impl Engine {
         perm_rx: Receiver<bool>,
         ask_rx: Receiver<Reply>,
     ) {
+        // Which session's plan this thread means. Empty in a window, where one
+        // engine and one UI thread share the one store between them and always
+        // have. The daemon sets it, because it runs several engines in one
+        // process and they had one plan between them — a session could
+        // overwrite another's tasks, and the model be reminded of work it was
+        // never given.
+        ah_core::plan::use_session(&self.plan_key);
         let cancel = self.cancel.clone();
         let io = ChannelIo::new(tx.clone(), perm_rx, ask_rx, cancel);
         while let Ok(cmd) = rx.recv() {

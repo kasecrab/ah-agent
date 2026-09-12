@@ -502,7 +502,7 @@ fn list(ids: &[u16]) -> String {
 
 type Waker = Box<dyn Fn() + Send + Sync>;
 
-/// The plan for this process, shared by the tool, the loop and the UI.
+/// The plan for one session, shared by the tool, the loop and the UI.
 pub struct Store {
     plan: Mutex<Plan>,
     /// Bumped on every change; the loop uses it to decide when to remind the
@@ -511,13 +511,54 @@ pub struct Store {
     waker: Mutex<Option<Waker>>,
 }
 
+thread_local! {
+    /// Which session's plan this thread means. Empty for a process running one
+    /// session, which is every window.
+    static CURRENT: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// Say which session's plan this thread is working on.
+///
+/// Called once on each engine thread, and once on the UI thread of a window.
+/// The daemon runs several engines in one process and they had one plan
+/// between them, so a session could overwrite another's tasks and the model
+/// was told about work it had never been given.
+///
+/// A thread-local rather than an argument because the plan is read from
+/// sixteen places, most of them drawing code. It does not reach threads spawned
+/// underneath — the plan tool never runs on one, being barred from subagents
+/// and not read-only, so nothing that touches the plan runs anywhere else.
+pub fn use_session(id: &str) {
+    CURRENT.with(|c| *c.borrow_mut() = id.to_string());
+}
+
+/// The plan for whatever session this thread is working on.
 pub fn store() -> &'static Store {
-    static STORE: OnceLock<Store> = OnceLock::new();
-    STORE.get_or_init(|| Store {
+    CURRENT.with(|c| store_for(&c.borrow()))
+}
+
+/// The plan for a named session, made the first time it is asked for.
+///
+/// Leaked on purpose: one per session, at most `remote.max_sessions` of them,
+/// and every caller wants a `'static` reference into drawing code that
+/// outlives any borrow this could hand out instead.
+pub fn store_for(session: &str) -> &'static Store {
+    static STORES: OnceLock<Mutex<std::collections::HashMap<String, &'static Store>>> =
+        OnceLock::new();
+    let mut stores = STORES
+        .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(found) = stores.get(session) {
+        return found;
+    }
+    let made: &'static Store = Box::leak(Box::new(Store {
         plan: Mutex::new(Plan::default()),
         version: AtomicU64::new(0),
         waker: Mutex::new(None),
-    })
+    }));
+    stores.insert(session.to_string(), made);
+    made
 }
 
 impl Store {
@@ -586,6 +627,41 @@ impl Store {
 }
 
 /// Tests share one process-wide plan; this keeps them out of each other's way.
+#[cfg(test)]
+mod stores {
+    use super::*;
+
+    #[test]
+    fn two_sessions_do_not_share_one_plan() {
+        // The daemon runs several engines in one process. Sharing a store
+        // meant one session could overwrite another's tasks, and the model be
+        // reminded of work it had never been given.
+        let alpha = store_for("alpha");
+        let beta = store_for("beta");
+        alpha.load(Plan {
+            tasks: vec![Task {
+                id: 1,
+                title: "alpha's work".into(),
+                parent: None,
+                needs: Vec::new(),
+                status: Status::default(),
+                note: String::new(),
+            }],
+            ..Default::default()
+        });
+        assert_eq!(alpha.with(|p| p.tasks.len()), 1);
+        assert_eq!(beta.with(|p| p.tasks.len()), 0, "beta saw alpha's plan");
+        // And asking again is the same store, not a fresh one.
+        assert_eq!(store_for("alpha").with(|p| p.tasks.len()), 1);
+    }
+
+    #[test]
+    fn a_thread_that_named_no_session_gets_the_shared_one() {
+        // Which is every window: one engine, one UI thread, one plan.
+        assert!(std::ptr::eq(store(), store_for("")));
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn test_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: Mutex<()> = Mutex::new(());

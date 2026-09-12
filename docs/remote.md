@@ -98,6 +98,10 @@ Worth knowing before you rely on any of it:
   working and roughly how much.
 - **A command reaches the machine only while it is connected.** Nothing is
   queued for a desktop that is offline; the phone is told so instead.
+- **Sessions the daemon runs share a process.** They have their own plans,
+  their own background jobs and their own subagents, and cannot reach each
+  other's — but they are one process with one set of environment variables and
+  one API key, and a tool in one can read any file the others can.
 
 The connect signature goes in a header rather than in the URL, so it is not
 kept by whatever logs requests, and the relay refuses a second use of the same

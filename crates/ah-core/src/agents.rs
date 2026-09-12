@@ -451,6 +451,15 @@ impl Agents {
     }
 
     /// One line per child that finished since this audience last asked.
+    /// An id nothing else in this process is using.
+    ///
+    /// The same pool subagents are numbered from, so a daemon session and a
+    /// subagent can never collide — which matters, because both are filed
+    /// under it and one would then be able to read the other's work.
+    pub fn next_owner(&self) -> u32 {
+        self.next_id.fetch_add(1, Ordering::Relaxed)
+    }
+
     pub fn notices(&self, who: Audience) -> Vec<String> {
         self.kids
             .lock()
@@ -642,6 +651,7 @@ fn turn(child: &Arc<Child>) -> State {
         &child.cancel,
     );
     agent.agent_id = child.id;
+    agent.child = true;
     agent.session_id = l.session_id.clone();
     agent.max_requests = l.max_requests;
     agent.context_window = l.window;

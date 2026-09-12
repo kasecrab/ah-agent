@@ -121,6 +121,13 @@ impl Machine {
         let mut engine =
             Engine::new(&stack, cwd.to_path_buf(), resume, true).map_err(|e| e.to_string())?;
         let id = engine.session.id.clone();
+        // One plan per session. Several engines in one process shared a single
+        // store, so one session could overwrite another's tasks and the model
+        // be reminded of work it had never been given.
+        engine.plan_key = id.clone();
+        // And an owner of its own, so the jobs this session starts and the
+        // subagents it spawns are filed apart from every other session's.
+        engine.owner = ah_core::agents::table().next_owner();
         let name = engine.session.name.clone();
         let cancel = engine.cancel.clone();
         let inbox = engine.inbox.clone();
