@@ -180,6 +180,13 @@ pub struct Job {
     /// nobody waiting on it and says so when it ends.
     announce: AtomicBool,
     child: Mutex<Option<Child>>,
+    /// Set the moment before the child is waited on, and never unset.
+    ///
+    /// Between the wait returning and the state being written, the job still
+    /// looks like it is running while its process id has already gone back to
+    /// the system to be handed out again. Anything about to signal that id has
+    /// to know it is no longer ours, and the state alone cannot say so.
+    reaped: AtomicBool,
     open_pipes: AtomicU32,
     duration_ms: AtomicU64,
 }
@@ -282,29 +289,44 @@ impl Job {
     }
 
     /// Ask the process group to stop, then make sure of it after `grace`.
-    pub fn kill(&self, grace: Duration) {
-        if !self.running() {
+    /// Ask the job to stop, and insist after `grace` if it has not.
+    ///
+    /// The insisting waits on a thread, and by the time it wakes the job may
+    /// have ended on its own and its process id been handed to something else
+    /// entirely — the signal goes to a whole process group, so getting that
+    /// wrong ends somebody else's tree. The job is carried into the thread and
+    /// asked again rather than the number being trusted to still mean what it
+    /// meant.
+    pub fn kill(self: &std::sync::Arc<Self>, grace: Duration) {
+        if !self.killable() {
             return;
         }
         signal(self.pid, SIGTERM);
-        let pid = self.pid;
+        let job = std::sync::Arc::clone(self);
         std::thread::spawn(move || {
             std::thread::sleep(grace);
-            signal(pid, SIGKILL);
+            if job.killable() {
+                signal(job.pid, SIGKILL);
+            }
         });
+    }
+
+    /// Whether this job's process id is still this job's to signal.
+    fn killable(&self) -> bool {
+        self.running() && !self.reaped.load(Ordering::SeqCst)
     }
 
     /// The polite half of [`Job::kill`], for a caller that does the waiting
     /// itself. Used at exit, where a detached thread would not outlive the
     /// process long enough to fire.
     fn term(&self) {
-        if self.running() {
+        if self.killable() {
             signal(self.pid, SIGTERM);
         }
     }
 
     fn hard_kill(&self) {
-        if self.running() {
+        if self.killable() {
             signal(self.pid, SIGKILL);
         }
     }
@@ -409,6 +431,7 @@ impl Jobs {
             reported: AtomicU32::new(0),
             announce: AtomicBool::new(false),
             child: Mutex::new(Some(child)),
+            reaped: AtomicBool::new(false),
             open_pipes: AtomicU32::new(2),
             duration_ms: AtomicU64::new(0),
         });
@@ -584,6 +607,11 @@ fn pump(job: std::sync::Arc<Job>, mut pipe: impl Read + Send + 'static) {
             return;
         }
         let child = job.child.lock().unwrap().take();
+        // Said before the wait, not after: the moment the wait returns the
+        // process id is the system's again, and anything still holding it has
+        // to stop treating it as ours before that happens rather than once the
+        // state has caught up.
+        job.reaped.store(true, Ordering::SeqCst);
         let code = match child {
             Some(mut c) => c.wait().ok().and_then(|s| s.code()).unwrap_or(-1),
             None => -1,
@@ -688,6 +716,19 @@ mod tests {
             out.push_bytes(&[0xff; 3000]);
         }
         assert!(out.partial.len() <= out.cap);
+    }
+
+    #[test]
+    fn a_job_that_ends_inside_the_grace_period_is_not_signalled_afterwards() {
+        let j = table().spawn("sh", "exit 0", &cwd(), 65536, 0).unwrap();
+        assert!(j.wait(Duration::from_secs(5)));
+        // Finished and reaped: its process id is the system's again, and this
+        // job has no business sending anything to it.
+        assert!(!j.running());
+        j.kill(Duration::from_millis(10));
+        std::thread::sleep(Duration::from_millis(60));
+        assert_eq!(j.state(), State::Done(0), "the kill changed the outcome");
+        table().remove(j.id);
     }
 
     #[test]
