@@ -5,6 +5,12 @@
 //! parent shares its provider, so a child costs a thread and a socket from the
 //! same pool, not a second process.
 //!
+//! What a child may do is settled once, before it starts, and only ever
+//! narrows: `child_settings` cuts its tool list down to what the agent above
+//! it is offered and then takes more away again. Nothing is added while it
+//! runs, nobody is asked on its behalf, and no plugin hook runs for it — see
+//! `turn` for why that is the arrangement and what it costs.
+//!
 //! Nothing here polls. A caller waiting for one child blocks on that child's
 //! condition variable; a caller waiting for the first of several blocks on the
 //! table's, which every finish bumps. An idle child does not exist: a child is
@@ -669,6 +675,26 @@ fn turn(child: &Arc<Child>) -> State {
     if let Some(s) = spawner.as_ref() {
         install_tools(&mut registry, &l.settings, s.types());
     }
+    // A child runs with no plugin hooks at all, and that is deliberate rather
+    // than an oversight to be tidied up later.
+    //
+    // The plugin host is a single wasm interpreter owned by the loop that
+    // built it; a child is another thread running its own loop, and handing
+    // that thread the host would mean either serialising every child's tool
+    // call through one interpreter or running one interpreter per child. So a
+    // plugin's `before_tool` never sees a child's tool call: a policy plugin
+    // that refuses `rm -rf` in the conversation would not refuse it here.
+    //
+    // What keeps that from being a way round a policy is that a child cannot
+    // be handed a tool the agent above it has not got: `child_settings` cuts
+    // the child's tool list down to the tools the parent is itself offered, so
+    // an agent type cannot introduce a shell into a session that has none.
+    // What a plugin does not do for a child is look at the arguments of a call
+    // the parent could equally well have made itself — so a plugin that only
+    // narrows an allowed tool (refusing one command out of many) is narrower
+    // in the conversation than it is one level down. That is the cost of the
+    // arrangement, it is what the documentation says children get, and the
+    // place to change it is here.
     let mut hooks = NoHooks;
     let io = ChildIo(child.clone());
     let mut agent = Agent::new(
@@ -834,6 +860,22 @@ impl AgentSpawner {
 
     /// The working directory for a child: its own, but never outside the
     /// parent's.
+    ///
+    /// Read this for exactly what it says. It decides where the child starts
+    /// — where its relative paths are resolved from and where its commands
+    /// run — and a child cannot be started above the directory the agent
+    /// above it is working in. It is not a sandbox. `read_file`, `write_file`
+    /// and `edit_file` take an absolute path or a `~/` one and resolve it
+    /// against nothing (`crate::tools::resolve_path`), and `bash` runs a
+    /// command that can name any path on the machine or simply `cd` out. So a
+    /// child asked to work in `crates/ah-core` is pointed there, not confined
+    /// there.
+    ///
+    /// Making it a confinement means checking the resolved path against a root
+    /// inside the file tools themselves — the tools would have to carry the
+    /// root, not just the directory to resolve from — and doing it for `bash`
+    /// means something stronger than a check. Neither belongs here: this
+    /// function can only choose the directory it hands over.
     fn child_cwd(&self, asked: Option<&str>) -> Result<PathBuf, String> {
         let Some(rel) = asked.map(str::trim).filter(|s| !s.is_empty()) else {
             return Ok(self.cwd.clone());
@@ -1071,6 +1113,19 @@ pub fn child_settings(
     } else {
         def.tools.clone()
     };
+    // A child is offered no tool the agent above it is not offered.
+    //
+    // This list is a wish, not a grant. `agents.tools` and an agent type's
+    // `tools` are ordinary settings: the whole `agents` table is guarded, so a
+    // repository's `.ah/config.toml` and a plugin cannot write them, but the
+    // list still names tools rather than being derived from what the session
+    // actually has. Without this line a type could name `write_file` in a
+    // session run with `tools.disabled = ["write_file"]` and get it, because
+    // the child's registry is built from its own list. Children also run with
+    // no plugin hooks (see `turn`), so a child holding a tool the parent does
+    // not hold would be the one place in the program where widening happens on
+    // the way down. It does not: the tree narrows.
+    tools.retain(|t| parent_offers(parent, t));
     // The plan belongs to the session and a child has nobody to ask, so those
     // two are never a child's to call. Nor is starting agents past the limit.
     let mut barred = vec!["plan".to_string(), "ask_user".to_string()];
@@ -1102,11 +1157,20 @@ pub fn child_settings(
             crate::settings::take(&mut theirs, key);
         }
         merge_patch(&mut v, &theirs);
-        // And whatever it said about tools, the bars still hold: a child
-        // cannot be given back a tool the parent would have had to approve.
+        // And whatever it said about tools, the list settled above is put back
+        // over the top: a child cannot be given back a tool the parent would
+        // have had to approve, nor one the parent does not have at all.
         merge_patch(&mut v, &patch);
     }
     serde_json::from_value(v).map_err(|e| format!("agent type settings: {e}"))
+}
+
+/// Whether the agent doing the spawning is itself offered this tool. Read the
+/// same way the registry reads it, so that "the parent has it" means the same
+/// thing in both places.
+fn parent_offers(parent: &Settings, tool: &str) -> bool {
+    parent.tools.enabled.iter().any(|t| t == tool)
+        && !parent.tools.disabled.iter().any(|t| t == tool)
 }
 
 fn non_empty(s: &str) -> Option<String> {
@@ -1521,6 +1585,45 @@ mod tests {
         def.model = String::new();
         let child = child_settings(&value, &def, &parent.agents, &parent, 1, None).unwrap();
         assert_eq!(child.model.id, parent.model.id);
+    }
+
+    #[test]
+    fn a_child_is_offered_no_tool_the_session_itself_does_not_have() {
+        let mut parent = settings();
+        // Auto, so that this is about the parent's tool list rather than about
+        // the tools the user wanted to be asked about.
+        parent.permissions.mode = ah_abi::PermissionMode::Auto;
+        parent.tools.enabled = vec!["read_file".into(), "jobs".into()];
+        let value = serde_json::to_value(&parent).unwrap();
+        // `agents.tools` offers a shell; the session has none to give.
+        let child = child_settings(
+            &value,
+            &AgentDef::default(),
+            &parent.agents,
+            &parent,
+            1,
+            None,
+        )
+        .unwrap();
+        assert!(parent.agents.tools.contains(&"bash".to_string()));
+        assert_eq!(
+            child.tools.enabled,
+            vec!["read_file".to_string(), "jobs".to_string()]
+        );
+    }
+
+    #[test]
+    fn an_agent_type_cannot_hand_a_child_a_tool_the_session_turned_off() {
+        let mut parent = settings();
+        parent.permissions.mode = ah_abi::PermissionMode::Auto;
+        parent.tools.disabled = vec!["write_file".into(), "bash".into()];
+        let value = serde_json::to_value(&parent).unwrap();
+        let def = AgentDef {
+            tools: vec!["read_file".into(), "bash".into(), "write_file".into()],
+            ..Default::default()
+        };
+        let child = child_settings(&value, &def, &parent.agents, &parent, 1, None).unwrap();
+        assert_eq!(child.tools.enabled, vec!["read_file".to_string()]);
     }
 
     #[test]
