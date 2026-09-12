@@ -788,6 +788,11 @@ fn config(o: &Overrides, cmd: ConfigCmd) -> Result<(), AnyError> {
                     println!("#   {:?}", l.origin);
                 }
             }
+            // This is the command somebody runs to ask why a setting did
+            // nothing, so it is the one place the answer has to be.
+            for line in app::refusals(&stack) {
+                println!("# {line}");
+            }
             print!("{}", stack.to_toml());
             Ok(())
         }
