@@ -439,6 +439,16 @@ An agent type defined in a project (`agents.defs.*`) is treated the same way:
 it may choose a model and a prompt, and may not hand its children a shell or
 turn the asking off.
 
+With no home directory to be found — no `$HOME`, no passwd entry, which is how
+a good many containers are run — there is nowhere of your own for `ah` to keep
+anything, and it falls back to `.ah` in the working directory for both the
+config and the data directory. The same file is then the user config file and
+the project's, so nothing found there is treated as your own word and the
+guarded keys above are refused from it. Set `AH_CONFIG_DIR` and
+`AH_DATA_DIR` to a directory of your own to get the user layer back. A config
+directory pointed at the project's `.ah` (`AH_CONFIG_DIR=.ah`) is read the same
+way, for the same reason.
+
 `deny` rules apply to the `bash` tool only. The command is split into
 segments on `;`, `|`, `&`, `&&`, `||`, newlines and the brackets a subshell or
 a group is written with; a leading `sudo`, `env`, `nohup`, `time`, `command`,
@@ -460,16 +470,6 @@ Adding a rule is what people do to this setting, so naming one **adds** it:
 
 ```toml
 [permissions]
-With no home directory to be found — no `$HOME`, no passwd entry, which is how
-a good many containers are run — there is nowhere of your own for `ah` to keep
-anything, and it falls back to `.ah` in the working directory for both the
-config and the data directory. The same file is then the user config file and
-the project's, so nothing found there is treated as your own word and the
-guarded keys above are refused from it. Set `AH_CONFIG_DIR` and
-`AH_DATA_DIR` to a directory of your own to get the user layer back. A config
-directory pointed at the project's `.ah` (`AH_CONFIG_DIR=.ah`) is read the same
-way, for the same reason.
-
 deny_extra = ["curl", "npm publish"]   # added to the built-ins
 deny_remove = ["git push --force"]     # dropped by exact text
 deny = ["curl"]                        # also adds; see deny_replace
