@@ -1,6 +1,6 @@
 //! OpenRouter (OpenAI-compatible) chat completions over SSE using `ureq`.
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -424,6 +424,42 @@ fn drive(
     }
 }
 
+/// Most of a body that will be read before the turn is given up on. A long
+/// answer with its reasoning is a few megabytes of event stream, so this is
+/// far more room than any model needs; what it is for is the peer that never
+/// stops sending, which without a ceiling is read until the machine gives out.
+const MAX_BODY_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Longest one line of the event stream may be. The largest honest line is a
+/// `data:` frame carrying a whole tool call, which is tens of kilobytes; a
+/// picture comes back on the images route rather than this one. A line has to
+/// be held whole before it can be read, so without a bound a peer that sends
+/// bytes and never a newline grows one string until the allocator gives up —
+/// and a refused allocation ends the process, not merely the turn.
+const MAX_LINE_BYTES: u64 = 4 * 1024 * 1024;
+
+/// One line of the event stream, or the end of it.
+///
+/// The read goes through a `take`, so the line stops growing at the bound
+/// instead of wherever the peer decides. A line that reaches it without a
+/// newline is not resumed on the next call: the turn fails there, because a
+/// line that long is a peer that has stopped speaking the protocol.
+fn read_piece<R: BufRead>(br: &mut R, line: &mut String) -> Result<Piece> {
+    line.clear();
+    let n = br.take(MAX_LINE_BYTES).read_line(line)? as u64;
+    if n == 0 {
+        return Ok(Piece::End);
+    }
+    if n >= MAX_LINE_BYTES && !line.ends_with('\n') {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("the answer had a line longer than {MAX_LINE_BYTES} bytes"),
+        )
+        .into());
+    }
+    Ok(Piece::Line(line.clone()))
+}
+
 /// Drive an SSE byte stream to completion. Reads block, so this is for
 /// sources that cannot stall: fixtures and tests.
 #[cfg(test)]
@@ -434,13 +470,7 @@ fn read_stream<R: std::io::Read>(
 ) -> Result<()> {
     let mut br = BufReader::with_capacity(16 * 1024, reader);
     let mut line = String::with_capacity(1024);
-    drive(cancel, on_event, move || {
-        line.clear();
-        Ok(match br.read_line(&mut line)? {
-            0 => Piece::End,
-            _ => Piece::Line(line.clone()),
-        })
-    })
+    drive(cancel, on_event, move || read_piece(&mut br, &mut line))
 }
 
 /// How long a read waits before the cancel flag is looked at again.
@@ -508,16 +538,15 @@ impl Provider for OpenRouter {
                     }));
                     return;
                 }
-                let reader = resp.body_mut().with_config().limit(u64::MAX).reader();
+                // A ceiling of its own. ureq's default is sized for a body
+                // read into a string and is far too small for a streamed
+                // answer, but `u64::MAX` is not a limit at all: a peer that
+                // keeps talking would be read for as long as it cared to.
+                let reader = resp.body_mut().with_config().limit(MAX_BODY_BYTES).reader();
                 let mut br = BufReader::with_capacity(16 * 1024, reader);
                 let mut line = String::with_capacity(1024);
                 loop {
-                    line.clear();
-                    let chunk = match br.read_line(&mut line) {
-                        Ok(0) => Ok(Piece::End),
-                        Ok(_) => Ok(Piece::Line(line.clone())),
-                        Err(e) => Err(e.into()),
-                    };
+                    let chunk = read_piece(&mut br, &mut line);
                     let end = !matches!(chunk, Ok(Piece::Line(_)));
                     // A receiver that has gone away means the turn was
                     // cancelled; dropping the response closes the socket.
@@ -1007,6 +1036,30 @@ mod tests {
         let err = read_stream(s.as_bytes(), &cancel, &mut |_| true).unwrap_err();
         assert!(matches!(err, Error::Api { .. }), "{err}");
         assert!(err.to_string().contains("rate limited"));
+    }
+
+    /// A peer that sends bytes and never a newline used to be read into a
+    /// string that grew until the allocator refused, which ends the process
+    /// rather than the turn.
+    #[test]
+    fn a_line_that_never_ends_fails_the_turn() {
+        let cancel = AtomicBool::new(false);
+        let err = read_stream(std::io::repeat(b'A'), &cancel, &mut |_| true).unwrap_err();
+        assert!(matches!(err, Error::Io(_)), "{err}");
+        assert!(err.to_string().contains("longer than"), "{err}");
+    }
+
+    /// And a line that ends on the last byte the bound allows is still a
+    /// line, not a failure: the bound is on what is held, not on the answer.
+    #[test]
+    fn a_line_that_ends_exactly_at_the_bound_is_read() {
+        let cancel = AtomicBool::new(false);
+        // An event-stream comment, so the long line is read and then ignored.
+        let mut body = ": ".to_string();
+        body.push_str(&"A".repeat(MAX_LINE_BYTES as usize - 3));
+        body.push('\n');
+        assert_eq!(body.len(), MAX_LINE_BYTES as usize);
+        read_stream(body.as_bytes(), &cancel, &mut |_| true).unwrap();
     }
 
     #[test]
