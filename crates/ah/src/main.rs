@@ -184,6 +184,10 @@ pub enum RemoteCmd {
         /// Carry on in the background and give the terminal back.
         #[arg(long)]
         detach: bool,
+        /// Let sessions a phone drives run `sudo`. The password is asked for
+        /// once, here, and kept fresh, so none is asked for later.
+        #[arg(long)]
+        sudo: bool,
     },
     /// Whether this machine is paired, and to what.
     Status,

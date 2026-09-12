@@ -52,6 +52,10 @@ pub struct Machine {
     /// repository cannot reach.
     roots: Vec<PathBuf>,
     trusted: bool,
+    /// Whether a session started here may become another user. Off, `sudo` is
+    /// refused before it runs rather than left waiting on a prompt nobody will
+    /// ever type into.
+    allow_sudo: bool,
     max_sessions: usize,
     /// Events from every engine, tagged with the session they came from.
     events: Sender<(String, UiEvent)>,
@@ -93,6 +97,18 @@ impl Machine {
                 .push(
                     Origin::Runtime("remote".into()),
                     serde_json::json!({"permissions": {"mode": "ask"}}),
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        // A password prompt from here would go to whatever terminal started
+        // this process, which is a terminal nobody is reading — so the command
+        // would not fail, it would wait, and the phone would see nothing at all
+        // until the tool timed out.
+        if !self.allow_sudo {
+            stack
+                .push(
+                    Origin::Runtime("remote".into()),
+                    serde_json::json!({"permissions": {"allow_sudo": false}}),
                 )
                 .map_err(|e| e.to_string())?;
         }
@@ -366,14 +382,32 @@ fn trusted(stack: &SettingsStack) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether the config already said phone-driven sessions may use `sudo`, read
+/// from the same trusted places as `roots`: a cloned repository has no business
+/// deciding that an agent it configures may become root.
+fn sudo_allowed(stack: &SettingsStack) -> bool {
+    let user = ah_core::paths::user_config_file();
+    stack
+        .layers()
+        .iter()
+        .filter(|l| {
+            matches!(l.origin, Origin::Defaults | Origin::Cli)
+                || matches!(&l.origin, Origin::File(p) if *p == user)
+        })
+        .filter_map(|l| l.patch.pointer("/remote/allow_sudo").cloned())
+        .filter_map(|v| v.as_bool())
+        .next_back()
+        .unwrap_or(false)
+}
+
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Run until told to stop.
-pub fn serve(o: &Overrides, detach: bool) -> Result<(), AnyError> {
+pub fn serve(o: &Overrides, detach: bool, sudo: bool) -> Result<(), AnyError> {
     if detach {
-        return relaunch(o);
+        return relaunch(o, sudo);
     }
     // So the machine can say which of the two is publishing.
     // SAFETY: set before any thread that reads it exists.
@@ -385,11 +419,25 @@ pub fn serve(o: &Overrides, detach: bool) -> Result<(), AnyError> {
         return Err("not paired. `ah remote pair --url <relay>` sets one up.".into());
     }
 
+    // Asked before anything is published, because the answer changes what a
+    // phone is able to make this machine do, and because the asking needs the
+    // terminal that is about to be handed over to the daemon's own output.
+    let wanted = sudo || sudo_allowed(&stack) || super::sudo::ask();
+    let allow_sudo = wanted
+        && match super::sudo::cache() {
+            Ok(()) => true,
+            Err(why) => {
+                println!("sudo stays refused: {why}");
+                false
+            }
+        };
+
     let (events_tx, events_rx) = mpsc::channel();
     let machine = Arc::new(Machine {
         running: Mutex::new(HashMap::new()),
         roots: roots(&stack),
         trusted: trusted(&stack),
+        allow_sudo,
         max_sessions: settings.remote.max_sessions.max(1),
         events: events_tx,
     });
@@ -406,9 +454,20 @@ pub fn serve(o: &Overrides, detach: bool) -> Result<(), AnyError> {
             "are asked about"
         }
     );
+    println!(
+        "  sudo {}",
+        if machine.allow_sudo {
+            "is allowed, and its password is held for as long as this runs"
+        } else {
+            "is refused, rather than left waiting on a prompt nobody would see"
+        }
+    );
 
     let cancel = Arc::new(AtomicBool::new(false));
     crate::cli::install_ctrlc(cancel.clone());
+    let refresher = machine
+        .allow_sudo
+        .then(|| super::sudo::keep_fresh(cancel.clone()));
 
     let (notes_tx, notes_rx) = mpsc::channel();
     std::thread::Builder::new()
@@ -497,6 +556,9 @@ pub fn serve(o: &Overrides, detach: bool) -> Result<(), AnyError> {
 
     println!("stopping");
     drop(publisher);
+    if let Some(refresher) = refresher {
+        let _ = refresher.join();
+    }
     ah_core::agents::table().shutdown(Duration::from_secs(2));
     ah_core::jobs::table().shutdown(Duration::from_millis(500));
     Ok(())
@@ -508,7 +570,7 @@ pub fn serve(o: &Overrides, detach: bool) -> Result<(), AnyError> {
 /// own, which is what makes it survive the terminal that started it, and it
 /// needs none of the FFI a fork would.
 #[cfg(unix)]
-fn relaunch(o: &Overrides) -> Result<(), AnyError> {
+fn relaunch(o: &Overrides, sudo: bool) -> Result<(), AnyError> {
     use std::os::unix::process::CommandExt;
     let log = ah_core::paths::data_dir().join("remote.log");
     if let Some(dir) = log.parent() {
@@ -520,6 +582,9 @@ fn relaunch(o: &Overrides) -> Result<(), AnyError> {
         .open(&log)?;
     let mut command = std::process::Command::new(std::env::current_exe()?);
     command.args(["remote", "serve"]);
+    if sudo {
+        command.arg("--sudo");
+    }
     if let Some(cwd) = &o.cwd {
         command.arg("--cwd").arg(cwd);
     }
@@ -535,7 +600,7 @@ fn relaunch(o: &Overrides) -> Result<(), AnyError> {
 }
 
 #[cfg(not(unix))]
-fn relaunch(_o: &Overrides) -> Result<(), AnyError> {
+fn relaunch(_o: &Overrides, _sudo: bool) -> Result<(), AnyError> {
     Err("running in the background needs a unix host; `ah remote serve` works everywhere".into())
 }
 
@@ -549,6 +614,7 @@ mod tests {
             running: Mutex::new(HashMap::new()),
             roots,
             trusted: false,
+            allow_sudo: false,
             max_sessions: 4,
             events,
         }
@@ -590,6 +656,26 @@ mod tests {
             vec![PathBuf::from("/")],
             "a repository chose where a phone may run an agent"
         );
+    }
+
+    #[test]
+    fn sudo_is_not_taken_from_a_project_file_either() {
+        let _env = crate::remote::env_guard();
+        let mut stack = SettingsStack::new();
+        stack
+            .push(
+                Origin::File("/somebody/elses/repo/.ah/config.toml".into()),
+                serde_json::json!({"remote": {"allow_sudo": true}}),
+            )
+            .unwrap();
+        assert!(!sudo_allowed(&stack), "a repository handed out root");
+        let mut mine = SettingsStack::new();
+        mine.push(
+            Origin::Cli,
+            serde_json::json!({"remote": {"allow_sudo": true}}),
+        )
+        .unwrap();
+        assert!(sudo_allowed(&mine));
     }
 
     #[test]

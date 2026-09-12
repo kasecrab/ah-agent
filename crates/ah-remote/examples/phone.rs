@@ -342,6 +342,13 @@ fn print_event(ev: &serde_json::Value) {
                 .and_then(|v| v.as_str())
                 .unwrap_or("tool")
         ),
+        "tool_denied" => println!(
+            "\n[{} refused: {}]",
+            ev.pointer("/call/function/name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("tool"),
+            ev.get("reason").and_then(|v| v.as_str()).unwrap_or("")
+        ),
         "turn_end" => println!("\n— done"),
         "error" => println!(
             "\n! {}",

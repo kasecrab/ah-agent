@@ -9,7 +9,7 @@ use crate::app::AnyError;
 pub fn subcommand(cmd: RemoteCmd, o: &crate::Overrides) -> Result<(), AnyError> {
     match cmd {
         RemoteCmd::Pair { url } => pair(url),
-        RemoteCmd::Serve { detach } => crate::remote::daemon::serve(o, detach),
+        RemoteCmd::Serve { detach, sudo } => crate::remote::daemon::serve(o, detach, sudo),
         RemoteCmd::Status => status(),
         RemoteCmd::Forget => forget(),
     }

@@ -75,6 +75,7 @@ the second.
 ```
 ah remote serve             # publishes until stopped
 ah remote serve --detach    # carries on in the background
+ah remote serve --sudo      # and may run sudo, asking for the password now
 ```
 
 A window publishes the one session it has. The daemon publishes the machine:
@@ -82,14 +83,42 @@ a phone can list what is on disk, bring one back, or start a new one. Each
 session gets an engine of its own, with settings read from the directory it
 runs in rather than from wherever the daemon happens to be standing.
 
-Two things it does that a window does not, because nobody is watching it:
+Three things it does that a window does not, because nobody is watching it:
 
 - **Sessions it starts ask before running tools**, however this machine is
   otherwise configured. `remote.trust_paired_device = true` turns that off.
 - **It will only start a session where you said it may.** `remote.roots`
-  lists those directories and defaults to your home directory. Both settings
-  are read from the environment or your own config and nowhere else — a
-  repository you cloned cannot widen either by being cloned.
+  lists those directories and defaults to your home directory.
+- **They may not run `sudo`.** See below. All three settings are read from the
+  environment or your own config and nowhere else — a repository you cloned
+  cannot widen any of them by being cloned.
+
+### sudo
+
+`sudo` reads a password from the terminal its command was started from. For a
+session the daemon started, that terminal is the one the daemon was launched
+in, which nobody is reading — so a command needing a password does not fail,
+it waits, and the phone is shown nothing until the tool gives up. So a session
+driven from a phone is refused `sudo`, `doas`, `pkexec` and `su` before they
+run, with a tool error saying why.
+
+`ah remote serve --sudo` allows them instead. It asks for your password once,
+when it starts, and refreshes that every minute for as long as it serves, so
+no later command ever has a prompt to wait on. Started without the flag in a
+terminal, it asks the question; started from `systemd` or with `--detach`, it
+does not, and `remote.allow_sudo = true` is how you say yes there — though
+with `--detach` the password cannot be asked for at all, since there is no
+terminal left to ask at, and it stays refused with a line saying so.
+
+Be clear about what allowing it means: for as long as the daemon serves,
+anything a paired phone starts can become root without anybody being asked
+again. It is off unless you ask for it, and it lasts only as long as that
+`ah remote serve` does.
+
+The check reads the command without running a shell, so it is a guard against
+the ordinary case rather than a sandbox — `sh -c` with the name in a string
+gets past it. It is there to turn a silent hang into a clear refusal, not to
+contain a program that is trying to get around it.
 
 Only one of them publishes at a time. Opening a window takes the pairing from
 the daemon, which stands down within a few seconds and picks it up again when
@@ -125,6 +154,7 @@ readable either way.
 | `roots` | `[]` | directories `ah remote serve` may start a session in; empty means `$HOME` |
 | `trust_paired_device` | `false` | let sessions the daemon starts run tools without asking |
 | `max_sessions` | `4` | sessions the daemon holds open at once |
+| `allow_sudo` | `false` | let sessions the daemon starts run `sudo`, with the password asked for once at startup |
 
 ## Files and variables
 

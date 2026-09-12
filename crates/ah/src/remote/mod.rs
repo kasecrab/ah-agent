@@ -9,6 +9,7 @@ pub mod daemon;
 pub mod lock;
 pub mod publisher;
 pub mod sessions;
+pub mod sudo;
 pub mod window;
 
 /// The environment belongs to the process, and cargo runs these tests side by
