@@ -143,10 +143,17 @@ pub struct BeforeToolIn {
     pub cwd: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+/// What a `before_tool` hook says about a call.
+///
+/// No `Default`, deliberately. A default would be the answer a hook gives when
+/// it says nothing, and the only safe answer to "may this run?" from a policy
+/// that did not answer is no — but a `Default` of `Deny` would then be what
+/// every unrelated `..Default::default()` produced. Nothing gets to leave this
+/// unsaid: the host reads a missing or misspelled `decision` as a hook that
+/// failed, and a failed policy hook refuses.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "decision")]
 pub enum ToolDecision {
-    #[default]
     Allow,
     Deny {
         reason: String,
@@ -161,11 +168,11 @@ pub enum ToolDecision {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-#[serde(default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BeforeToolOut {
     #[serde(flatten)]
     pub decision: ToolDecision,
+    #[serde(default)]
     pub settings_patch: Option<Value>,
 }
 

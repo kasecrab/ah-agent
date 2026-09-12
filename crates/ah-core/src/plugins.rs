@@ -431,7 +431,7 @@ impl PluginHost {
             cwd: cwd.into(),
         };
         for p in &mut self.plugins {
-            if let Some(r) = p.call_typed::<_, OnLoadOut>(Hook::OnLoad, &input)
+            if let Some(r) = p.call_typed::<_, OnLoadOut>(Hook::OnLoad, &input).ok()
                 && let Some(v) = r.settings_patch
             {
                 out.push((p.manifest.name.clone(), v));
@@ -448,7 +448,10 @@ impl PluginHost {
         let mut out: Option<StatuslineOut> = None;
         let mut ctx = ctx.clone();
         for p in &mut self.plugins {
-            if let Some(mut r) = p.call_typed::<_, StatuslineOut>(Hook::Statusline, &ctx) {
+            if let Some(mut r) = p
+                .call_typed::<_, StatuslineOut>(Hook::Statusline, &ctx)
+                .ok()
+            {
                 if !r.spans.is_empty() {
                     r.text = r.spans.iter().map(|s| s.text.as_str()).collect();
                 }
@@ -462,7 +465,10 @@ impl PluginHost {
     pub fn keybinds(&mut self) -> Vec<(String, String)> {
         let mut out = Vec::new();
         for p in &mut self.plugins {
-            if let Some(r) = p.call_typed::<_, KeybindsOut>(Hook::Keybinds, &Value::Null) {
+            if let Some(r) = p
+                .call_typed::<_, KeybindsOut>(Hook::Keybinds, &Value::Null)
+                .ok()
+            {
                 out.extend(r.binds);
             }
         }
@@ -499,7 +505,9 @@ impl PluginHost {
             cwd: cwd.into(),
             stage,
         };
-        let r = self.plugins[idx].call_typed::<_, SlashCommandOut>(Hook::SlashCommand, &input);
+        let r = self.plugins[idx]
+            .call_typed::<_, SlashCommandOut>(Hook::SlashCommand, &input)
+            .ok();
         self.drain_logs();
         r
     }
@@ -562,23 +570,28 @@ impl Plugin {
         Ok(buf)
     }
 
-    /// Typed call. A hook that traps is disabled for the rest of the session.
+    /// Typed call. A hook that traps is disabled for the rest of the session,
+    /// unless it is one whose silence would be an answer — see `fail`.
     pub fn call_typed<I: Serialize, O: DeserializeOwned>(
         &mut self,
         hook: Hook,
         input: &I,
-    ) -> Option<O> {
+    ) -> Called<O> {
         if !self.hooks.contains(&hook) || self.disabled_hooks.contains(&hook) {
-            return None;
+            return Called::Nothing;
         }
-        let bytes = serde_json::to_vec(input).ok()?;
+        let bytes = match serde_json::to_vec(input) {
+            Ok(b) => b,
+            Err(e) => return Called::Failed(format!("input json: {e}")),
+        };
         match self.call_raw(hook, &bytes) {
             Ok(out) => {
                 let v: Value = match serde_json::from_slice(&out) {
                     Ok(v) => v,
                     Err(e) => {
-                        self.fail(hook, format!("bad json from {}: {e}", hook.as_str()));
-                        return None;
+                        let why = format!("bad json from {}: {e}", hook.as_str());
+                        self.fail(hook, why.clone());
+                        return Called::Failed(why);
                     }
                 };
                 if let Some(err) = v.get("err").and_then(Value::as_str) {
@@ -586,42 +599,76 @@ impl Plugin {
                         .data_mut()
                         .log
                         .push((LogLevel::Error, format!("{}: {err}", hook.as_str())));
-                    return None;
+                    return Called::Failed(err.to_string());
                 }
                 let ok = v.get("ok").cloned().unwrap_or(Value::Null);
                 // `null` is the documented "no change" answer.
                 if ok.is_null() {
-                    return None;
+                    return Called::Nothing;
                 }
                 match serde_json::from_value::<O>(ok) {
-                    Ok(o) => Some(o),
+                    Ok(o) => Called::Answered(o),
                     Err(e) => {
-                        self.fail(
-                            hook,
-                            format!("unexpected shape from {}: {e}", hook.as_str()),
-                        );
-                        None
+                        let why = format!("unexpected shape from {}: {e}", hook.as_str());
+                        self.fail(hook, why.clone());
+                        Called::Failed(why)
                     }
                 }
             }
             Err(e) => {
-                self.fail(hook, e.to_string());
-                None
+                let why = e.to_string();
+                self.fail(hook, why.clone());
+                Called::Failed(why)
             }
         }
     }
 
     fn fail(&mut self, hook: Hook, msg: String) {
+        // A hook whose job is to say no is not switched off when it breaks.
+        // Turning `before_tool` off would turn a policy into a no-op for the
+        // rest of the session, and the way to reach that state is to send it
+        // one command it cannot handle — which is the command you would want
+        // it switched off for. It stays on, and every call it fails is a
+        // refusal (see `Plugins::before_tool`).
+        let policy = matches!(hook, Hook::BeforeTool);
+        let what = if policy { "failed" } else { "disabled" };
         crate::error!(
-            "plugin {} hook {} disabled: {msg}",
+            "plugin {} hook {} {what}: {msg}",
             self.manifest.name,
             hook.as_str()
         );
         self.store.data_mut().log.push((
             LogLevel::Error,
-            format!("hook {} disabled: {msg}", hook.as_str()),
+            format!("hook {} {what}: {msg}", hook.as_str()),
         ));
-        self.disabled_hooks.insert(hook);
+        if !policy {
+            self.disabled_hooks.insert(hook);
+        }
+    }
+}
+
+/// What a hook call came back with.
+pub enum Called<O> {
+    /// The hook answered.
+    Answered(O),
+    /// Nothing to do: the plugin does not handle this hook, or answered with
+    /// the documented `null` for "no change".
+    Nothing,
+    /// The hook was called and did not come back with an answer this host can
+    /// use — a trap, out of fuel, an `Err`, or a shape that is not the one the
+    /// hook returns. What that means is the caller's to decide, and for a hook
+    /// that decides whether something runs it means no.
+    Failed(String),
+}
+
+impl<O> Called<O> {
+    /// The answer, if there was one. For every hook but the policy one, a
+    /// failure and a "no change" mean the same thing to the caller.
+    pub fn ok(self) -> Option<O> {
+        match self {
+            Called::Answered(o) => Some(o),
+            Called::Nothing | Called::Failed(_) => None,
+        }
     }
 }
 
@@ -708,6 +755,34 @@ fn host_call(st: &mut State, name: &str, input: &[u8]) -> std::result::Result<Ve
             let text = std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?;
             Value::String(text)
         }
+        // The same reading of a shell command the harness itself uses, so a
+        // policy plugin matches on what the command *is* rather than on what
+        // its text happens to contain. Without this every plugin writes its own
+        // `cmd.contains(pattern)`, which refuses prose in a commit message and
+        // lets `rm -fr /` past.
+        "command_segments" => Value::from(crate::policy::segments(
+            arg.as_str().ok_or("command_segments needs a command")?,
+        )),
+        "command_matches" => {
+            let cmd = arg
+                .get("command")
+                .and_then(Value::as_str)
+                .ok_or("command_matches needs a command")?;
+            let rules: Vec<String> = arg
+                .get("rules")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str())
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default();
+            match crate::policy::denied(cmd, &rules) {
+                Some(rule) => Value::String(rule.to_string()),
+                None => Value::Null,
+            }
+        }
         "git_branch" => Value::String(git_branch(Path::new(&st.cwd))),
         other => return Err(format!("unknown host call `{other}`")),
     };
@@ -735,7 +810,10 @@ impl Hooks for PluginHost {
     fn system_prompt(&mut self, input: SystemPromptIn) -> String {
         let mut cur = input;
         for p in &mut self.plugins {
-            if let Some(r) = p.call_typed::<_, SystemPromptOut>(Hook::SystemPrompt, &cur) {
+            if let Some(r) = p
+                .call_typed::<_, SystemPromptOut>(Hook::SystemPrompt, &cur)
+                .ok()
+            {
                 cur.prompt = r.prompt;
             }
         }
@@ -745,7 +823,10 @@ impl Hooks for PluginHost {
     fn before_request(&mut self, req: ChatRequest, turn: u32) -> ChatRequest {
         let mut cur = BeforeRequestIn { request: req, turn };
         for p in &mut self.plugins {
-            if let Some(r) = p.call_typed::<_, BeforeRequestOut>(Hook::BeforeRequest, &cur) {
+            if let Some(r) = p
+                .call_typed::<_, BeforeRequestOut>(Hook::BeforeRequest, &cur)
+                .ok()
+            {
                 cur.request = r.request;
             }
         }
@@ -760,11 +841,25 @@ impl Hooks for PluginHost {
         let mut decision = ToolDecision::Allow;
         let mut patches = Vec::new();
         for p in &mut self.plugins {
-            let Some(r) = p.call_typed::<_, BeforeToolOut>(Hook::BeforeTool, &input) else {
-                continue;
+            let name = p.manifest.name.clone();
+            let r = match p.call_typed::<_, BeforeToolOut>(Hook::BeforeTool, &input) {
+                Called::Answered(r) => r,
+                Called::Nothing => continue,
+                // A policy that could not answer has not allowed anything. The
+                // way to make a plugin fail is to send it something it cannot
+                // handle, so treating a failure as an allow would mean the one
+                // command a policy chokes on is the one command it lets past.
+                Called::Failed(why) => {
+                    return (
+                        ToolDecision::Deny {
+                            reason: format!("the {name} plugin could not decide: {why}"),
+                        },
+                        patches,
+                    );
+                }
             };
             if let Some(v) = r.settings_patch {
-                patches.push((p.manifest.name.clone(), v));
+                patches.push((name, v));
             }
             match r.decision {
                 ToolDecision::Allow => {}
@@ -796,7 +891,10 @@ impl Hooks for PluginHost {
         };
         let mut patches = Vec::new();
         for p in &mut self.plugins {
-            let Some(r) = p.call_typed::<_, AfterToolOut>(Hook::AfterTool, &input) else {
+            let Some(r) = p
+                .call_typed::<_, AfterToolOut>(Hook::AfterTool, &input)
+                .ok()
+            else {
                 continue;
             };
             if let Some(v) = r.settings_patch {
@@ -820,7 +918,7 @@ impl Hooks for PluginHost {
         };
         let p = &mut self.plugins[idx];
         Some(
-            match p.call_typed::<_, ToolCallOut>(Hook::ToolCall, &input) {
+            match p.call_typed::<_, ToolCallOut>(Hook::ToolCall, &input).ok() {
                 Some(r) => r.result,
                 None => ToolResult::err(format!(
                     "plugin {} failed to run tool {}",
@@ -841,7 +939,10 @@ impl Hooks for PluginHost {
         let mut patches = Vec::new();
         let mut notices = Vec::new();
         for p in &mut self.plugins {
-            if let Some(r) = p.call_typed::<_, OnTurnEndOut>(Hook::OnTurnEnd, &input) {
+            if let Some(r) = p
+                .call_typed::<_, OnTurnEndOut>(Hook::OnTurnEnd, &input)
+                .ok()
+            {
                 if let Some(v) = r.settings_patch {
                     patches.push((p.manifest.name.clone(), v));
                 }

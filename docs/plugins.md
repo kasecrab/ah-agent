@@ -174,10 +174,33 @@ ah plugin rm hello
 The SDK prelude re-exports every `ah_abi` type (`Manifest`, `Hook`,
 `ToolSpec`, the `*In`/`*Out` payload structs, `Settings`, `Message`,
 `ToolCall`, `ToolResult`), `serde_json` with `json!` and `Value`, and the
-host helpers `settings_get`, `kv_get`, `kv_set`, `host_call` and the `log!`
-macro. Returning `Value::Null` from a hook means "no change". Returning
-`Err(String)` logs the error and is treated as no change; a panic traps and
-disables that hook.
+host helpers `settings_get`, `kv_get`, `kv_set`, `command_segments`,
+`command_matches`, `host_call` and the `log!` macro. Returning `Value::Null`
+from a hook means "no change". Returning `Err(String)` logs the error and is
+treated as no change; a panic traps and disables that hook.
+
+`before_tool` is the exception, because for that hook silence is an answer.
+An `Err`, a trap, running out of fuel, or an output the host cannot read into
+`BeforeToolOut` — a missing or misspelled `decision`, an empty object — is
+treated as **deny**, with the plugin named in the reason, and the hook is *not*
+disabled for the session. Otherwise the way to switch a policy off would be to
+send it one command it cannot handle, which is the command you would most want
+it kept on for. `decision` is required: there is no default.
+
+### Reading a shell command
+
+`command_segments(cmd)` and `command_matches(cmd, rules)` hand a plugin the
+harness's own reading of a command — split on `;`, `|`, `&` and newlines,
+whitespace-normalised, with a leading `sudo`, `env`, `nohup`, `time` or
+`VAR=value` dropped — and the same rule syntax `permissions.deny` uses: a rule
+matches a segment that equals it or starts with it followed by a space, and a
+trailing `*` matches any continuation.
+
+Use these rather than `cmd.contains(pattern)`. A substring match over the raw
+text refuses `git commit -m "the rm -rf / case"` and lets `rm -fr /` past; it
+matches spelling, not meaning. Neither reading can see through a shell: what
+`sh -c "$(…)"` or a script written and then run will do is not in the text at
+all, so a policy should ask about those rather than guess.
 
 Any language that can produce a core wasm module works. The module must
 export `ah_alloc(len) -> ptr`, `ah_free(ptr, len)`, `ah_manifest() -> i64` and

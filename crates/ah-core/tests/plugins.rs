@@ -111,7 +111,7 @@ fn guard_denies_and_asks() {
     stack
         .push(
             Origin::Cli,
-            serde_json::json!({"guard": {"deny": ["| sh"]}}),
+            serde_json::json!({"guard": {"deny": ["curl *"]}}),
         )
         .unwrap();
     let Some(mut host) = host_with(&mut stack, &["guard"]) else {
@@ -139,7 +139,90 @@ fn guard_denies_and_asks() {
     let out = host
         .slash_command("guard", "", ".", SlashStage::Run)
         .expect("command handled");
-    assert!(out.message.unwrap().contains("| sh"));
+    assert!(out.message.unwrap().contains("curl *"));
+}
+
+#[test]
+fn guard_reads_the_command_rather_than_its_spelling() {
+    let mut stack = SettingsStack::new();
+    let Some(mut host) = host_with(&mut stack, &["guard"]) else {
+        return;
+    };
+    let judge = |host: &mut ah_core::plugins::PluginHost, cmd: &str| {
+        let args = serde_json::json!({"command": cmd}).to_string();
+        host.before_tool(&ToolCall::new("1", "bash", &args), ".").0
+    };
+
+    // Spellings the old substring list missed.
+    for cmd in [
+        "rm -fr /",
+        "rm -r -f /",
+        "rm --recursive --force /",
+        "rm -rf ~/projects",
+        "dd of=/dev/sda if=/dev/zero",
+        "cat img.iso > /dev/sda",
+    ] {
+        let d = judge(&mut host, cmd);
+        assert!(matches!(d, ToolDecision::Deny { .. }), "{cmd}: {d:?}");
+    }
+
+    // Prose that only mentions one. A policy that refuses these trains the
+    // person to stop reading what it says.
+    for cmd in [
+        r#"git commit -m "guard the rm -rf / case""#,
+        r#"grep -rn "dd if=" docs/"#,
+        "man mkfs",
+        "echo never run rm -rf /",
+    ] {
+        let d = judge(&mut host, cmd);
+        assert!(matches!(d, ToolDecision::Allow), "{cmd}: {d:?}");
+    }
+
+    // A command whose text is not the command that runs is a question, not a
+    // guess either way.
+    for cmd in [
+        "sh -c \"$(echo bHM= | base64 -d)\"",
+        "eval $CMD",
+        "python -c 'import shutil'",
+    ] {
+        let d = judge(&mut host, cmd);
+        assert!(matches!(d, ToolDecision::Ask { .. }), "{cmd}: {d:?}");
+    }
+}
+
+#[test]
+fn guard_asks_before_a_write_that_decides_what_runs_next() {
+    let mut stack = SettingsStack::new();
+    let Some(mut host) = host_with(&mut stack, &["guard"]) else {
+        return;
+    };
+    let (d, _) = host.before_tool(
+        &ToolCall::new("1", "write_file", r#"{"path":"~/.bashrc","content":"x"}"#),
+        ".",
+    );
+    assert!(matches!(d, ToolDecision::Ask { .. }), "{d:?}");
+    let (d, _) = host.before_tool(
+        &ToolCall::new("2", "write_file", r#"{"path":".git/hooks/pre-commit"}"#),
+        ".",
+    );
+    assert!(matches!(d, ToolDecision::Ask { .. }), "{d:?}");
+    let (d, _) = host.before_tool(
+        &ToolCall::new("3", "write_file", r#"{"path":"src/main.rs"}"#),
+        ".",
+    );
+    assert!(matches!(d, ToolDecision::Allow), "{d:?}");
+}
+
+#[test]
+fn a_bash_call_the_policy_cannot_read_is_not_a_free_pass() {
+    let mut stack = SettingsStack::new();
+    let Some(mut host) = host_with(&mut stack, &["guard"]) else {
+        return;
+    };
+    // No `command` key at all: nothing for a rule to match, which under a
+    // policy that answers "allow" when it finds no match would run.
+    let (d, _) = host.before_tool(&ToolCall::new("1", "bash", r#"{"cmd":"rm -rf /"}"#), ".");
+    assert!(matches!(d, ToolDecision::Ask { .. }), "{d:?}");
 }
 
 #[test]

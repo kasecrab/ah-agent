@@ -4,7 +4,7 @@
 //! rule ending in `*` matches any continuation.
 
 /// Segments of `command`, whitespace-normalised, `sudo`/`env` prefixes dropped.
-fn segments(command: &str) -> Vec<String> {
+pub fn segments(command: &str) -> Vec<String> {
     command
         .split(['\n', ';', '|', '&'])
         .map(|s| {

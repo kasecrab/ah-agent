@@ -27,7 +27,9 @@ pub use ah_abi;
 pub use serde_json;
 
 pub mod prelude {
-    pub use crate::{LogLevel, host_call, kv_get, kv_set, log, settings_get};
+    pub use crate::{
+        LogLevel, command_matches, command_segments, host_call, kv_get, kv_set, log, settings_get,
+    };
     pub use ah_abi::*;
     pub use alloc::borrow::ToOwned;
     pub use alloc::format;
@@ -143,6 +145,38 @@ pub fn host_call(name: &str, input: &serde_json::Value) -> Result<serde_json::Va
 pub fn settings_get(pointer: &str) -> serde_json::Value {
     host_call("settings_get", &serde_json::Value::String(pointer.into()))
         .unwrap_or(serde_json::Value::Null)
+}
+
+/// A shell command read the way the harness reads it: split on `;`, `|`, `&`
+/// and newlines, whitespace-normalised, with a leading `sudo`, `env`, `nohup`,
+/// `time` or `VAR=value` dropped.
+///
+/// Match on these rather than on the raw text. A substring match over the text
+/// refuses `git commit -m "the rm -rf / case"` and allows `rm -fr /`.
+pub fn command_segments(command: &str) -> Vec<String> {
+    match host_call(
+        "command_segments",
+        &serde_json::Value::String(command.into()),
+    ) {
+        Ok(serde_json::Value::Array(a)) => a
+            .iter()
+            .filter_map(|v| v.as_str().map(alloc::string::ToString::to_string))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The first of `rules` that matches `command`, by the harness's own rule
+/// syntax: a rule matches a segment that equals it or starts with it followed
+/// by a space, and a rule ending in `*` matches any continuation.
+pub fn command_matches(command: &str, rules: &[String]) -> Option<String> {
+    match host_call(
+        "command_matches",
+        &serde_json::json!({"command": command, "rules": rules}),
+    ) {
+        Ok(serde_json::Value::String(s)) => Some(s),
+        _ => None,
+    }
 }
 
 pub fn kv_get(key: &str) -> Option<String> {
