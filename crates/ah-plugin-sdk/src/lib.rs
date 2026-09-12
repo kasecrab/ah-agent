@@ -98,8 +98,22 @@ pub unsafe fn take_input(ptr: i32, len: i32) -> Vec<u8> {
 }
 
 /// Leak a buffer to the host as a packed `(ptr << 32) | len`. Host frees it.
+///
+/// Nothing to say is a null pointer, not a pointer to nothing. An empty `Vec`
+/// owns no allocation, and the address it reports is the dangling one every
+/// `Vec<u8>` starts life with — 1. Packing that address would have the host
+/// read zero bytes from it, which works, and then hand it back to `ah_free`,
+/// which does not: `ah_free` rounds a zero length up to one and so frees a
+/// one-byte block at address 1 that nobody ever allocated, leaving the
+/// plugin's own heap quietly wrong. A null pointer is what both the host and
+/// `ah_free` already read as "nothing to take and nothing to give back".
 pub fn give_output(mut bytes: Vec<u8>) -> i64 {
     bytes.shrink_to_fit();
+    if bytes.is_empty() {
+        // `shrink_to_fit` has already handed back whatever this was holding,
+        // so there is nothing here to leak and nothing for the host to free.
+        return 0;
+    }
     let len = bytes.len() as i64;
     let ptr = bytes.as_mut_ptr() as i64;
     core::mem::forget(bytes);
@@ -245,4 +259,19 @@ fn install_panic_hook() {
             log_str(LogLevel::Error, &alloc::format!("panic: {info}"));
         }));
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The host frees exactly what it is handed, so what it is handed for an
+    /// empty answer has to be a pointer it will leave alone.
+    #[test]
+    fn an_empty_buffer_is_handed_over_as_nothing_at_all() {
+        assert_eq!(give_output(Vec::new()), 0);
+        // The same for a buffer that has room in it but nothing to say: the
+        // room is given back rather than leaked, and the host still gets 0.
+        assert_eq!(give_output(Vec::with_capacity(64)), 0);
+    }
 }
