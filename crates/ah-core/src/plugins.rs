@@ -34,8 +34,15 @@ struct State {
     kv_path: PathBuf,
     settings: Value,
     cwd: String,
+    /// Environment variable names the manifest asked for. Nothing else is
+    /// readable through `env_get`, and a credential is not readable whatever
+    /// this says.
+    env_allowed: Vec<String>,
     log: Vec<(LogLevel, String)>,
 }
+
+/// The most of a file a plugin may read in one call.
+const MAX_READ_BYTES: u64 = 8 * 1024 * 1024;
 
 pub struct Plugin {
     pub manifest: Manifest,
@@ -263,6 +270,7 @@ impl PluginHost {
             kv_path,
             settings: without_secrets(settings_value),
             cwd: cwd.into(),
+            env_allowed: Vec::new(),
             log: Vec::new(),
         };
         let mut store = Store::new(&self.engine, state);
@@ -374,6 +382,7 @@ impl PluginHost {
             manifest.name = stem;
         }
         store.data_mut().name = manifest.name.clone();
+        store.data_mut().env_allowed = manifest.env.clone();
         // Declaring tools or commands implies the hooks that serve them.
         if !manifest.tools.is_empty() && !manifest.hooks.contains(&Hook::ToolCall) {
             manifest.hooks.push(Hook::ToolCall);
@@ -437,8 +446,13 @@ impl PluginHost {
     /// Run `on_load` on every subscriber; returns `(plugin, patch)` pairs.
     pub fn on_load(&mut self, settings: &Settings, cwd: &str) -> Vec<(String, Value)> {
         let mut out = Vec::new();
+        // The whole typed settings tree, minus the one field in it that pays
+        // for the model. `settings_get` has been keeping that back for a
+        // while; handing the same thing over whole at load undid it.
+        let mut settings = settings.clone();
+        settings.model.api_key = None;
         let input = OnLoadIn {
-            settings: settings.clone(),
+            settings,
             cwd: cwd.into(),
         };
         for p in &mut self.plugins {
@@ -816,11 +830,14 @@ fn host_call(st: &mut State, name: &str, input: &[u8]) -> std::result::Result<Ve
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0),
         ),
-        // A plugin may read the environment, and not the parts of it that are
-        // credentials. It is a program somebody else wrote; a theme has no
-        // business with the key that pays for the model.
+        // A plugin may read the parts of the environment it said it wanted,
+        // and nothing else. It is a program somebody else wrote; a theme has
+        // no business with the key that pays for the model, and asking for a
+        // variable by name in the manifest is a thing somebody can read before
+        // installing it. Credentials are refused whatever the manifest says.
         "env_get" => match arg.as_str().unwrap_or("") {
             name if crate::jobs::SECRETS.contains(&name) => Value::Null,
+            name if !st.env_allowed.iter().any(|a| a == name) => Value::Null,
             name => std::env::var(name)
                 .map(Value::String)
                 .unwrap_or(Value::Null),
@@ -830,13 +847,40 @@ fn host_call(st: &mut State, name: &str, input: &[u8]) -> std::result::Result<Ve
                 Path::new(&st.cwd),
                 arg.as_str().ok_or("read_file needs a path")?,
             );
-            // Not the credentials file, by any spelling of it. Everything else
-            // this user can read, a plugin they installed can read too —
-            // installing one is the trust decision, and it is asked about.
-            if p.canonicalize().unwrap_or_else(|_| p.clone()) == crate::paths::credentials_file() {
-                return Err("read_file: not that one".to_string());
+            // Inside the directory being worked in, and nowhere else. The
+            // path a plugin hands over may say `~/` or start at the root, and
+            // "everything the user can read" includes the credentials file,
+            // the ssh keys and the browser's cookie jar. A plugin is a program
+            // somebody else wrote; the files of the project it was installed
+            // for are its business and the rest of the disk is not.
+            let root = Path::new(&st.cwd)
+                .canonicalize()
+                .map_err(|e| format!("{}: {e}", st.cwd))?;
+            let real = p
+                .canonicalize()
+                .map_err(|e| format!("{}: {e}", p.display()))?;
+            if !real.starts_with(&root) {
+                return Err(format!(
+                    "read_file: {} is outside {}",
+                    real.display(),
+                    root.display()
+                ));
             }
-            let text = std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+            // A regular file, and not more of one than fits. `/dev/zero` is
+            // readable, never ends, and would take the process with it.
+            let md = std::fs::symlink_metadata(&real).map_err(|e| format!("{e}"))?;
+            if !md.is_file() {
+                return Err(format!("read_file: {} is not a file", real.display()));
+            }
+            if md.len() > MAX_READ_BYTES {
+                return Err(format!(
+                    "read_file: {} is {} bytes, more than the {MAX_READ_BYTES} a plugin may read",
+                    real.display(),
+                    md.len()
+                ));
+            }
+            let text =
+                std::fs::read_to_string(&real).map_err(|e| format!("{}: {e}", real.display()))?;
             Value::String(text)
         }
         // The same reading of a shell command the harness itself uses, so a

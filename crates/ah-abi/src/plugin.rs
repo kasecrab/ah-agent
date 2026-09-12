@@ -24,6 +24,14 @@ pub struct Manifest {
     pub commands: Vec<SlashCommandSpec>,
     /// Static settings patch applied at load, before `on_load` runs.
     pub settings_patch: Option<Value>,
+    /// Environment variables this plugin may read through `env_get`, by name.
+    ///
+    /// Empty means none. The environment is where the documentation tells
+    /// people to keep their API keys and their pairing code, so a plugin that
+    /// could read all of it could carry any of it out in the next request —
+    /// and naming what it wants is something a person can read before
+    /// installing it. Credentials are refused whatever this says.
+    pub env: Vec<String>,
     /// Where this plugin sits in the hook chain. Lower runs first; plugins
     /// with the same order keep their load order, which is by name.
     ///
@@ -49,6 +57,7 @@ impl Default for Manifest {
             tools: Vec::new(),
             commands: Vec::new(),
             settings_patch: None,
+            env: Vec::new(),
             order: 0,
         }
     }

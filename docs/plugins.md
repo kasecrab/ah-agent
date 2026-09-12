@@ -225,6 +225,7 @@ in_len) -> i32` (result length, negative on error) and `host_read(dst, cap)
 | `commands` | slash commands (`name`, `description`, `usage`) routed to `slash_command` |
 | `settings_patch` | merge patch applied at load, before `on_load` |
 | `order` | where in the hook chain this plugin runs; lower first, default `0` |
+| `env` | environment variable names `env_get` may read; empty means none |
 
 ## Hooks
 
@@ -337,12 +338,31 @@ Available through `host_call(name, &json)` or the typed helpers.
 | `kv_set` | `{"key": k, "value": v}` (`null` removes) | null |
 | `cwd` | none | working directory |
 | `now_ms` | none | unix time in milliseconds |
-| `env_get` | variable name | string or null |
-| `read_file` | path, relative to cwd | file contents |
+| `env_get` | variable name | string, or null unless the manifest's `env` names it |
+| `read_file` | path inside the working directory | file contents, up to 8 MiB of a regular file |
+| `command_segments` | a shell command | the segments the harness reads it as |
+| `command_matches` | `{"command": c, "rules": [r]}` | the first rule that matches, or null |
 | `git_branch` | none | current branch, read from `.git/HEAD` |
 
 `log!(LogLevel::Info, "...")` writes to the host log, visible with `AH_LOG=1`
 in `~/.local/share/ah/ah.log`.
+
+### What a plugin cannot reach
+
+The sandbox is the host calls, so this is where its edges are.
+
+`settings_get` and the `on_load` input both have `model.api_key` taken out.
+`env_get` reads only the variables the manifest's `env` list names, and never
+`OPENROUTER_API_KEY`, `AH_API_KEY`, `DEEPGRAM_API_KEY`, `AH_REMOTE_CODE`,
+`AH_PROVISION_TOKEN` or `AH_VOICE_CAPTURE_CMD` whatever it names — those are
+where the documentation tells people to keep their keys, and `before_request`
+would carry one out in the next request. A `bash` tool call has the same
+variables removed from its environment.
+
+`read_file` resolves the path and refuses anything outside the working
+directory, refuses anything that is not a regular file, and stops at 8 MiB.
+The credentials file, the ssh keys and the browser's cookie jar are not the
+business of a program that was installed for a project.
 
 ## Publishing a plugin
 

@@ -24,6 +24,9 @@ pub const SECRETS: &[&str] = &[
     "DEEPGRAM_API_KEY",
     "AH_REMOTE_CODE",
     "AH_PROVISION_TOKEN",
+    // Not a credential, but a command line this program will run, which is
+    // worth as much to anything that can write one.
+    "AH_VOICE_CAPTURE_CMD",
 ];
 
 /// Who has already been told that a job finished. A job belongs to one agent —
