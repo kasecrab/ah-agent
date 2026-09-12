@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 use ah_core::abi::*;
 use ah_core::agent::AgentEvent;
 use ah_core::models::{self, ModelInfo};
-use ah_core::settings::{Origin, SettingsStack};
+use ah_core::settings::{Origin, Runtime, SettingsStack};
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
@@ -1346,6 +1346,19 @@ impl App {
             .send(EngineCmd::Settings(Box::new(s), self.stack.value().clone()));
     }
 
+    /// Put every settings refusal that has not been said yet in the
+    /// transcript. A plugin can be refused at any turn, not only at load, so
+    /// this is called wherever a patch is pushed rather than once at startup.
+    fn report_refusals(&mut self) {
+        for line in app::refusals(&self.stack)
+            .into_iter()
+            .skip(self.refusals_said)
+        {
+            self.refusals_said += 1;
+            self.push(Block::Error(line));
+        }
+    }
+
     fn apply_patch(&mut self, origin: Origin, patch: serde_json::Value) {
         match self.stack.push(origin, patch) {
             Ok(()) => self.refresh_from_settings(&[]),
@@ -2446,7 +2459,7 @@ impl App {
         } else {
             serde_json::json!({"statusline": {"items": toggled(&cfg.items, id)}})
         };
-        self.apply_patch(Origin::Runtime("slash".into()), patch);
+        self.apply_patch(Origin::Runtime(Runtime::Slash), patch);
         let rows = self.statusline_rows();
         if let Some(p) = self.picker.as_mut() {
             let at = p.selected;
@@ -2756,7 +2769,7 @@ impl App {
 
     /// Remove every settings layer a plugin picker preview added.
     fn drop_previews(&mut self) {
-        let keep = |o: &Origin| !matches!(o, Origin::Runtime(s) if s == "preview");
+        let keep = |o: &Origin| !matches!(o, Origin::PluginPreview(_));
         match self.stack.retain(keep) {
             Ok(()) => self.refresh_from_settings(&[]),
             Err(e) => self.push(Block::Error(format!("settings: {e}"))),
@@ -2845,13 +2858,13 @@ impl App {
                     return;
                 }
                 if let Some(p) = out.settings_patch {
-                    self.apply_patch(Origin::Runtime("preview".into()), p);
+                    self.apply_patch(Origin::PluginPreview(name.to_string()), p);
                 }
                 return;
             }
             SlashStage::Pick => {
                 if let Some(p) = out.settings_patch
-                    && let Err(e) = self.stack.push(Origin::Runtime("slash".into()), p)
+                    && let Err(e) = self.stack.push(Origin::Plugin(name.to_string()), p)
                 {
                     self.push(Block::Error(format!("settings patch rejected: {e}")));
                 }
@@ -2860,7 +2873,7 @@ impl App {
             }
             SlashStage::Run => {
                 if let Some(p) = out.settings_patch {
-                    self.apply_patch(Origin::Runtime("slash".into()), p);
+                    self.apply_patch(Origin::Plugin(name.to_string()), p);
                 }
             }
         }
@@ -3000,7 +3013,7 @@ impl App {
         if let Some(e) = effort {
             patch["model"]["reasoning"] = Self::effort_patch(e);
         }
-        self.apply_patch(Origin::Runtime("slash".into()), patch);
+        self.apply_patch(Origin::Runtime(Runtime::Slash), patch);
         let favorite = self
             .favorite_index()
             .and_then(|i| self.settings().model.favorites.keys().nth(i).cloned())
@@ -3033,7 +3046,7 @@ impl App {
             )));
         }
         self.apply_patch(
-            Origin::Runtime("slash".into()),
+            Origin::Runtime(Runtime::Slash),
             serde_json::json!({"model": {"reasoning": Self::effort_patch(level)}}),
         );
         self.push(Block::Notice(format!("reasoning effort → {level}")));
@@ -3090,7 +3103,7 @@ impl App {
             self.push(Block::Error(format!("could not save favorites: {e}")));
         }
         self.apply_patch(
-            Origin::Runtime("slash".into()),
+            Origin::Runtime(Runtime::Slash),
             serde_json::json!({"model": {"favorites": {name: fav}}}),
         );
         self.set_model(id, effort);
@@ -3110,7 +3123,7 @@ impl App {
             self.push(Block::Error(format!("could not save favorites: {e}")));
         }
         self.apply_patch(
-            Origin::Runtime("slash".into()),
+            Origin::Runtime(Runtime::Slash),
             serde_json::json!({"model": {"favorites": {old: null, new: fav}}}),
         );
         self.push(Block::Notice(format!("★ {old} → ★ {new}")));
@@ -3134,7 +3147,7 @@ impl App {
             )));
         }
         self.apply_patch(
-            Origin::Runtime("slash".into()),
+            Origin::Runtime(Runtime::Slash),
             serde_json::json!({"model": {"favorites": {name: null}}}),
         );
         self.push(Block::Notice(format!("removed ★ {name}")));
@@ -3248,13 +3261,7 @@ impl App {
                 // Said after the plugins are on the stack rather than at
                 // startup, because a plugin is one of the things that can be
                 // refused and it is not there yet when the window opens.
-                for line in app::refusals(&self.stack)
-                    .into_iter()
-                    .skip(self.refusals_said)
-                {
-                    self.refusals_said += 1;
-                    self.push(Block::Error(line));
-                }
+                self.report_refusals();
                 self.refresh_from_settings(&[]);
                 self.plugin_status = None;
                 if first
@@ -3486,7 +3493,10 @@ impl App {
                 )));
             }
             AgentEvent::Notice(n) => self.push(Block::Notice(n)),
-            AgentEvent::SettingsPatch(p) => self.apply_patch(Origin::Runtime("plugin".into()), p),
+            AgentEvent::SettingsPatch { plugin, patch } => {
+                self.apply_patch(Origin::Plugin(plugin), patch);
+                self.report_refusals();
+            }
             AgentEvent::Retry {
                 attempt,
                 wait_ms,
@@ -4155,7 +4165,7 @@ impl App {
         if let Err(e) = ah_core::settings::save_state(&patch) {
             self.push(Block::Error(format!("could not save that choice: {e}")));
         }
-        self.apply_patch(Origin::Runtime("slash".into()), patch);
+        self.apply_patch(Origin::Runtime(Runtime::Slash), patch);
     }
 
     fn warm_voice(&mut self) {
@@ -4566,7 +4576,7 @@ impl App {
         } else if keys::any_match(&b.toggle_reasoning, &k) {
             let v = !self.view.show_reasoning;
             self.apply_patch(
-                Origin::Runtime("ui".into()),
+                Origin::Runtime(Runtime::Ui),
                 serde_json::json!({"layout": {"show_reasoning": v}}),
             );
         } else if keys::any_match(&b.cycle_model, &k) {
@@ -4665,7 +4675,7 @@ impl App {
             }
         }
         self.apply_patch(
-            Origin::Runtime("ui".into()),
+            Origin::Runtime(Runtime::Ui),
             serde_json::json!({"layout": {"show_tool_output": v}}),
         );
     }
@@ -4674,7 +4684,7 @@ impl App {
     fn toggle_plan(&mut self) {
         let v = !self.settings().layout.show_plan;
         self.apply_patch(
-            Origin::Runtime("ui".into()),
+            Origin::Runtime(Runtime::Ui),
             serde_json::json!({"layout": {"show_plan": v}}),
         );
     }
@@ -4980,7 +4990,7 @@ impl App {
                 let spec = args.replacen(' ', "=", 1);
                 match app::set_to_patch(&spec) {
                     Ok(p) => {
-                        self.apply_patch(Origin::Runtime("slash".into()), p);
+                        self.apply_patch(Origin::Runtime(Runtime::Slash), p);
                         self.push(Block::Notice(format!("set {spec}")));
                     }
                     Err(e) => self.push(Block::Error(e.to_string())),
@@ -4988,14 +4998,14 @@ impl App {
             }
             "yolo" => {
                 self.apply_patch(
-                    Origin::Runtime("slash".into()),
+                    Origin::Runtime(Runtime::Slash),
                     serde_json::json!({"permissions": {"mode": "auto"}}),
                 );
                 self.push(Block::Notice("permissions: auto".into()));
             }
             "ask" => {
                 self.apply_patch(
-                    Origin::Runtime("slash".into()),
+                    Origin::Runtime(Runtime::Slash),
                     serde_json::json!({"permissions": {"mode": "ask"}}),
                 );
                 self.push(Block::Notice("permissions: ask".into()));
@@ -5003,7 +5013,7 @@ impl App {
             "reasoning" => {
                 let v = !self.view.show_reasoning;
                 self.apply_patch(
-                    Origin::Runtime("slash".into()),
+                    Origin::Runtime(Runtime::Slash),
                     serde_json::json!({"layout": {"show_reasoning": v}}),
                 );
             }

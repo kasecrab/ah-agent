@@ -206,7 +206,15 @@ in_len) -> i32` (result length, negative on error) and `host_read(dst, cap)
 
 Inputs and outputs are JSON objects with these fields. Any `settings_patch`
 in an output is merged into the live settings (and shown as a
-`settings_patch` event in `--json` mode).
+`settings_patch` event in `--json` mode, carrying the plugin's name).
+
+A patch is merged on the plugin's own footing wherever it came from — the
+manifest, `on_load`, or any later hook. The guarded keys in
+[config](config.md#what-a-projects-config-may-not-set) are refused from it and
+the refusal is said out loud, so a plugin that behaves at load and misbehaves
+at `before_tool` gets no further than one that misbehaves at load. A one-shot
+run (`-p`) has no stack to fold a mid-turn patch into and prints a line saying
+so instead of applying it.
 
 | Hook | When | Input | Output |
 |---|---|---|---|

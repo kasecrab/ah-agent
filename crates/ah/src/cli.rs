@@ -156,6 +156,20 @@ impl AgentIo for PrintIo {
                     agents.unwrap_or_default()
                 );
             }
+            // A one-shot run has no settings stack to fold this into after the
+            // turn has started, and quietly doing nothing would leave the
+            // plugin's author believing it took. Say so instead.
+            AgentEvent::SettingsPatch { plugin, patch } => {
+                let keys = match patch.as_object() {
+                    Some(o) => o.keys().cloned().collect::<Vec<_>>().join(", "),
+                    None => String::new(),
+                };
+                let _ = writeln!(
+                    err,
+                    "\x1b[33mplugin {plugin} returned a settings patch ({keys}); a one-shot run \
+                     does not apply one mid-turn\x1b[0m"
+                );
+            }
             _ => {}
         }
     }
@@ -334,7 +348,9 @@ pub fn one_shot(
 ) -> Result<(), AnyError> {
     let cwd = app::resolve_cwd(o)?;
     let mut stack = app::load_settings(o)?;
+    let mut said = 0;
     for line in app::refusals(&stack) {
+        said += 1;
         eprintln!("\x1b[33m{line}\x1b[0m");
     }
     let mut engine = Engine::new(&stack, cwd, resume, resume.is_some())?;
@@ -346,6 +362,11 @@ pub fn one_shot(
     }
     for (name, p) in patches {
         stack.push(Origin::Plugin(name), p)?;
+    }
+    // Again, because a plugin is one of the things that can be refused and it
+    // was not on the stack when the first pass ran.
+    for line in app::refusals(&stack).into_iter().skip(said) {
+        eprintln!("\x1b[33m{line}\x1b[0m");
     }
     engine.apply_settings(stack.settings().clone(), stack.value().clone());
 

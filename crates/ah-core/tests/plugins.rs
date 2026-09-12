@@ -76,7 +76,7 @@ fn themes_plugin_switches_palettes() {
         .unwrap();
     assert_eq!(out.message.as_deref(), Some("theme: dracula"));
     stack
-        .push(Origin::Runtime("slash".into()), out.settings_patch.unwrap())
+        .push(Origin::Plugin("p".into()), out.settings_patch.unwrap())
         .unwrap();
     assert_eq!(stack.settings().theme.accent, "#bd93f9");
     let out = host
@@ -92,7 +92,7 @@ fn themes_plugin_switches_palettes() {
         .slash_command("theme", "off", ".", SlashStage::Pick)
         .unwrap();
     stack
-        .push(Origin::Runtime("slash".into()), out.settings_patch.unwrap())
+        .push(Origin::Plugin("p".into()), out.settings_patch.unwrap())
         .unwrap();
     let t = &stack.settings().theme;
     assert_eq!(t.accent, "cyan", "back to the theme seen at load");

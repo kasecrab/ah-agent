@@ -46,7 +46,13 @@ pub enum AgentEvent {
         bytes: usize,
     },
     Notice(String),
-    SettingsPatch(Value),
+    /// A settings patch a plugin returned from a hook, with the plugin that
+    /// returned it. The name is what keeps it on the plugin's own footing when
+    /// a driver pushes it onto the stack.
+    SettingsPatch {
+        plugin: String,
+        patch: Value,
+    },
     Retry {
         attempt: u32,
         wait_ms: u64,
@@ -172,7 +178,9 @@ pub fn event_json(ev: &AgentEvent) -> Value {
             "width": width, "height": height, "bytes": bytes
         }),
         AgentEvent::Notice(n) => json!({"type": "notice", "text": n}),
-        AgentEvent::SettingsPatch(p) => json!({"type": "settings_patch", "patch": p}),
+        AgentEvent::SettingsPatch { plugin, patch } => {
+            json!({"type": "settings_patch", "plugin": plugin, "patch": patch})
+        }
         AgentEvent::Retry {
             attempt,
             wait_ms,
@@ -235,7 +243,10 @@ pub fn event_from_json(v: &Value) -> Option<AgentEvent> {
             bytes: num(v, "bytes")? as usize,
         },
         "notice" => AgentEvent::Notice(text(v, "text")?),
-        "settings_patch" => AgentEvent::SettingsPatch(v.get("patch")?.clone()),
+        "settings_patch" => AgentEvent::SettingsPatch {
+            plugin: v.get("plugin")?.as_str()?.to_string(),
+            patch: v.get("patch")?.clone(),
+        },
         "retry" => AgentEvent::Retry {
             attempt: num(v, "attempt")? as u32,
             wait_ms: num(v, "wait_ms")?,
@@ -336,6 +347,9 @@ pub trait Mailbox: Send + Sync {
 }
 
 /// Plugin hook surface used by the loop. `NoHooks` is the empty impl.
+/// Settings patches a hook returned, each with the plugin that returned it.
+pub type Patches = Vec<(String, Value)>;
+
 pub trait Hooks {
     fn system_prompt(&mut self, input: SystemPromptIn) -> String {
         input.prompt
@@ -343,7 +357,7 @@ pub trait Hooks {
     fn before_request(&mut self, req: ChatRequest, _turn: u32) -> ChatRequest {
         req
     }
-    fn before_tool(&mut self, _call: &ToolCall, _cwd: &str) -> (ToolDecision, Vec<Value>) {
+    fn before_tool(&mut self, _call: &ToolCall, _cwd: &str) -> (ToolDecision, Patches) {
         (ToolDecision::Allow, Vec::new())
     }
     fn after_tool(
@@ -351,7 +365,7 @@ pub trait Hooks {
         _call: &ToolCall,
         result: ToolResult,
         _duration_ms: u64,
-    ) -> (ToolResult, Vec<Value>) {
+    ) -> (ToolResult, Patches) {
         (result, Vec::new())
     }
     /// `Some` if a plugin owns this tool name.
@@ -361,7 +375,7 @@ pub trait Hooks {
     fn plugin_tool_specs(&self) -> Vec<ToolSpec> {
         Vec::new()
     }
-    fn on_turn_end(&mut self, _input: OnTurnEndIn) -> (Vec<Value>, Vec<String>) {
+    fn on_turn_end(&mut self, _input: OnTurnEndIn) -> (Patches, Vec<String>) {
         (Vec::new(), Vec::new())
     }
 }
@@ -987,8 +1001,8 @@ impl<'a> Agent<'a> {
                 total_usage: summary.usage,
                 tool_calls: summary.tool_calls,
             });
-            for p in patches {
-                io.emit(AgentEvent::SettingsPatch(p));
+            for (plugin, patch) in patches {
+                io.emit(AgentEvent::SettingsPatch { plugin, patch });
             }
             for n in notices {
                 io.emit(AgentEvent::Notice(n));
@@ -1032,8 +1046,8 @@ impl<'a> Agent<'a> {
     fn gate_tool(&mut self, call: &ToolCall, cwd: &str, io: &dyn AgentIo) -> Gate {
         let mut call = call.clone();
         let (decision, patches) = self.hooks.before_tool(&call, cwd);
-        for p in patches {
-            io.emit(AgentEvent::SettingsPatch(p));
+        for (plugin, patch) in patches {
+            io.emit(AgentEvent::SettingsPatch { plugin, patch });
         }
         let mut must_ask = self.settings.permissions.mode == PermissionMode::Ask
             && self
@@ -1196,8 +1210,8 @@ impl<'a> Agent<'a> {
             match gate {
                 Gate::Run(call) => {
                     let (result, patches) = self.hooks.after_tool(&call, result, dur);
-                    for p in patches {
-                        io.emit(AgentEvent::SettingsPatch(p));
+                    for (plugin, patch) in patches {
+                        io.emit(AgentEvent::SettingsPatch { plugin, patch });
                     }
                     out.push((call, result, dur));
                 }
@@ -2773,7 +2787,10 @@ mod tests {
                 bytes: 1024,
             },
             AgentEvent::Notice("something happened".into()),
-            AgentEvent::SettingsPatch(serde_json::json!({"model": {"id": "x"}})),
+            AgentEvent::SettingsPatch {
+                plugin: "p".into(),
+                patch: serde_json::json!({"model": {"id": "x"}}),
+            },
             AgentEvent::Retry {
                 attempt: 2,
                 wait_ms: 500,

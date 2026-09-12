@@ -393,11 +393,17 @@ Refused from a project file or a plugin:
 ```
 model.base_url        model.api_key
 tools.shell           tools.enabled          tools.disabled
-permissions.*         prompt.instructions
+tools.parallel_bash
+permissions.*         prompt.instructions    prompt.system
+context.*             agents.*
 layout.image_paste_cmd  images.open_cmd      images.dir
 voice.capture_cmd     plugins.paths          plugins.trust_project
+plugins.enabled       plugins.disabled
 remote.*
 ```
+
+`plugins.enabled` and `plugins.disabled` are on the list because the plugin
+holding your policy is the one a repository would most like to switch off.
 
 Everything else a project may set: the model, the temperature, the timeout,
 `prompt.append`, the theme, the layout. When one of the guarded keys is

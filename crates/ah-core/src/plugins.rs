@@ -752,7 +752,7 @@ impl Hooks for PluginHost {
         cur.request
     }
 
-    fn before_tool(&mut self, call: &ToolCall, cwd: &str) -> (ToolDecision, Vec<Value>) {
+    fn before_tool(&mut self, call: &ToolCall, cwd: &str) -> (ToolDecision, crate::agent::Patches) {
         let mut input = BeforeToolIn {
             call: call.clone(),
             cwd: cwd.into(),
@@ -764,7 +764,7 @@ impl Hooks for PluginHost {
                 continue;
             };
             if let Some(v) = r.settings_patch {
-                patches.push(v);
+                patches.push((p.manifest.name.clone(), v));
             }
             match r.decision {
                 ToolDecision::Allow => {}
@@ -788,7 +788,7 @@ impl Hooks for PluginHost {
         call: &ToolCall,
         result: ToolResult,
         duration_ms: u64,
-    ) -> (ToolResult, Vec<Value>) {
+    ) -> (ToolResult, crate::agent::Patches) {
         let mut input = AfterToolIn {
             call: call.clone(),
             result,
@@ -800,7 +800,7 @@ impl Hooks for PluginHost {
                 continue;
             };
             if let Some(v) = r.settings_patch {
-                patches.push(v);
+                patches.push((p.manifest.name.clone(), v));
             }
             if let Some(res) = r.result {
                 input.result = res;
@@ -837,13 +837,13 @@ impl Hooks for PluginHost {
             .collect()
     }
 
-    fn on_turn_end(&mut self, input: OnTurnEndIn) -> (Vec<Value>, Vec<String>) {
+    fn on_turn_end(&mut self, input: OnTurnEndIn) -> (crate::agent::Patches, Vec<String>) {
         let mut patches = Vec::new();
         let mut notices = Vec::new();
         for p in &mut self.plugins {
             if let Some(r) = p.call_typed::<_, OnTurnEndOut>(Hook::OnTurnEnd, &input) {
                 if let Some(v) = r.settings_patch {
-                    patches.push(v);
+                    patches.push((p.manifest.name.clone(), v));
                 }
                 if let Some(m) = r.message {
                     notices.push(m);

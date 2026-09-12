@@ -719,7 +719,9 @@ impl AgentIo for ChildIo {
         // Kept whole, so a screen can show the agent's work the way it shows
         // the conversation: the same blocks, from the same events.
         match ev {
-            AgentEvent::Usage(_) | AgentEvent::ToolMessage(_) | AgentEvent::SettingsPatch(_) => {}
+            AgentEvent::Usage(_)
+            | AgentEvent::ToolMessage(_)
+            | AgentEvent::SettingsPatch { .. } => {}
             ev => {
                 c.record(ev);
                 c.bump();

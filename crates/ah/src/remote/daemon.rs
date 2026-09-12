@@ -89,7 +89,7 @@ impl Machine {
         if let Some(model) = model.filter(|m| !m.trim().is_empty()) {
             stack
                 .push(
-                    Origin::Runtime("remote".into()),
+                    Origin::Runtime(ah_core::settings::Runtime::Remote),
                     serde_json::json!({"model": {"id": model}}),
                 )
                 .map_err(|e| e.to_string())?;
@@ -100,7 +100,7 @@ impl Machine {
         if !self.trusted {
             stack
                 .push(
-                    Origin::Runtime("remote".into()),
+                    Origin::Runtime(ah_core::settings::Runtime::Remote),
                     serde_json::json!({"permissions": {"mode": "ask"}}),
                 )
                 .map_err(|e| e.to_string())?;
@@ -112,7 +112,7 @@ impl Machine {
         if !self.allow_sudo.load(Ordering::Relaxed) {
             stack
                 .push(
-                    Origin::Runtime("remote".into()),
+                    Origin::Runtime(ah_core::settings::Runtime::Remote),
                     serde_json::json!({"permissions": {"allow_sudo": false}}),
                 )
                 .map_err(|e| e.to_string())?;
