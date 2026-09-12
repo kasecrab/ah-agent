@@ -480,7 +480,7 @@ fn run(
     let mut id = crypto::new_link();
     let mut seal = sealer(&keys, &id);
     // One per phone, because each seals under a key of its own.
-    let mut openers: HashMap<String, Opener> = HashMap::new();
+    let mut openers: HashMap<[u8; crypto::LINK_BYTES], Opener> = HashMap::new();
     let mut outbox: Vec<FromDesk> = Vec::new();
     let mut last_flush = Instant::now();
     let mut last_yield_check = Instant::now();
@@ -517,7 +517,7 @@ fn run(
                     });
                 }
                 Event::Frame(raw) => {
-                    outbox.extend(answer(&raw, &keys, &mut openers, &shared, &notes));
+                    outbox.extend(answer(&raw, &keys, &id, &mut openers, &shared, &notes));
                 }
                 Event::Lost(_) => shared.up.store(false, Ordering::Release),
                 Event::Fatal(why) => {
@@ -618,31 +618,66 @@ fn sealer(keys: &Keys, id: &[u8; crypto::LINK_BYTES]) -> Sealer {
     Sealer::new(keys.link_key(Dir::D2p, id, &none), Dir::D2p, *id, none)
 }
 
-/// What a phone asked for, and what it gets back.
-fn answer(
-    raw: &str,
-    keys: &Keys,
-    openers: &mut HashMap<String, Opener>,
-    shared: &Shared,
-    notes: &mpsc::Sender<Note>,
-) -> Vec<FromDesk> {
-    let Ok(Envelope::Cmd {
+/// A `cmd` frame that names the link this connection is actually on.
+struct Commanded {
+    id: [u8; crypto::LINK_BYTES],
+    phone: [u8; crypto::LINK_BYTES],
+    seq: u64,
+    ct: String,
+}
+
+/// Read a `cmd` frame, and refuse it unless it names `live`.
+///
+/// The frame is not authenticated at this point — the relay wrote the envelope
+/// around the ciphertext and can write any envelope it likes. What stops it
+/// replaying a command it forwarded weeks ago is that the key is derived from
+/// the link id, and the link id is this connection's, not the frame's.
+fn commanded(raw: &str, live: &[u8; crypto::LINK_BYTES]) -> Option<Commanded> {
+    let Envelope::Cmd {
         link,
         plink,
         seq,
         ct,
         ..
-    }) = serde_json::from_str::<Envelope>(raw)
+    } = serde_json::from_str::<Envelope>(raw).ok()?
     else {
+        return None;
+    };
+    let id = unhex(&link)?;
+    let phone = unhex(&plink)?;
+    if id != *live {
+        return None;
+    }
+    Some(Commanded { id, phone, seq, ct })
+}
+
+/// What a phone asked for, and what it gets back.
+///
+/// `live` is the link id this connection drew. A command names a link too, and
+/// the two have to be the same one: the key a command opens under is derived
+/// from the link id, so letting the frame choose it would let anything holding
+/// a copy of an old frame pick the key that frame was sealed under. The relay
+/// forwards these in the clear and can keep them; a command from a link this
+/// connection is not on is refused before a key is derived from it.
+fn answer(
+    raw: &str,
+    keys: &Keys,
+    live: &[u8; crypto::LINK_BYTES],
+    openers: &mut HashMap<[u8; crypto::LINK_BYTES], Opener>,
+    shared: &Shared,
+    notes: &mpsc::Sender<Note>,
+) -> Vec<FromDesk> {
+    let Some(Commanded { id, phone, seq, ct }) = commanded(raw, live) else {
         return Vec::new();
     };
-    let (Some(id), Some(phone)) = (unhex(&link), unhex(&plink)) else {
-        return Vec::new();
-    };
+    // Kept by the phone's id in bytes rather than as the text the frame spelled
+    // it with, so the same phone written in another case is the same phone and
+    // not a second one with its replay count back at nothing.
+    //
     // Kept only once a frame has actually opened. An entry made on the way in
     // would mean anything able to reach this socket could leave one behind per
     // made-up link id, which is a list this process holds and nothing trims.
-    let plain = match openers.get_mut(&plink) {
+    let plain = match openers.get_mut(&phone) {
         Some(opener) => match opener.open(seq, &ct) {
             Ok(plain) => plain.to_vec(),
             Err(_) => return Vec::new(),
@@ -652,7 +687,7 @@ fn answer(
                 // Only real phones ever get in here, and there are never many
                 // of them; the oldest key makes room for a phone that
                 // reconnected with a new link.
-                if let Some(oldest) = openers.keys().next().cloned() {
+                if let Some(oldest) = openers.keys().next().copied() {
                     openers.remove(&oldest);
                 }
             }
@@ -661,7 +696,7 @@ fn answer(
                 return Vec::new();
             };
             let plain = plain.to_vec();
-            openers.insert(plink.clone(), opener);
+            openers.insert(phone, opener);
             plain
         }
     };
@@ -677,7 +712,7 @@ fn answer(
         return Vec::new();
     }
 
-    let device = device_name(&plink);
+    let device = device_name(&phone);
     let ack = |error: Option<String>| {
         vec![FromDesk::Ack {
             cmd_seq: seq,
@@ -842,8 +877,12 @@ fn asking(shared: &Shared, session: &str, id: u64) -> Option<String> {
 /// Which phone this was, as far as anything here knows: the first characters
 /// of the link it seals under. Nothing a person named, and nothing that
 /// follows it between connections.
-fn device_name(plink: &str) -> String {
-    format!("phone {}", &plink[..plink.len().min(8)])
+fn device_name(plink: &[u8; crypto::LINK_BYTES]) -> String {
+    let mut out = String::from("phone ");
+    for b in plink.iter().take(4) {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
 }
 
 /// A file a session produced, in pieces small enough to travel.
@@ -963,6 +1002,40 @@ mod tests {
 
     fn text(t: &str) -> Value {
         json!({"type": "text", "text": t})
+    }
+
+    fn hex(id: &[u8; crypto::LINK_BYTES]) -> String {
+        id.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    fn cmd_frame(link: &str, plink: &str, seq: u64) -> String {
+        serde_json::to_string(&Envelope::command(link, plink, seq, "ct".into())).unwrap()
+    }
+
+    #[test]
+    fn a_command_sealed_for_another_link_is_refused_before_a_key_is_derived() {
+        let live = crypto::new_link();
+        let old = crypto::new_link();
+        let phone = crypto::new_link();
+        // The relay keeps a copy of a command this desk really did run, and
+        // sends it again after the desk has reconnected under a new link.
+        let replayed = cmd_frame(&hex(&old), &hex(&phone), 1);
+        assert!(commanded(&replayed, &live).is_none(), "an old link opened");
+        let now = cmd_frame(&hex(&live), &hex(&phone), 1);
+        assert!(commanded(&now, &live).is_some(), "this link was refused");
+    }
+
+    #[test]
+    fn the_same_phone_written_in_another_case_is_the_same_phone() {
+        let live = crypto::new_link();
+        let phone = [0xab; crypto::LINK_BYTES];
+        let lower = commanded(&cmd_frame(&hex(&live), &hex(&phone), 1), &live).unwrap();
+        let upper = commanded(
+            &cmd_frame(&hex(&live), &hex(&phone).to_uppercase(), 1),
+            &live,
+        )
+        .unwrap();
+        assert_eq!(lower.phone, upper.phone, "re-casing made a second phone");
     }
 
     #[test]
