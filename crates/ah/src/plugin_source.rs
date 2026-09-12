@@ -115,6 +115,14 @@ pub fn install(src: &Source, user_dir: &Path) -> Result<Vec<PathBuf>, AnyError> 
     let built = if !prebuilt.is_empty() {
         prebuilt
     } else if dir.join("Cargo.toml").exists() {
+        // Building is not sandboxed and cannot be. `cargo build` runs the
+        // crate's `build.rs` and every proc-macro it depends on, as this user,
+        // before a single byte reaches the wasm interpreter — so this is the
+        // moment to say so, rather than after. A prebuilt `.wasm` above needs
+        // no such warning: it never runs outside the sandbox.
+        if !agreed_to_build(&src.url, &dir)? {
+            return Err("nothing was built or installed".into());
+        }
         // A persistent target dir keeps updates incremental.
         build_crate(&dir, Some(&data.join("plugin-build")))?
     } else {
@@ -181,6 +189,42 @@ fn wasm_files(dir: &Path) -> Vec<PathBuf> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Ask before compiling somebody else's crate on this machine.
+///
+/// The wasm sandbox is what makes a plugin safe to run. It does nothing for
+/// building one: `build.rs` and proc-macros are ordinary programs, run as this
+/// user, with this user's files and this user's network. Installing from a
+/// source repository is therefore a decision about trusting the author, and it
+/// is one worth being asked for out loud.
+///
+/// With nothing to ask at — a script, a pipe — it refuses rather than assumes.
+/// `AH_PLUGIN_BUILD_YES=1` is how a script says yes on purpose.
+fn agreed_to_build(url: &str, dir: &Path) -> Result<bool, AnyError> {
+    if std::env::var("AH_PLUGIN_BUILD_YES").is_ok_and(|v| v == "1") {
+        return Ok(true);
+    }
+    if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        return Err(format!(
+            "{url} ships no .wasm, so installing it means compiling it, and compiling runs its \
+             build script and proc-macros on this machine as you. Run this where it can ask, or \
+             set AH_PLUGIN_BUILD_YES=1 if you mean it."
+        )
+        .into());
+    }
+    println!("{url} ships no built plugin, only source.");
+    println!(
+        "Building it runs {}'s build script and every proc-macro it depends on,",
+        dir.display()
+    );
+    println!("on this machine, as you, before any of it reaches the wasm sandbox.");
+    print!("build it? [y/N] ");
+    use std::io::Write as _;
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    Ok(matches!(line.trim(), "y" | "Y" | "yes" | "Yes"))
 }
 
 /// `cargo build --release --target wasm32-unknown-unknown` in `dir` and

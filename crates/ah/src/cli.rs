@@ -510,7 +510,7 @@ fn login(o: &Overrides, key: Option<String>) -> Result<(), AnyError> {
 
 /// Read a line without echo. Falls back to a plain line when the terminal
 /// cannot enter raw mode.
-fn read_secret(prompt: &str) -> Result<String, AnyError> {
+pub fn read_secret(prompt: &str) -> Result<String, AnyError> {
     use crossterm::event::{Event, KeyCode, KeyModifiers, read};
     use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
     let mut err = std::io::stderr().lock();

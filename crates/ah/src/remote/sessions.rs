@@ -48,7 +48,13 @@ impl Act {
             Act::Answer(_) => "remote: answered".into(),
             Act::Clear => "remote: cleared".into(),
             Act::Start { cwd, .. } => format!("remote: started a session in {cwd}"),
-            Act::Compact(_) | Act::Rename(_) | Act::Resume => return None,
+            // These three used to say nothing, on the grounds that they show
+            // up in the transcript on their own. Two of them do not, and the
+            // point of the line is not the change — it is that somebody who is
+            // not at this keyboard made it.
+            Act::Compact(_) => "remote: compacted".into(),
+            Act::Rename(name) => format!("remote: renamed to {}", first_line(name)),
+            Act::Resume => "remote: brought a session back".into(),
         })
     }
 }
@@ -132,8 +138,10 @@ mod tests {
     fn what_is_worth_saying_is_said_and_the_rest_is_not() {
         assert!(Act::Interrupt.said().is_some());
         assert!(Act::AllowTool(false).said().unwrap().contains("denied"));
-        // Renaming and compacting show up in the transcript on their own.
-        assert!(Act::Rename("x".into()).said().is_none());
-        assert!(Act::Compact(String::new()).said().is_none());
+        // Everything a phone does is said, because the news is that a phone
+        // did it and not what was done.
+        assert!(Act::Rename("x".into()).said().unwrap().contains("renamed"));
+        assert!(Act::Compact(String::new()).said().is_some());
+        assert!(Act::Resume.said().is_some());
     }
 }

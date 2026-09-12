@@ -50,11 +50,28 @@ URL) is handled in this order:
 
 1. If it holds `*.wasm` files, they are installed as they are. A repository
    can commit the built module so users need no Rust toolchain.
-2. Otherwise it must hold a `Cargo.toml`; ah runs `cargo build --release
-   --target wasm32-unknown-unknown` there and installs every `cdylib`
-   package it defines. Builds share `~/.local/share/ah/plugin-build/` so
-   updates are incremental. The `wasm32-unknown-unknown` target must be
-   installed (`rustup target add wasm32-unknown-unknown`).
+2. Otherwise it must hold a `Cargo.toml`; ah asks first, then runs
+   `cargo build --release --target wasm32-unknown-unknown` there and installs
+   every `cdylib` package it defines. Builds share
+   `~/.local/share/ah/plugin-build/` so updates are incremental. The
+   `wasm32-unknown-unknown` target must be installed (`rustup target add
+   wasm32-unknown-unknown`).
+
+It asks because building is the one part of this that is not sandboxed and
+cannot be: `cargo build` runs the crate's `build.rs` and every proc-macro it
+depends on as you, with your files and your network, before a byte of it
+reaches the wasm interpreter. Installing a prebuilt `.wasm` is not asked
+about — that one only ever runs inside the sandbox. Where there is nobody to
+ask, the build is refused rather than assumed; `AH_PLUGIN_BUILD_YES=1` is how
+a script says yes deliberately.
+
+### Where plugins are loaded from
+
+`~/.config/ah/plugins/` always. `.ah/plugins/` in the directory you are
+working in only if your own config sets `plugins.trust_project = true`, which
+a project cannot set for you — a `.wasm` that arrived with a repository is a
+program somebody else wrote, and it loads before the first request of the
+session.
 
 ### Updating
 

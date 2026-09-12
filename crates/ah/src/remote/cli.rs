@@ -30,14 +30,29 @@ fn pair(url: Option<String>, token: Option<String>) -> Result<(), AnyError> {
         }
     };
 
-    let token = token
+    // Asked for rather than required on the command line: an argument is in
+    // the shell history of everybody who ever typed it, and this one is the
+    // relay's own secret.
+    let token = match token
         .or_else(|| std::env::var("AH_PROVISION_TOKEN").ok())
         .filter(|t| !t.trim().is_empty())
-        .ok_or(
-            "this relay wants its provisioning secret, so that its URL alone is not enough to \
-             make pairings on it. Pass --token, or set AH_PROVISION_TOKEN; it is the value you \
-             gave `npx wrangler secret put AH_PROVISION_TOKEN`.",
-        )?;
+    {
+        Some(t) => t,
+        None if std::io::IsTerminal::is_terminal(&std::io::stdin()) => {
+            crate::cli::read_secret("the relay's provisioning secret: ")?
+        }
+        None => {
+            return Err(
+                "this relay wants its provisioning secret, so that its URL alone is not \
+                        enough to make pairings on it. Set AH_PROVISION_TOKEN, or pass --token; \
+                        it is the value you gave `npx wrangler secret put AH_PROVISION_TOKEN`."
+                    .into(),
+            );
+        }
+    };
+    if token.trim().is_empty() {
+        return Err("no secret given, so nothing was paired".into());
+    }
 
     let raw = crypto::new_code();
     let shown = code::format(&raw);

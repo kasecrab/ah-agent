@@ -179,8 +179,9 @@ pub enum RemoteCmd {
         #[arg(long, value_name = "URL")]
         url: Option<String>,
         /// The relay's provisioning secret, the one set with
-        /// `npx wrangler secret put AH_PROVISION_TOKEN`. `AH_PROVISION_TOKEN`
-        /// in the environment does as well.
+        /// `npx wrangler secret put AH_PROVISION_TOKEN`. Asked for if it is
+        /// not given, since an argument stays in the shell history;
+        /// `AH_PROVISION_TOKEN` in the environment does as well.
         #[arg(long, value_name = "TOKEN")]
         token: Option<String>,
     },
