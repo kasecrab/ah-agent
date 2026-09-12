@@ -3641,7 +3641,13 @@ impl App {
             return;
         }
         self.title = title.clone();
-        let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::SetTitle(title));
+        // The format string is settings and the values folded into it are a
+        // task name and a working directory, so the whole of it is text this
+        // program did not write. A terminal acts on what is in a title string.
+        let _ = crossterm::execute!(
+            std::io::stdout(),
+            crossterm::terminal::SetTitle(crate::cli::printable(&title))
+        );
     }
 
     /// How much of the screen this click takes: one more click in the same

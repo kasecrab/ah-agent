@@ -60,7 +60,7 @@ impl AgentIo for PrintIo {
                             Some(b'@') => "36",
                             _ => "90",
                         };
-                        let _ = writeln!(err, "\x1b[{c}m  {l}\x1b[0m");
+                        let _ = writeln!(err, "\x1b[{c}m  {}\x1b[0m", printable(l));
                     }
                     let n = d.lines().count();
                     if n > 40 {
@@ -71,8 +71,9 @@ impl AgentIo for PrintIo {
             AgentEvent::ToolDenied { call, reason } => {
                 let _ = writeln!(
                     err,
-                    "\x1b[31m✗ {} denied: {reason}\x1b[0m",
-                    call.function.name
+                    "\x1b[31m✗ {} denied: {}\x1b[0m",
+                    printable(&call.function.name),
+                    printable(&reason)
                 );
             }
             AgentEvent::Retry {
@@ -82,11 +83,12 @@ impl AgentIo for PrintIo {
             } => {
                 let _ = writeln!(
                     err,
-                    "\x1b[33mretry {attempt} in {wait_ms} ms: {error}\x1b[0m"
+                    "\x1b[33mretry {attempt} in {wait_ms} ms: {}\x1b[0m",
+                    printable(&error)
                 );
             }
             AgentEvent::Error(e) => {
-                let _ = writeln!(err, "\x1b[31merror: {e}\x1b[0m");
+                let _ = writeln!(err, "\x1b[31merror: {}\x1b[0m", printable(&e));
             }
             AgentEvent::Compacting { auto } => {
                 let why = if auto { " (context full)" } else { "" };
@@ -102,7 +104,7 @@ impl AgentIo for PrintIo {
                 );
             }
             AgentEvent::Notice(n) => {
-                let _ = writeln!(err, "\x1b[90m{n}\x1b[0m");
+                let _ = writeln!(err, "\x1b[90m{}\x1b[0m", printable(&n));
             }
             AgentEvent::AssistantMessage(m) => {
                 if !m.content.is_empty() {
@@ -293,9 +295,29 @@ fn answer(q: &Question, line: &str) -> Answer {
 /// to put something in the clipboard.
 ///
 /// Newlines and tabs stay: they are what the output is made of.
+/// `text` with everything a terminal would act on rather than show taken out.
+///
+/// This goes to a real terminal, and what reaches it is written by the model,
+/// by whatever server answered, or by a plugin somebody else wrote. A control
+/// character there is not text: an escape can repaint the screen, retitle the
+/// window, or — with `\x1b]52;c;…` — put whatever it likes on the clipboard,
+/// and a lone carriage return can scrub the line above it so that what was
+/// shown a moment ago is not what is on screen now.
+///
+/// Newlines and tabs are kept, because those are layout and not instructions.
 pub fn printable(text: &str) -> String {
     text.chars()
         .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
+        // Format and separator characters are not control characters by
+        // Rust's reckoning and are still not text: a bidirectional override
+        // makes a line read in the opposite order from the one it runs in.
+        .filter(|c| {
+            !matches!(*c,
+            '\u{200b}'..='\u{200f}'
+            | '\u{2028}'..='\u{202e}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{feff}')
+        })
         .collect()
 }
 
@@ -396,7 +418,7 @@ pub fn one_shot(
     let res = engine.run_turn(prompt.to_string(), Vec::new(), &io);
     for (p, lvl, m) in engine.take_plugin_logs() {
         if lvl <= LogLevel::Warn {
-            eprintln!("\x1b[90m[{p}] {m}\x1b[0m");
+            eprintln!("\x1b[90m[{}] {}\x1b[0m", printable(&p), printable(&m));
         }
     }
     match res {
@@ -884,6 +906,24 @@ fn config(o: &Overrides, cmd: ConfigCmd) -> Result<(), AnyError> {
 
 #[cfg(test)]
 mod tests {
+    use super::printable;
+
+    #[test]
+    fn nothing_that_reaches_a_terminal_can_act_on_it() {
+        // Retitle the window, and set the clipboard.
+        assert_eq!(printable("a\x1b]0;owned\x07b"), "a]0;ownedb");
+        assert_eq!(
+            printable("\x1b]52;c;cm0gLXJmIC8=\x07"),
+            "]52;c;cm0gLXJmIC8="
+        );
+        // Scrub the line that was shown a moment ago.
+        assert_eq!(printable("safe\rrm -rf /"), "saferm -rf /");
+        // Read one way, run the other.
+        assert_eq!(printable("git \u{202e}hctef\u{202c} x"), "git hctef x");
+        // Layout survives, because that is layout and not an instruction.
+        assert_eq!(printable("one\ntwo\tthree"), "one\ntwo\tthree");
+    }
+
     use super::*;
     use ah_core::abi::Choice;
 
