@@ -457,8 +457,16 @@ fn fold(events: &mut Vec<Value>, next: Value) {
 fn trim(event: &mut Value, max: usize) {
     fn cut(s: &mut String, max: usize) {
         if s.len() > max {
-            let left = s.len() - max;
-            s.truncate(max);
+            // At a character boundary, not at the byte the budget lands on.
+            // A `String` refuses to be cut through the middle of a character
+            // and panics rather than produce one that is not text, and the
+            // panic would be on the thread that forwards events — which,
+            // built with `panic = "abort"`, takes the whole harness with it.
+            // A budget in bytes is still a budget in bytes; this only ever
+            // moves the cut backwards, by at most three.
+            let cut_at = s.floor_char_boundary(max);
+            let left = s.len() - cut_at;
+            s.truncate(cut_at);
             s.push_str(&format!("\n… [{left} bytes not sent to the phone]"));
         }
     }
@@ -1124,6 +1132,32 @@ mod tests {
         trim(&mut ev, 100);
         let out = ev.pointer("/result/output").unwrap().as_str().unwrap();
         assert!(out.contains("400 bytes not sent"), "{out}");
+    }
+
+    #[test]
+    fn an_event_that_is_not_ascii_is_cut_between_characters() {
+        // Three bytes each, so a budget of 100 falls inside the 34th one.
+        // Cutting there would have been a panic on the forwarding thread, and
+        // this process aborts on a panic rather than unwinding.
+        let mut ev = text(&"日".repeat(200));
+        trim(&mut ev, 100);
+        let out = ev["text"].as_str().unwrap();
+        assert!(out.starts_with(&"日".repeat(33)), "{out}");
+        assert!(!out.starts_with(&"日".repeat(34)), "cut short, not long");
+        // 600 bytes in, 99 kept, so 501 were not sent.
+        assert!(out.contains("501 bytes not sent"), "{out}");
+    }
+
+    #[test]
+    fn a_character_that_straddles_the_budget_is_the_only_thing_given_up() {
+        // Four bytes rather than three, to walk the cut back further; and a
+        // one-byte character after it, to show nothing beyond the cut moved.
+        let mut ev = text(&format!("{}x", "🙂".repeat(30)));
+        trim(&mut ev, 10);
+        let out = ev["text"].as_str().unwrap();
+        assert!(out.starts_with(&"🙂".repeat(2)), "{out}");
+        assert!(!out.starts_with(&"🙂".repeat(3)), "cut short, not long");
+        assert!(out.contains("113 bytes not sent"), "{out}");
     }
 
     #[test]
