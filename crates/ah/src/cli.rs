@@ -459,8 +459,27 @@ pub fn subcommand(cmd: Command, o: &Overrides) -> Result<(), AnyError> {
     match cmd {
         Command::Login { key } => login(o, key),
         Command::Logout => {
-            ah_core::auth::clear_key()?;
-            println!("removed {}", ah_core::paths::credentials_file().display());
+            let kept = ah_core::auth::clear_key()?;
+            let file = ah_core::paths::credentials_file();
+            if !kept.anything() {
+                println!("removed {}", file.display());
+                return Ok(());
+            }
+            // The file is deliberately still there, because logging out of the
+            // model provider is not the same as giving up the pairing that can
+            // end a phone's reach, or the dictation key.
+            println!("removed the OpenRouter key from {}", file.display());
+            if kept.pairing {
+                match &kept.relay {
+                    Some(relay) => println!(
+                        "the pairing with {relay} is untouched; `ah remote forget` ends it"
+                    ),
+                    None => println!("the pairing is untouched; `ah remote forget` ends it"),
+                }
+            }
+            if kept.deepgram_key {
+                println!("the Deepgram key is untouched");
+            }
             Ok(())
         }
         Command::Models {

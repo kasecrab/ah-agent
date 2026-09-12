@@ -214,6 +214,19 @@ pub fn clear_remote() -> Result<()> {
     write_credentials(&creds)
 }
 
+/// Forget the code but remember where it was made.
+///
+/// What a pairing *is*, is the code. The relay is an address, and it is still
+/// the address the next pairing will be made against — so `ah remote pair`,
+/// which revokes what it replaces before it makes anything new, puts the code
+/// down here rather than clearing the pair of them and leaving the next
+/// command with no relay to reach for.
+pub fn clear_remote_code() -> Result<()> {
+    let mut creds = read_credentials().unwrap_or_default();
+    set_secret(&mut creds.remote_code, None);
+    write_credentials(&creds)
+}
+
 fn from_env_or_file(
     var: &str,
     pick: impl Fn(&mut Credentials) -> Option<String>,
@@ -229,7 +242,11 @@ fn from_env_or_file(
 }
 
 fn read_credentials() -> Option<Credentials> {
-    let mut text = std::fs::read_to_string(crate::paths::credentials_file()).ok()?;
+    read_credentials_at(&crate::paths::credentials_file())
+}
+
+fn read_credentials_at(path: &std::path::Path) -> Option<Credentials> {
+    let mut text = std::fs::read_to_string(path).ok()?;
     let parsed = toml::from_str::<Credentials>(&text).ok();
     // The whole file, every key in it, as one string on the heap. It has been
     // parsed; there is nothing left to want it for.
@@ -258,7 +275,10 @@ pub fn save_key(key: &str) -> Result<()> {
 /// Replace the credentials file. Every key in it is a secret, so the file is
 /// the owner's alone and is rewritten whole rather than appended to.
 fn write_credentials(creds: &Credentials) -> Result<()> {
-    let path = crate::paths::credentials_file();
+    write_credentials_at(&crate::paths::credentials_file(), creds)
+}
+
+fn write_credentials_at(path: &std::path::Path, creds: &Credentials) -> Result<()> {
     if let Some(p) = path.parent() {
         std::fs::create_dir_all(p)?;
         #[cfg(unix)]
@@ -279,7 +299,7 @@ fn write_credentials(creds: &Credentials) -> Result<()> {
     // on the way out.
     wipe(&mut text);
     written?;
-    std::fs::rename(&tmp, &path)?;
+    std::fs::rename(&tmp, path)?;
     Ok(())
 }
 
@@ -307,12 +327,69 @@ fn write_whole(tmp: &std::path::Path, text: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn clear_key() -> Result<()> {
-    let path = crate::paths::credentials_file();
-    if path.exists() {
+/// What clearing the API key was not allowed to take with it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Kept {
+    /// Whether a pairing code is still written down.
+    pub pairing: bool,
+    /// The relay that pairing was made against, when it is known: worth
+    /// naming, because ending the pairing means reaching that relay and not
+    /// another one.
+    pub relay: Option<String>,
+    /// Whether the dictation key is still here. Nothing to do with logging
+    /// out of the model provider, and taken away by the same command until
+    /// now.
+    pub deepgram_key: bool,
+}
+
+impl Kept {
+    /// Whether anything at all was kept, which is the same question as whether
+    /// the credentials file is still there.
+    pub fn anything(&self) -> bool {
+        self.pairing || self.deepgram_key
+    }
+}
+
+/// Take away the OpenRouter key, and nothing else.
+///
+/// This used to delete the credentials file whole, which took the pairing code
+/// with it — and the pairing code is the only thing on this machine that can
+/// revoke the pairing. A hub stays provisioned on the relay until it is told
+/// otherwise; it goes on holding days of ciphertext for whoever has the code,
+/// and goes on accepting them as this desktop. So logging out of a model
+/// provider was quietly making a pairing permanent, by destroying the one
+/// thing that could have ended it, and calling that "removed".
+///
+/// What is returned says what survived, so that whoever asked can be told. The
+/// file itself is removed only when there was nothing in it but the key, which
+/// keeps the ordinary case — one key, no phone, no dictation — exactly as it
+/// was.
+pub fn clear_key() -> Result<Kept> {
+    clear_key_at(&crate::paths::credentials_file())
+}
+
+fn clear_key_at(path: &std::path::Path) -> Result<Kept> {
+    let Some(mut creds) = read_credentials_at(path) else {
+        // Nothing there, or nothing that parses. There is no pairing to be
+        // careful of in either case, and a file that is not readable as
+        // credentials is not one anything else will read either.
+        if path.exists() {
+            std::fs::remove_file(path)?;
+        }
+        return Ok(Kept::default());
+    };
+    set_secret(&mut creds.openrouter_api_key, None);
+    let kept = Kept {
+        pairing: creds.remote_code.is_some(),
+        relay: creds.remote_url.clone(),
+        deepgram_key: creds.deepgram_api_key.is_some(),
+    };
+    if kept.anything() {
+        write_credentials_at(path, &creds)?;
+    } else if path.exists() {
         std::fs::remove_file(path)?;
     }
-    Ok(())
+    Ok(kept)
 }
 
 /// What OpenRouter reports for a key.
@@ -376,6 +453,96 @@ mod tests {
         assert_eq!(field.as_deref(), Some("the-new-pairing-code"));
         set_secret(&mut field, None);
         assert_eq!(field, None);
+    }
+
+    /// A credentials file of this test's own. The path is passed in rather
+    /// than found through the environment, so these run beside every other
+    /// test in the process without any of them agreeing about a variable.
+    fn a_file_of_its_own(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("ah-auth-{}-{name}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        dir.join("credentials.toml")
+    }
+
+    #[test]
+    fn logging_out_of_the_model_provider_leaves_the_pairing_where_it_is() {
+        let path = a_file_of_its_own("pairing");
+        let _ = std::fs::remove_file(&path);
+        write_credentials_at(
+            &path,
+            &Credentials {
+                openrouter_api_key: Some("sk-or-v1-0123456789abcdef".into()),
+                deepgram_api_key: None,
+                remote_code: Some("ABCD-EFGH-IJKL-MNOP".into()),
+                remote_url: Some("https://relay.example.com".into()),
+            },
+        )
+        .unwrap();
+
+        let kept = clear_key_at(&path).unwrap();
+        assert!(
+            kept.pairing,
+            "the code is the only thing that can revoke it"
+        );
+        assert_eq!(kept.relay.as_deref(), Some("https://relay.example.com"));
+        assert!(path.exists(), "the file went and took the pairing with it");
+
+        let left = read_credentials_at(&path).unwrap();
+        assert_eq!(left.openrouter_api_key, None, "that was the thing to clear");
+        assert_eq!(left.remote_code.as_deref(), Some("ABCD-EFGH-IJKL-MNOP"));
+        assert_eq!(
+            left.remote_url.as_deref(),
+            Some("https://relay.example.com")
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn logging_out_with_nothing_else_in_the_file_takes_the_file_too() {
+        let path = a_file_of_its_own("key-only");
+        let _ = std::fs::remove_file(&path);
+        write_credentials_at(
+            &path,
+            &Credentials {
+                openrouter_api_key: Some("sk-or-v1-0123456789abcdef".into()),
+                deepgram_api_key: None,
+                remote_code: None,
+                remote_url: None,
+            },
+        )
+        .unwrap();
+
+        let kept = clear_key_at(&path).unwrap();
+        assert!(!kept.anything(), "{kept:?}");
+        assert!(!path.exists(), "nothing was left in it to keep");
+        // And doing it again, with no file at all, is not an error.
+        assert_eq!(clear_key_at(&path).unwrap(), Kept::default());
+    }
+
+    #[test]
+    fn the_dictation_key_is_not_the_model_providers_to_take() {
+        let path = a_file_of_its_own("deepgram");
+        let _ = std::fs::remove_file(&path);
+        write_credentials_at(
+            &path,
+            &Credentials {
+                openrouter_api_key: Some("sk-or-v1-0123456789abcdef".into()),
+                deepgram_api_key: Some("dg-0123456789abcdef".into()),
+                remote_code: None,
+                remote_url: None,
+            },
+        )
+        .unwrap();
+
+        let kept = clear_key_at(&path).unwrap();
+        assert!(kept.deepgram_key && !kept.pairing, "{kept:?}");
+        let left = read_credentials_at(&path).unwrap();
+        assert_eq!(left.openrouter_api_key, None);
+        assert_eq!(
+            left.deepgram_api_key.as_deref(),
+            Some("dg-0123456789abcdef")
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

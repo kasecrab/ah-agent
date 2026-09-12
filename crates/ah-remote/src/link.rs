@@ -413,10 +413,26 @@ where
                     if body.contains("skew") {
                         format!("the relay and this machine disagree about the time: {body}")
                     } else {
-                        "the relay refused the pairing".into()
+                        // The one answer the socket gives for every reason it
+                        // will not open: a hub it holds no key for, a hub it
+                        // has never been told about, and a signature it will
+                        // not accept are all this, in the same words, because
+                        // a relay that told them apart would tell anybody with
+                        // a list of guessed hub names which of them are real.
+                        // So this cannot say the relay has never heard of the
+                        // pairing, only that it will not open it.
+                        "the relay refused the pairing: it holds no key for this hub — never \
+                         paired, revoked, or a relay deployed fresh since — or the code is not \
+                         the one it was given"
+                            .into()
                     }
                 }
-                404 => "the relay has never heard of this pairing".into(),
+                // Not the socket's answer for an unknown pairing: the hub path
+                // resolves whatever the name is. This is a URL that is not
+                // this relay, or not the whole of it.
+                404 => {
+                    "there is nothing at that address: the relay URL does not reach a relay".into()
+                }
                 409 => "a desktop is already connected to this pairing".into(),
                 410 => "the pairing was revoked".into(),
                 _ => format!("the relay answered {status}"),
@@ -526,7 +542,14 @@ mod tests {
         // The refusals that matter are the ones a person has to act on, and
         // each of them arrives as a status rather than as a socket error.
         for (status, expect) in [
-            (404u16, "never heard of"),
+            // The relay says 401 for a hub it has no key for and for a proof
+            // it will not take, in the same words on purpose, so this may not
+            // claim to know which of the two it was.
+            (401u16, "refused the pairing"),
+            (401, "holds no key for this hub"),
+            // And it never says 404 for a pairing at all: the hub path
+            // resolves any name, so a 404 is a URL that is not the relay.
+            (404, "does not reach a relay"),
             (409, "already connected"),
             (410, "revoked"),
         ] {

@@ -21,6 +21,13 @@ pub fn subcommand(cmd: RemoteCmd, o: &crate::Overrides) -> Result<(), AnyError> 
 /// The code is generated here and never travels over the network: the relay is
 /// told a key derived from it, and the phone is told the code itself, once, by
 /// being shown it.
+///
+/// Pairing again ends the pairing it replaces, at the relay, before it makes
+/// anything new. `ah remote pair` is the verb somebody reaches for when a code
+/// has leaked, and a rotation that leaves the leaked one working is not a
+/// rotation: the old hub would go on holding days of ciphertext for whoever
+/// has the old code, and go on accepting them as this machine. Nothing here
+/// would ever dial it again, so nobody would find out.
 fn pair(url: Option<String>, token: Option<String>) -> Result<(), AnyError> {
     let url = match url.or_else(auth::remote_url) {
         Some(u) => check_url(u)?,
@@ -60,6 +67,22 @@ fn pair(url: Option<String>, token: Option<String>) -> Result<(), AnyError> {
     if token.trim().is_empty() {
         return Err("no secret given, so nothing was paired".into());
     }
+
+    // Before anything new exists, so that a failure here leaves the pairing
+    // this machine already had rather than two live ones with only the newer
+    // written down. A relay that cannot be reached stops the command, for the
+    // same reason `forget` stops: the old code is the only thing that can
+    // revoke the old hub, and going on would leave this machine holding a
+    // different one.
+    end_the_pairing_here_now().map_err(|why| {
+        format!(
+            "this machine already has a pairing and the relay would not end it: {why}\n\
+             Pairing again would leave the old code working on a hub nothing here dials any \
+             more, so nothing was changed. Try again when the relay answers, or \
+             `ah remote forget --local` first if the old pairing is to be abandoned rather \
+             than revoked."
+        )
+    })?;
 
     // Wrapped the moment it exists. From here it is the one secret this
     // machine has, and this function holds it in three shapes at once — bytes,
@@ -141,33 +164,80 @@ fn status() -> Result<(), AnyError> {
 /// the relay is told while there is still something to tell it with, and a
 /// relay that cannot be told stops the command rather than being skipped over.
 fn forget(local: bool) -> Result<(), AnyError> {
-    let pairing = auth::remote_code()
-        .map(Zeroizing::new)
-        .and_then(|c| code::parse(&c))
-        .zip(auth::remote_url());
-    match (local, pairing) {
-        (false, Some((raw, url))) => {
-            let keys = crypto::Keys::derive(&raw);
-            if let Err(why) = provision::revoke(&url, &keys) {
-                return Err(format!(
-                    "the relay still holds this pairing, so forgetting it here would leave it \
-                     open to whoever has the code: {why}\n\
-                     Try again when the relay answers, or `ah remote forget --local` to forget \
-                     it here anyway."
-                )
-                .into());
-            }
-            println!("the pairing is revoked at the relay: the old code now opens nothing");
-        }
-        (false, None) => println!("nothing paired here"),
-        (true, _) => println!(
+    if local {
+        println!(
             "forgotten here only. The relay still holds this pairing, and the old code still \
              opens it"
-        ),
+        );
+    } else {
+        let there_was_one = end_the_pairing_here_now().map_err(|why| {
+            format!(
+                "the relay still holds this pairing, so forgetting it here would leave it open \
+                 to whoever has the code: {why}\n\
+                 Try again when the relay answers, or `ah remote forget --local` to forget it \
+                 here anyway."
+            )
+        })?;
+        if !there_was_one {
+            println!("nothing paired here");
+        }
     }
     auth::clear_remote()?;
     println!("the code and relay are gone from this machine");
     Ok(())
+}
+
+/// Revoke whatever pairing this machine is holding, and say what that meant.
+///
+/// Shared by `forget`, whose whole job this is, and by `pair`, which has to do
+/// it before it writes a new code over the old one. Nothing stored is not an
+/// error — there is simply nothing to end — but a stored pairing the relay
+/// will not discuss is, because the alternative is a machine that believes it
+/// has ended something it has not. The two callers are about to do different
+/// things next, so the reason comes back on its own and each of them says what
+/// it means for what they were doing. `false` is "there was nothing here to
+/// end", which `pair` passes over in silence on a machine being paired for the
+/// first time and `forget` says out loud.
+fn end_the_pairing_here_now() -> Result<bool, String> {
+    let Some((raw, url)) = auth::remote_code()
+        .map(Zeroizing::new)
+        .and_then(|c| code::parse(&c))
+        .zip(auth::remote_url())
+    else {
+        // A code that is stored but unreadable counts as nothing here: there
+        // is no key to derive from it, so there is nothing to sign with and
+        // nothing this machine could revoke even if it wanted to.
+        return Ok(false);
+    };
+    let keys = crypto::Keys::derive(&raw);
+    let ended = provision::revoke(&url, &keys);
+    // Written down straight away, before anything else can fail. A code the
+    // relay has just stopped answering for is worse than no code at all: it
+    // makes `ah remote status` say "paired" and the daemon dial a hub that
+    // will only ever turn it away. The relay's address stays, because it is
+    // an address rather than a secret and `pair` is about to want it again;
+    // `forget`, which means it about the relay too, clears that separately.
+    if ended.is_ok() {
+        auth::clear_remote_code().map_err(|e| e.to_string())?;
+    }
+    match ended {
+        Ok(provision::Revocation::Ended) => {
+            println!("the pairing is revoked at the relay: the old code now opens nothing");
+            Ok(true)
+        }
+        Ok(provision::Revocation::NothingToEnd) => {
+            // Said plainly rather than dressed up as a revocation. The relay
+            // holds no key for this hub, which is the state a revocation is
+            // for — but it is a different sentence, and a person rotating a
+            // leaked code deserves to know which one they got.
+            println!(
+                "the relay has no pairing under this code to end — it was revoked already, or \
+                 the relay has been deployed fresh since — so the old code opens nothing on it"
+            );
+            Ok(true)
+        }
+        Err(why) => Err(why.to_string()),
+    }
 }
 
 /// Refuse a relay a phone could not reach, or could reach in the clear.

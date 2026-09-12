@@ -95,9 +95,10 @@ Worth knowing before you rely on any of it:
 
 - **One code, for the life of the pairing.** Every key comes from it, so there
   is no forward secrecy: somebody who records the traffic today and learns the
-  code later can read what they recorded. Rotating means `ah remote forget` and
-  pairing again, which takes a few seconds and is worth doing if a code has
-  ever been somewhere it should not.
+  code later can read what they recorded. Rotating is `ah remote pair` on its
+  own: it ends the pairing it replaces before it makes the new one, so there is
+  never a moment with two live codes. It takes a few seconds and is worth doing
+  if a code has ever been somewhere it should not.
 - **Paired phones are not isolated from one another.** The key a phone seals
   under is derived from the pairing code, so any phone holding the code can
   compute any other's. Two phones are two devices with the same key, not two
@@ -116,6 +117,11 @@ Worth knowing before you rely on any of it:
   their own background jobs and their own subagents, and cannot reach each
   other's — but they are one process with one set of environment variables and
   one API key, and a tool in one can read any file the others can.
+- **Two publishers are kept apart by a file lock, which is a Unix thing.**
+  A window taking the link off a running daemon, and the daemon giving way,
+  are co-ordinated by `flock`. Where there is none, nothing stops two
+  publishers from being on the air at once; the relay refuses the second
+  socket, so what happens is a reconnect fight rather than anything worse.
 
 The connect signature goes in a header rather than in the URL, so it is not
 kept by whatever logs requests, and the relay refuses a second use of the same
@@ -257,7 +263,7 @@ what that leaves behind.
 | What it says | What it means |
 |---|---|
 | `the relay refused the pairing` | the relay was redeployed and no longer holds this pairing, the code is from an older one, or the signature did not match for some other reason. The relay answers all three the same way on purpose, so that somebody guessing at hub names cannot learn which of them are real. Pair again. |
-| `the relay has never heard of this pairing` | nothing answered on the hub route at all, so that URL is not a relay. `ah remote status` says which one is being dialled. |
+| `there is nothing at that address` | nothing answered on the hub route at all, so that URL is not a relay. `ah remote status` says which one is being dialled. |
 | `a desktop is already connected` | another `ah` on this machine, or another machine, holds the pairing. It gives way once it goes quiet. |
 | `the pairing was revoked` | `ah remote forget` was run somewhere. Pair again. |
 | `the relay and this machine disagree about the time` | a clock is more than five minutes out. It is the only place a clock matters. |

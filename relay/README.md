@@ -43,11 +43,18 @@ ah remote forget
 ```
 
 tells the relay to revoke the hub — it drops the log and the device list,
-closes both sockets, and refuses that hub name for good — and then clears the
-local credential. If the relay cannot be reached it stops rather than clearing
-anything, because a pairing forgotten only on this side is a pairing that still
-answers whoever has the code. `--local` forgets it here anyway, and says what
-that leaves behind.
+closes both sockets, and marks the name revoked, so the old code opens nothing
+afterwards — and then clears the local credential. If the relay cannot be
+reached it stops rather than clearing anything, because a pairing forgotten
+only on this side is a pairing that still answers whoever has the code.
+`--local` forgets it here anyway, and says what that leaves behind.
+
+The mark lives in the hub's own storage and lasts as long as the hub does. A
+hub nobody has connected to for thirty days deletes itself whole — log, device
+list and revoked mark together — and the name is free again after that, for
+whoever holds both the old pairing code, which is the only thing that derives
+that name, and the provisioning secret. `ah remote pair` makes a fresh code
+and so a different hub, and revokes the one it replaces before it does.
 
 There is deliberately no one-click deploy button: the Workers Builds image
 ships Node, Python, PHP, Ruby, Go and Bun, but no Rust toolchain, so a button
