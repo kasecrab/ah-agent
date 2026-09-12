@@ -117,9 +117,16 @@ impl Output {
             let line: String = self.partial.drain(..=i).collect();
             self.push_line(line.trim_end_matches(['\n', '\r']).to_string());
         }
-        // A line that never ends would grow without bound.
+        // A line that never ends would grow without bound. The cut has to
+        // land between characters: these bytes came through
+        // `from_utf8_lossy`, so every replacement is three bytes wide and a
+        // byte offset counted back from the end is usually inside one.
+        // Splitting there panics, and this runs on the pump thread with the
+        // output lock held, which under `panic = "abort"` takes the whole
+        // harness down with it.
         if self.partial.len() > self.cap {
-            let keep = self.partial.split_off(self.partial.len() - self.cap / 2);
+            let at = boundary_at_or_after(&self.partial, self.partial.len() - self.cap / 2);
+            let keep = self.partial.split_off(at);
             self.partial = keep;
         }
     }
@@ -640,12 +647,44 @@ pub(crate) fn notice_lock() -> std::sync::MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// The first index at or after `i` that a `&str` may be split at.
+///
+/// `String::split_off` takes bytes and panics when the index it is given is in
+/// the middle of a character, so anything cutting text at a size rather than at
+/// a boundary has to walk forward to the next one.
+fn boundary_at_or_after(s: &str, i: usize) -> usize {
+    let mut at = i.min(s.len());
+    while at < s.len() && !s.is_char_boundary(at) {
+        at += 1;
+    }
+    at
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn cwd() -> std::path::PathBuf {
         std::env::current_dir().unwrap()
+    }
+
+    #[test]
+    fn a_long_line_of_text_that_is_not_ascii_does_not_take_the_process_down() {
+        // 4096 is the floor `Output::new` puts on the cap, so the cut lands at
+        // 4096 bytes back from the end — inside a three-byte character for a
+        // stream made only of them.
+        let mut out = Output::new(0);
+        for _ in 0..40 {
+            out.push_bytes("✓".repeat(1000).as_bytes());
+        }
+        assert!(out.partial.len() <= out.cap);
+        // Invalid bytes become the three-byte replacement, which cuts the same
+        // way.
+        let mut out = Output::new(0);
+        for _ in 0..40 {
+            out.push_bytes(&[0xff; 3000]);
+        }
+        assert!(out.partial.len() <= out.cap);
     }
 
     #[test]
