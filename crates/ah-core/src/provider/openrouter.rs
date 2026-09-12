@@ -14,6 +14,15 @@ use crate::{Error, Result};
 
 pub const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
 
+/// The `Authorization` header for `key`, wiped when the request has gone.
+///
+/// The key itself has to live for as long as this program can make a request,
+/// which is the whole session; what need not live that long is a fresh copy of
+/// it per request, left in whatever heap chunk the allocator hands out next.
+fn bearer(key: &str) -> zeroize::Zeroizing<String> {
+    zeroize::Zeroizing::new(format!("Bearer {key}"))
+}
+
 pub struct OpenRouter {
     agent: ureq::Agent,
     base_url: String,
@@ -81,7 +90,7 @@ impl OpenRouter {
         let mut resp = self
             .agent
             .post(self.url("/audio/transcriptions"))
-            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Authorization", &*bearer(&self.api_key))
             .header("HTTP-Referer", self.referer.clone())
             .header("X-Title", self.app_title.clone())
             .send_json(&body)?;
@@ -121,7 +130,7 @@ impl OpenRouter {
         let mut resp = self
             .agent
             .post(self.url("/images"))
-            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Authorization", &*bearer(&self.api_key))
             .header("HTTP-Referer", self.referer.clone())
             .header("X-Title", self.app_title.clone())
             .send_json(&body)?;
@@ -148,7 +157,7 @@ impl OpenRouter {
     pub fn get_json(&self, path: &str) -> Result<Value> {
         let mut req = self.agent.get(self.url(path));
         if !self.api_key.is_empty() {
-            req = req.header("Authorization", format!("Bearer {}", self.api_key));
+            req = req.header("Authorization", &*bearer(&self.api_key));
         }
         let mut resp = req.call()?;
         let status = resp.status().as_u16();
@@ -508,7 +517,7 @@ impl Provider for OpenRouter {
         let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Piece>>(64);
         let agent = self.agent.clone();
         let url = self.url("/chat/completions");
-        let key = self.api_key.clone();
+        let key = zeroize::Zeroizing::new(self.api_key.clone());
         let referer = self.referer.clone();
         let title = self.app_title.clone();
         let worker = std::thread::Builder::new()
@@ -517,7 +526,7 @@ impl Provider for OpenRouter {
                 let send = |v| tx.send(v).is_ok();
                 let mut resp = match agent
                     .post(url)
-                    .header("Authorization", format!("Bearer {key}"))
+                    .header("Authorization", &*bearer(&key))
                     .header("HTTP-Referer", referer)
                     .header("X-Title", title)
                     .header("Accept", "text/event-stream")
