@@ -66,6 +66,85 @@ fn read_capped_text(path: &Path) -> std::io::Result<String> {
     })
 }
 
+/// Where a write through `path` would actually land, when that is somewhere
+/// outside the directory being worked in.
+///
+/// `std::fs::write` opens what a symbolic link points at and truncates that.
+/// The person approving the call is shown the path the model asked for, so a
+/// link planted in a checkout — `docs/CHANGELOG.md` pointing at `~/.bashrc` —
+/// turns an approved write inside the project into a rewrite of a file
+/// somewhere else entirely. A link that stays inside the working directory is
+/// the ordinary kind and is followed as before; one that leaves it is refused,
+/// and the refusal names the real destination, so the model can ask for that
+/// path outright and have it put to the person under its own name.
+///
+/// The link is looked at and then written through, so in principle it can be
+/// swapped in between. Closing that would mean opening with `O_NOFOLLOW` and
+/// writing through the handle; this is the check the permission prompt is
+/// missing, not a defence against somebody who can already race files in the
+/// working directory.
+fn leads_outside(cwd: &Path, path: &Path) -> Option<PathBuf> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if !meta.file_type().is_symlink() {
+        return None;
+    }
+    let target = link_target(path)?;
+    let root = std::fs::canonicalize(cwd).unwrap_or_else(|_| tidy(cwd));
+    (!target.starts_with(&root)).then_some(target)
+}
+
+/// What a link points at, resolved as far as the filesystem allows. A link
+/// whose target does not exist yet cannot be canonicalised and the write would
+/// create it, so that name is put together by hand instead.
+fn link_target(link: &Path) -> Option<PathBuf> {
+    if let Ok(real) = std::fs::canonicalize(link) {
+        return Some(real);
+    }
+    let raw = std::fs::read_link(link).ok()?;
+    let joined = if raw.is_absolute() {
+        raw
+    } else {
+        link.parent()?.join(raw)
+    };
+    // The directory the target would be created in is often reachable even
+    // when the target is not; resolving it settles any `..` and any link
+    // further up.
+    match (
+        joined.parent().map(std::fs::canonicalize),
+        joined.file_name(),
+    ) {
+        (Some(Ok(dir)), Some(name)) => Some(dir.join(name)),
+        _ => Some(tidy(&joined)),
+    }
+}
+
+/// `.` dropped and `..` folded away, for a path that cannot be canonicalised
+/// because it is not there.
+fn tidy(p: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// The refusal shown for a write that a link would carry out of the tree.
+fn wrong_destination(path: &Path, target: &Path, cwd: &Path) -> ToolResult {
+    ToolResult::err(format!(
+        "{}: a symbolic link to {}, which is outside {}. Writing through it would change that \
+         file instead of this one; name the path you mean if that is what you want.",
+        path.display(),
+        target.display(),
+        cwd.display()
+    ))
+}
+
 impl Tool for ReadFile {
     fn spec(&self) -> ToolSpec {
         ToolSpec::new(
@@ -158,6 +237,9 @@ impl Tool for WriteFile {
         let _held = lock
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(target) = leads_outside(ctx.cwd, &path) {
+            return wrong_destination(&path, &target, ctx.cwd);
+        }
         if let Some(parent) = path.parent()
             && let Err(e) = std::fs::create_dir_all(parent)
         {
@@ -239,6 +321,9 @@ impl Tool for EditFile {
         let _held = lock
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(target) = leads_outside(ctx.cwd, &path) {
+            return wrong_destination(&path, &target, ctx.cwd);
+        }
         let text = match read_capped_text(&path) {
             Ok(t) => t,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -467,6 +552,50 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn a_write_through_a_link_out_of_the_tree_is_refused() {
+        let base = std::env::temp_dir().join(format!("ah-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let work = base.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let outside = base.join("outside.txt");
+        std::fs::write(&outside, "keep me\n").unwrap();
+        std::os::unix::fs::symlink(&outside, work.join("notes.md")).unwrap();
+        let settings = ah_abi::ToolSettings::default();
+        let ctx = ToolCtx {
+            cwd: &work,
+            settings: &settings,
+            agent: 0,
+            cancel: crate::tools::never(),
+            ask: crate::tools::no_user(),
+            spawn: None,
+        };
+
+        let w = WriteFile.run(&json!({"path": "notes.md", "content": "theirs\n"}), &ctx);
+        assert!(w.is_error, "{}", w.output);
+        assert!(w.output.contains("outside.txt"), "{}", w.output);
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "keep me\n");
+
+        let e = EditFile.run(
+            &json!({"path": "notes.md", "old_string": "keep", "new_string": "drop"}),
+            &ctx,
+        );
+        assert!(e.is_error, "{}", e.output);
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "keep me\n");
+
+        // A link that stays inside the directory being worked in is the
+        // ordinary kind and still works.
+        std::fs::write(work.join("real.txt"), "one\n").unwrap();
+        std::os::unix::fs::symlink(work.join("real.txt"), work.join("link.txt")).unwrap();
+        let ok = WriteFile.run(&json!({"path": "link.txt", "content": "two\n"}), &ctx);
+        assert!(!ok.is_error, "{}", ok.output);
+        assert_eq!(
+            std::fs::read_to_string(work.join("real.txt")).unwrap(),
+            "two\n"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn read_write_roundtrip() {
         let dir = std::env::temp_dir().join(format!("ah-test-{}", std::process::id()));

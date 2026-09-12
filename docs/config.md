@@ -260,6 +260,27 @@ or `AH_VOICE_CAPTURE_CMD` only. A project's `.ah/config.toml` cannot set it.
 | `job_wait_ms` | `60000` | default limit for a `jobs` wait |
 | `job_wake` | `true` | when a job ends while the model is idle, start a turn so it can read the output and report |
 
+### What the file tools read and write
+
+`read_file` and `edit_file` read a regular file of at most 16 MiB. A device, a
+FIFO, a directory or a larger file is refused with an error instead: the line
+limit and the truncation only apply once a file is already in memory, so
+`read_file("/dev/zero")` would otherwise grow until the process died of it and
+a FIFO would never return. There is no key for the limit — it is far above any
+text file worth reading whole, and a larger one is a file to look at a piece at
+a time with `sed -n` or `head`. The same bound applies to the instruction files
+named by `prompt.instructions`, at 1 MiB, since those are read before the first
+turn and sent with every request.
+
+A write through a symbolic link that leads out of the directory you are working
+in is refused as well, by both `write_file` and `edit_file`. The prompt asking
+you to approve a write names the path the model gave, and a link planted in a
+checkout would make that path a different file entirely; the refusal says where
+the link pointed, so the model can ask for that path by name and have it put to
+you under its own name. A link that stays inside the working directory is the
+ordinary kind and is written through as before, and the prompt shows where any
+link leads.
+
 ### Parallel tool calls
 
 Models ask for several tools in one message: read these four files, grep for

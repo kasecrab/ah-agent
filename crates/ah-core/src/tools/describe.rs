@@ -26,9 +26,9 @@ pub fn describe(name: &str, args: &Value) -> Option<String> {
                 _ => format!("Read({path})"),
             })
         }
-        "write_file" => Some(format!("Write({})", arg_str(args, "path")?)),
+        "write_file" => Some(format!("Write({})", where_it_lands(arg_str(args, "path")?))),
         "edit_file" => {
-            let path = arg_str(args, "path")?;
+            let path = where_it_lands(arg_str(args, "path")?);
             let n = args
                 .get("edits")
                 .and_then(Value::as_array)
@@ -69,6 +69,34 @@ pub fn describe(name: &str, args: &Value) -> Option<String> {
             })
         }
         _ => None,
+    }
+}
+
+/// The path a call gave, and where it actually leads when the last component
+/// is a symbolic link.
+///
+/// This line is what somebody reads when they are asked to approve a write,
+/// and approving `Write(notes.md)` should not be approving a rewrite of
+/// whatever `notes.md` happens to point at. A relative path is read against
+/// the directory this program was started in, which is the one the model is
+/// working in in every ordinary case; a subagent given a directory of its own
+/// may have its link go unnamed here, so this is what the header can add, not
+/// a substitute for the tool refusing the write itself.
+fn where_it_lands(path: &str) -> String {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let resolved = super::resolve_path(&cwd, path);
+    let Ok(meta) = std::fs::symlink_metadata(&resolved) else {
+        return path.to_string();
+    };
+    if !meta.file_type().is_symlink() {
+        return path.to_string();
+    }
+    match std::fs::canonicalize(&resolved)
+        .ok()
+        .or_else(|| std::fs::read_link(&resolved).ok())
+    {
+        Some(target) if target != resolved => format!("{path} → {}", target.display()),
+        _ => path.to_string(),
     }
 }
 
@@ -234,6 +262,25 @@ mod tests {
             "Jobs(stop 2)"
         );
         assert!(describe("some_plugin_tool", &json!({"x": 1})).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_write_through_a_link_says_where_it_lands() {
+        let dir = std::env::temp_dir().join(format!("ah-describe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let real = dir.join("elsewhere.txt");
+        std::fs::write(&real, "keep me\n").unwrap();
+        let link = dir.join("notes.md");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let header = d("write_file", json!({"path": link.display().to_string()}));
+        assert!(header.contains("notes.md → "), "{header}");
+        assert!(header.contains("elsewhere.txt"), "{header}");
+        // A file that is what it says it is reads as it always did.
+        let header = d("edit_file", json!({"path": real.display().to_string()}));
+        assert_eq!(header, format!("Edit({})", real.display()));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
