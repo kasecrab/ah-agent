@@ -37,6 +37,22 @@ const SEEN_EVERY_MS: u64 = 10_000;
 /// spends the day's read allowance on its own.
 const SUB_EVERY_MS: u64 = 1_000;
 
+/// How many sockets one hub may open in a day.
+///
+/// Every accepted handshake writes three or four rows — the nonce, the pass
+/// that clears out old ones, the device, the day's own count — and none of
+/// them is a frame, so [`schema::FRAMES_PER_DAY`] never sees them. Without a
+/// bound of their own a code that got out empties the day's write allowance
+/// from the connect side instead, which leaves the desktop's frames failing
+/// to store for the rest of the day: the same harm that cap exists to
+/// prevent, through the one door it does not watch.
+///
+/// A desktop that reconnects on every change of network and a phone picked up
+/// a hundred times a day are two orders of magnitude below this. A script
+/// dialling in a loop reaches it in minutes and is then turned away for the
+/// rest of the day with the allowance mostly unspent.
+const CONNECTS_PER_DAY: u64 = 2_000;
+
 /// Longest a relay key may be written. One HKDF leaf is 32 bytes, 43
 /// characters of base64url; the rest is room for a longer one later.
 const MAX_KEY_CHARS: usize = 128;
@@ -340,6 +356,13 @@ impl Hub {
             }
             Err(Denied::Signature) => return Response::error("no", 401),
         };
+        // Before the nonce is written down, because that is where this path
+        // starts writing rows at all: a day whose connect allowance is spent
+        // then costs nothing to refuse, which is the whole point of refusing
+        // it.
+        if !self.room_for_a_connect() {
+            return Response::error("too many connections today", 429);
+        }
         // A signature holds for as long as the clocks allow, so without this
         // one that was copied — out of an access log, or off the wire — opens
         // a second socket for five minutes afterwards. Once used, never again.
@@ -395,7 +418,19 @@ impl Hub {
              ON CONFLICT(id) DO UPDATE SET last_ms = ?3",
             Some(vec![dev.into(), tag.into(), (now() as i64).into()]),
         );
-        self.set_meta("last_seen", &now().to_string());
+        // Freshened rather than rewritten, as a socket's own record of when it
+        // was last heard from is. Nothing in a session reads this — it is here
+        // so that whoever deployed the relay can tell a live pairing from an
+        // abandoned one — and at that job a reading from within the last ten
+        // seconds is as good as one from this instant, which is a row the
+        // handshake need not write.
+        if self
+            .meta("last_seen")
+            .and_then(|s| s.parse::<u64>().ok())
+            .is_none_or(|seen| now().saturating_sub(seen) > SEEN_EVERY_MS)
+        {
+            self.set_meta("last_seen", &now().to_string());
+        }
         Response::from_websocket(pair.client)
     }
 
@@ -556,6 +591,39 @@ impl Hub {
         Ok(())
     }
 
+    /// Whether the day's connect allowance has room for one more socket,
+    /// counting it in if it does.
+    ///
+    /// The frame allowance is measured rather than counted: `n` only ever
+    /// goes up, so the day's frames are a subtraction. A handshake leaves no
+    /// such mark behind — the nonce it inserts is deleted again a few minutes
+    /// later, and a device that dials a thousand times is still one row — so
+    /// this one has to be a counter. It is kept in `meta` rather than in
+    /// memory because the object is evicted between connects, and a counter
+    /// that forgets is no counter at all against somebody dialling in a loop.
+    /// It costs one write per connect, which is the write the unconditional
+    /// `last_seen` used to cost, and in exchange it puts a ceiling on all the
+    /// others the handshake makes.
+    fn room_for_a_connect(&self) -> bool {
+        let today = now() / (24 * 60 * 60 * 1000);
+        let day = self
+            .meta("connect_day")
+            .and_then(|d| d.parse().ok())
+            .unwrap_or(0);
+        let taken = self
+            .meta("connects")
+            .and_then(|c| c.parse().ok())
+            .unwrap_or(0);
+        let Some(next) = next_connect(day, today, taken) else {
+            return false;
+        };
+        if day != today {
+            self.set_meta("connect_day", &today.to_string());
+        }
+        self.set_meta("connects", &next.to_string());
+        true
+    }
+
     /// Whether the day's allowance still has room in it. The allowance belongs
     /// to whoever deployed this, so a code that got out cannot quietly empty
     /// it.
@@ -670,6 +738,22 @@ impl Hub {
     }
 }
 
+/// What the day's connect count becomes when one more socket is asked for:
+/// `None` when the day's allowance is spent, and otherwise the number to
+/// write down. Kept apart from the storage it is read out of so that the
+/// arithmetic — a day rolling over, a count reaching its end — can be checked
+/// without a Durable Object to run it in.
+fn next_connect(day: u64, today: u64, taken: u64) -> Option<u64> {
+    if day != today {
+        // A new day, and this connect is the first of it.
+        return Some(1);
+    }
+    if taken >= CONNECTS_PER_DAY {
+        return None;
+    }
+    Some(taken + 1)
+}
+
 /// Compare without leaking where two strings first differ. The length is not
 /// hidden — it is not a secret worth the trouble — but the contents are.
 fn same(a: &str, b: &str) -> bool {
@@ -693,4 +777,40 @@ fn send(ws: &WebSocket, frame: &Envelope) -> Result<()> {
 /// The runtime's clock. `SystemTime::now()` panics on this target.
 fn now() -> u64 {
     Date::now().as_millis()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The connect path writes rows of its own, and a code that got out must
+    /// not be able to spend the day's writes on handshakes alone.
+    #[test]
+    fn a_day_of_connects_is_bounded() {
+        // The first connect of a day starts the count, whatever the day
+        // before it had reached.
+        assert_eq!(next_connect(19_000, 19_001, CONNECTS_PER_DAY), Some(1));
+        assert_eq!(next_connect(0, 19_001, 0), Some(1));
+        // Within the day it counts up, and stops at the allowance.
+        assert_eq!(next_connect(19_001, 19_001, 0), Some(1));
+        assert_eq!(next_connect(19_001, 19_001, 41), Some(42));
+        assert_eq!(
+            next_connect(19_001, 19_001, CONNECTS_PER_DAY - 1),
+            Some(CONNECTS_PER_DAY)
+        );
+        assert_eq!(next_connect(19_001, 19_001, CONNECTS_PER_DAY), None);
+        // And a count that somehow ran past the end stays refused rather
+        // than wrapping round to room again.
+        assert_eq!(next_connect(19_001, 19_001, u64::MAX), None);
+    }
+
+    /// A day's worth of ordinary use is nowhere near the bound: a desktop
+    /// that loses its network every minute all day, and a phone picked up
+    /// every few minutes, together spend a fraction of it.
+    #[test]
+    fn ordinary_use_does_not_reach_the_bound() {
+        let desk_reconnects_every_minute = 24 * 60;
+        let phone_picked_up_every_five = 24 * 12;
+        assert!(desk_reconnects_every_minute + phone_picked_up_every_five < CONNECTS_PER_DAY);
+    }
 }
