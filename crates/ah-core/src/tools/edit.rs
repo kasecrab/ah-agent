@@ -231,7 +231,14 @@ fn common_indent<'a>(lines: impl Iterator<Item = &'a str>) -> String {
                     .zip(lead.bytes())
                     .take_while(|(a, b)| a == b)
                     .count();
-                &cur[..n]
+                // Two indentations can share the first bytes of a character
+                // without sharing the character: U+2000 and U+2001 are
+                // `E2 80 80` and `E2 80 81`, so the count above lands in the
+                // middle of one of them and slicing there would panic on
+                // whichever thread the edit is running on. What the two lines
+                // really begin with ends at the last character boundary at or
+                // before that byte.
+                &cur[..cur.floor_char_boundary(n)]
             }
         });
     }
@@ -412,6 +419,28 @@ mod tests {
             "impl T {\n    fn go(&self) {\n        work()?;\n    }\n}\n"
         );
         assert!(a.notes[0].contains("indentation"), "{:?}", a.notes);
+    }
+
+    /// U+2000 and U+2001 are `E2 80 80` and `E2 80 81`: two whitespace
+    /// prefixes that share their first two bytes without sharing a character.
+    /// Both the text the model sent and the text in the file reach the
+    /// indentation matcher, so both directions are tried here.
+    #[test]
+    fn indentation_in_different_multi_byte_spaces_does_not_panic() {
+        let a = run(
+            "    a();\n    b();\n",
+            "\u{2000}a();\n\u{2001}b();\n",
+            "c();\n",
+        )
+        .unwrap();
+        assert_eq!(a.text, "    c();\n");
+        let a = run(
+            "\u{2000}a();\n\u{2001}b();\n",
+            "    a();\n    b();\n",
+            "c();\n",
+        )
+        .unwrap();
+        assert_eq!(a.text, "c();\n");
     }
 
     #[test]
