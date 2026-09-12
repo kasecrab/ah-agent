@@ -61,7 +61,12 @@ class Hub:
 
 
 HUBS: dict[str, Hub] = {}
+REVOKED: set[str] = set()
 HUBS_LOCK = threading.Lock()
+
+# What the deployed relay asks for before it will make a pairing. Fixed here so
+# a test can pass it without being told.
+TOKEN = os.environ.get("AH_PROVISION_TOKEN", "mock-provision-token")
 
 
 class Peer:
@@ -189,31 +194,53 @@ def serve(sock: socket.socket) -> None:
         return http_error(sock, 400)
 
     if method == "POST" and parts[-1] == "provision":
+        if headers.get("x-ah-provision", "") != TOKEN:
+            return http_error(sock, 401)
         length = int(headers.get("content-length", "0"))
         body = bytes(rest)
         while len(body) < length:
             body += sock.recv(4096)
         key = json.loads(body or b"{}").get("relay_key", "")
+        if not key or len(key) > 128:
+            return http_error(sock, 400)
         with HUBS_LOCK:
+            if hub_id in REVOKED:
+                return http_error(sock, 410)
             if hub_id in HUBS:
                 return http_error(sock, 409)
             HUBS[hub_id] = Hub(unb64u(key))
         return http_error(sock, 200, "paired")
 
     hub = HUBS.get(hub_id)
+    # The same answer a wrong signature gets, so a guessed name and a real one
+    # look alike.
     if hub is None:
-        return http_error(sock, 404)
+        return http_error(sock, 401)
 
     role, ts, nonce, sig = q.get("r"), q.get("ts"), q.get("n"), q.get("h")
     if role not in ("desk", "phone") or not ts or not nonce or not sig:
         return http_error(sock, 401)
     now = int(time.time() * 1000)
-    if abs(now - int(ts)) > SKEW_MS:
-        return http_error(sock, 401, json.dumps({"e": "skew", "server_ms": now}))
     message = f"ah/v1 connect|{hub_id}|{role}|{ts}|{nonce}".encode()
     want = b64u(hmac.new(hub.relay_key, message, hashlib.sha256).digest())
     if not hmac.compare_digest(want, sig):
         return http_error(sock, 401)
+    # After the signature, never before: a clock the relay will talk about is
+    # one it only talks about to somebody holding the key.
+    if abs(now - int(ts)) > SKEW_MS:
+        return http_error(sock, 401, json.dumps({"e": "skew", "server_ms": now}))
+
+    if method == "POST" and parts[-1] == "revoke":
+        with HUBS_LOCK:
+            REVOKED.add(hub_id)
+            HUBS.pop(hub_id, None)
+        for peer in list(hub.peers):
+            try:
+                peer.sock.close()
+            except OSError:
+                pass
+        return http_error(sock, 200, "revoked")
+
     if role == "desk" and hub.desk() is not None:
         return http_error(sock, 409, "a desktop is already connected")
 

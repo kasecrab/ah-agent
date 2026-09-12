@@ -12,18 +12,42 @@ You need a Cloudflare account (free, no card) and Node for `wrangler`.
 
 ```
 npx wrangler login
+npx wrangler secret put AH_PROVISION_TOKEN
 npx wrangler deploy
 ```
 
-That prints a URL like `https://ah-relay.<you>.workers.dev`. Give it to `ah`
-once:
+The secret is a password you invent — anything long and random will do — and
+it is asked for once, when a pairing is made. Without it the relay pairs with
+nobody and says so: `/hub/<id>/provision` is reachable from the URL alone, and
+a relay that took any request would let a script own every hub name it could
+think of, each one a Durable Object with tables of its own, on your allowance.
+
+Deploying prints a URL like `https://ah-relay.<you>.workers.dev`. Give both to
+`ah`, once:
 
 ```
-ah remote pair --url https://ah-relay.<you>.workers.dev
+ah remote pair --url https://ah-relay.<you>.workers.dev --token <the secret>
 ```
 
 which prints a QR code to scan with the phone, and the same pairing code as
-text in case the camera will not cooperate.
+text in case the camera will not cooperate. `AH_PROVISION_TOKEN` in the
+environment does instead of `--token`.
+
+The secret is only for making pairings. It is not part of the key ladder, it
+never reaches the phone, and knowing it does not help anybody read a frame.
+
+## Ending a pairing
+
+```
+ah remote forget
+```
+
+tells the relay to revoke the hub — it drops the log and the device list,
+closes both sockets, and refuses that hub name for good — and then clears the
+local credential. If the relay cannot be reached it stops rather than clearing
+anything, because a pairing forgotten only on this side is a pairing that still
+answers whoever has the code. `--local` forgets it here anyway, and says what
+that leaves behind.
 
 There is deliberately no one-click deploy button: the Workers Builds image
 ships Node, Python, PHP, Ruby, Go and Bun, but no Rust toolchain, so a button

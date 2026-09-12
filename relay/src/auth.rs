@@ -35,16 +35,20 @@ pub async fn verify(
     let (Some(role), Ok(ts)) = (Role::parse(role), ts.parse::<u64>()) else {
         return Err(Denied::Signature);
     };
-    // Before the signature: a clock that is out is the one failure worth
-    // naming, and saying so costs nothing an attacker does not already know.
+    // The signature first, and the clock only after it. A clock that is out is
+    // worth naming — it is fixable and it looks like nothing else — but only
+    // to somebody who has already proved they hold the key. Answered the other
+    // way round, this endpoint tells anyone at all what the relay thinks the
+    // time is and which timestamps it will take.
+    let message = connect_message(hub, role, ts, nonce);
+    match hmac_verify(relay_key, message.as_bytes(), sig).await {
+        Ok(true) => {}
+        _ => return Err(Denied::Signature),
+    }
     if now.abs_diff(ts) > SKEW_MS {
         return Err(Denied::Skew);
     }
-    let message = connect_message(hub, role, ts, nonce);
-    match hmac_verify(relay_key, message.as_bytes(), sig).await {
-        Ok(true) => Ok(role),
-        _ => Err(Denied::Signature),
-    }
+    Ok(role)
 }
 
 /// `crypto.subtle.verify`, which compares in constant time so we do not have
@@ -102,6 +106,13 @@ pub fn decode_key(encoded: &str) -> Vec<u8> {
 /// Base64url without padding, the way every signature on this wire is written.
 fn base64url(s: &str) -> Option<Vec<u8>> {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    // One string, one byte sequence. Accepting a trailing character whose
+    // spare bits are not zero would mean several spellings decoding to the
+    // same signature, which is harmless while nothing is deduplicated and a
+    // hole the moment something is.
+    if s.len() % 4 == 1 {
+        return None;
+    }
     let mut out = Vec::with_capacity(s.len() * 3 / 4);
     let mut acc: u32 = 0;
     let mut bits = 0;
@@ -113,6 +124,9 @@ fn base64url(s: &str) -> Option<Vec<u8>> {
             bits -= 8;
             out.push((acc >> bits) as u8);
         }
+    }
+    if bits > 0 && acc & ((1 << bits) - 1) != 0 {
+        return None;
     }
     Some(out)
 }
