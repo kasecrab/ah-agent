@@ -441,15 +441,6 @@ impl Agents {
             .count()
     }
 
-    fn running_now(&self) -> usize {
-        self.kids
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|c| c.state() == State::Running)
-            .count()
-    }
-
     /// One line per child that finished since this audience last asked.
     /// An id nothing else in this process is using.
     ///
@@ -574,30 +565,68 @@ impl Agents {
     }
 
     /// Start whatever is queued and has room to run.
+    ///
+    /// Three different threads call this — a child's own thread as it
+    /// finishes, the thread running the parent's `agent` tool, and whichever
+    /// thread a follow-up came in on — so the child that is picked must be
+    /// taken as it is picked. `claim_queued` does both under the one guard;
+    /// this only has to keep asking for another one until there is none.
     fn start_queued(&self, max_concurrent: u32) {
-        loop {
-            if self.running_now() as u32 >= max_concurrent.max(1) {
-                return;
-            }
-            let next = self
-                .kids
-                .lock()
-                .unwrap()
-                .iter()
-                .find(|c| c.state() == State::Queued)
-                .cloned();
-            match next {
-                Some(c) => run(&c, max_concurrent),
-                None => return,
+        while let Some(c) = self.claim_queued(max_concurrent) {
+            run(&c, max_concurrent);
+        }
+    }
+
+    /// The next child to run, already marked `Running`, or nothing when there
+    /// is no room or nothing waiting.
+    ///
+    /// Counting what is running, choosing what to start and marking it started
+    /// all happen while the one `kids` guard is held. That is the whole point
+    /// of this function: looking and then claiming as two steps let two
+    /// callers see the same `Queued` child a few microseconds apart and put it
+    /// on two threads, which is one conversation being run twice, one report
+    /// overwriting the other, and `max_concurrent` quietly exceeded.
+    ///
+    /// A child only ever leaves `Queued` here, so the child chosen in the
+    /// first pass is still queued when it is claimed in the second; the
+    /// comparison is kept anyway, because it is what makes the claim a claim
+    /// rather than an assumption. Children finishing are not held back by this
+    /// guard, so the running count can be a moment stale — always on the high
+    /// side, which starts one fewer rather than one too many, and the finish
+    /// that made it stale calls this again on its way out.
+    fn claim_queued(&self, max_concurrent: u32) -> Option<Arc<Child>> {
+        let kids = self.kids.lock().unwrap();
+        let mut running = 0u32;
+        let mut next: Option<Arc<Child>> = None;
+        for c in kids.iter() {
+            match *c.state.lock().unwrap() {
+                State::Running => running += 1,
+                State::Queued if next.is_none() => next = Some(c.clone()),
+                _ => {}
             }
         }
+        if running >= max_concurrent.max(1) {
+            return None;
+        }
+        let c = next?;
+        let mut state = c.state.lock().unwrap();
+        if *state != State::Queued {
+            return None;
+        }
+        *state = State::Running;
+        drop(state);
+        Some(c)
     }
 }
 
 /// Put a child on a thread of its own. Queued children go through here too,
 /// once one ahead of them has finished.
+///
+/// The child is already marked `Running` by the caller that claimed it: this
+/// must not decide to start a child of its own accord, or the claim stops
+/// meaning anything.
 fn run(child: &Arc<Child>, max_concurrent: u32) {
-    *child.state.lock().unwrap() = State::Running;
+    debug_assert_eq!(child.state(), State::Running, "run() takes a claimed child");
     child.bump();
     let c = child.clone();
     let mut builder = std::thread::Builder::new().name(format!("ah-agent-{}", child.id));
@@ -1183,6 +1212,30 @@ mod tests {
         }
     }
 
+    /// Counts every request it is asked for. A child that was started twice
+    /// shows up here as one request too many, whichever thread won.
+    #[derive(Default)]
+    struct CountsRequests {
+        calls: AtomicU32,
+    }
+
+    impl Provider for CountsRequests {
+        fn name(&self) -> &str {
+            "counts"
+        }
+        fn stream(
+            &self,
+            _req: &ChatRequest,
+            _cancel: &AtomicBool,
+            on_event: OnEvent<'_>,
+        ) -> crate::Result<()> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(5));
+            on_event(StreamEvent::Text("done".into()));
+            Ok(())
+        }
+    }
+
     /// Never answers, so the child is still going when it is stopped.
     struct Silent;
 
@@ -1285,6 +1338,64 @@ mod tests {
             .collect();
         assert!(table().wait_any(&ids, true, Duration::from_secs(10), crate::tools::never()));
         assert_eq!(*provider.most.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn one_queued_child_is_started_once_however_many_callers_race_for_it() {
+        let _guard = test_lock();
+        let provider = Arc::new(CountsRequests::default());
+        let s = spawner_with(provider.clone(), settings());
+        let child = s
+            .spawn(SpawnRequest {
+                kind: String::new(),
+                task: "the first go".into(),
+                cwd: None,
+                model: None,
+            })
+            .unwrap();
+        assert!(child.wait(Duration::from_secs(5)), "the first go hung");
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+
+        // Eight threads doing nothing but asking the table to start whatever
+        // is queued, which is what the three real callers amount to when a
+        // session is fanning agents out. They are left running while the child
+        // is put back in the queue over and over, so that the moment between
+        // choosing a child and taking it is crossed again and again: one round
+        // of this is a coin toss, twenty of them are not.
+        let stop = Arc::new(AtomicBool::new(false));
+        let hands: Vec<_> = (0..8)
+            .map(|_| {
+                let stop = stop.clone();
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        table().start_queued(4);
+                    }
+                })
+            })
+            .collect();
+
+        let rounds = 20;
+        for _ in 0..rounds {
+            // Queued the way a follow-up queues it, and left for whichever of
+            // those threads notices first.
+            child.cancel.store(false, Ordering::Relaxed);
+            child
+                .messages
+                .lock()
+                .unwrap()
+                .push(Message::user("and again"));
+            *child.state.lock().unwrap() = State::Queued;
+            assert!(child.wait(Duration::from_secs(5)), "a round hung");
+        }
+        stop.store(true, Ordering::Relaxed);
+        for h in hands {
+            h.join().unwrap();
+        }
+        assert_eq!(
+            provider.calls.load(Ordering::SeqCst),
+            rounds + 1,
+            "a queued child was put on more than one thread"
+        );
     }
 
     #[test]
