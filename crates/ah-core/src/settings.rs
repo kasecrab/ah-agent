@@ -430,7 +430,7 @@ mod tests {
         assert_eq!(after.tools.shell, before.tools.shell);
         assert_eq!(after.tools.enabled, before.tools.enabled);
         assert_eq!(after.permissions, before.permissions);
-        assert!(after.permissions.allow_sudo, "sudo was turned off");
+        assert!(!after.permissions.allow_sudo, "sudo was turned on");
         assert_eq!(after.prompt.instructions, before.prompt.instructions);
         assert_eq!(after.layout.image_paste_cmd, before.layout.image_paste_cmd);
         assert_eq!(after.images.open_cmd, "");

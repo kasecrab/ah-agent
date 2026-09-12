@@ -1120,13 +1120,13 @@ pub const DEFAULT_DENY: &[&str] = &[
 impl Default for Permissions {
     fn default() -> Self {
         Self {
-            mode: PermissionMode::Auto,
+            mode: PermissionMode::Ask,
             ask_for: ["bash", "write_file", "edit_file"]
                 .iter()
                 .map(|s| String::from(*s))
                 .collect(),
             deny: DEFAULT_DENY.iter().map(|s| String::from(*s)).collect(),
-            allow_sudo: true,
+            allow_sudo: false,
         }
     }
 }
@@ -1134,8 +1134,8 @@ impl Default for Permissions {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionMode {
-    #[default]
     Auto,
+    #[default]
     Ask,
 }
 

@@ -2001,8 +2001,7 @@ mod tests {
             tool_call_script("bash", "{\"command\":\"sudo systemctl restart nginx\"}"),
             vec![StreamEvent::Text("ok".into())],
         ]);
-        let mut settings = Settings::default();
-        settings.permissions.allow_sudo = false;
+        let settings = Settings::default();
         let registry = Registry::builtins(&settings.tools);
         let mut hooks = NoHooks;
         let cancel = AtomicBool::new(false);
@@ -2028,8 +2027,13 @@ mod tests {
     }
 
     #[test]
-    fn sudo_is_allowed_by_default_because_somebody_is_usually_there() {
-        assert!(Settings::default().permissions.allow_sudo);
+    fn nothing_runs_unasked_by_default() {
+        let p = Settings::default().permissions;
+        assert_eq!(p.mode, PermissionMode::Ask);
+        assert!(!p.allow_sudo);
+        for tool in ["bash", "write_file", "edit_file"] {
+            assert!(p.ask_for.iter().any(|t| t == tool), "{tool} runs unasked");
+        }
     }
 
     #[test]
@@ -2055,7 +2059,10 @@ mod tests {
         );
         agent.notices = false;
         let mut messages = vec![Message::user("say hi via bash")];
-        let io = RecordingIo::default();
+        let io = RecordingIo {
+            allow: true,
+            ..Default::default()
+        };
         let summary = agent.run_turn(&mut messages, &io).unwrap();
         assert_eq!(summary.requests, 2);
         assert_eq!(summary.tool_calls, 1);

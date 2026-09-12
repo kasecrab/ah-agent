@@ -20,8 +20,8 @@ One-shot mode keeps the session in memory only; the TUI writes a session file
 |---|---|
 | `-p, --prompt TEXT` | one-shot prompt |
 | `-m, --model ID` | model id for this run |
-| `--yolo` | run every tool call without asking (default) |
-| `--ask` | prompt before `bash`, `write_file`, `edit_file` (`permissions.ask_for`) |
+| `--yolo` | run every tool call without asking |
+| `--ask` | prompt before `bash`, `write_file`, `edit_file` (`permissions.ask_for`) (default) |
 | `--no-plugins` | load no plugins |
 | `--plugin PATH` | extra plugin file or directory, repeatable |
 | `--cwd DIR` | working directory for tools |

@@ -53,11 +53,11 @@ pub struct Overrides {
     #[arg(short, long)]
     pub model: Option<String>,
 
-    /// Auto-approve every tool call (default).
+    /// Auto-approve every tool call, including shell commands and writes.
     #[arg(long, conflicts_with = "ask")]
     pub yolo: bool,
 
-    /// Ask before bash/write/edit tool calls.
+    /// Ask before bash/write/edit tool calls (default).
     #[arg(long)]
     pub ask: bool,
 
