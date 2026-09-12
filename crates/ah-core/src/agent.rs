@@ -1538,31 +1538,100 @@ pub mod test_support {
 /// `credentials.toml` holds the key; the plugin directories hold programs that
 /// run before the first request.
 fn writes_its_own_rules(call: &ToolCall, cwd: &str) -> Option<String> {
-    if !matches!(
-        call.function.name.as_str(),
-        "write_file" | "edit_file" | "multi_edit"
-    ) {
+    let cwd = std::path::Path::new(cwd);
+    match call.function.name.as_str() {
+        "write_file" | "edit_file" => {
+            let args: Value = serde_json::from_str(&call.function.arguments).ok()?;
+            let raw = args.get("path").and_then(|p| p.as_str())?;
+            governs(&crate::tools::resolve_path(cwd, raw))
+        }
+        // The third write tool. `printf '…' >> ~/.config/ah/config.toml`,
+        // `sed -i`, `tee`, `cp` and `python -c` all write the same file, and
+        // asking about the two tools with `file` in the name while leaving
+        // this one alone was most of the fence missing.
+        "bash" => {
+            let args: Value = serde_json::from_str(&call.function.arguments).ok()?;
+            let cmd = args.get("command").and_then(|c| c.as_str())?;
+            paths_in(cmd)
+                .iter()
+                .find_map(|w| governs(&crate::tools::resolve_path(cwd, w)))
+        }
+        _ => None,
+    }
+}
+
+/// Every word of a shell command that could be a path.
+///
+/// Read without a shell, so this is the ordinary case and not a sandbox — a
+/// path assembled at run time is not a word here. Quotes come off, and the
+/// redirection marks a path can be written against (`>>~/.config/…`) come off
+/// the front, because those are punctuation and not part of the name.
+fn paths_in(command: &str) -> Vec<String> {
+    command
+        .split(|c: char| c.is_whitespace() || matches!(c, ';' | '|' | '&' | '(' | ')' | '`'))
+        .map(|w| {
+            w.trim_matches(['"', '\'', '<', '>'])
+                .trim_start_matches(['<', '>'])
+                .to_string()
+        })
+        // `--output=~/.config/…` and `if=/dev/…`: the name is after the sign.
+        .map(|w| match w.split_once('=') {
+            Some((_, after)) if after.contains('/') => after.to_string(),
+            _ => w,
+        })
+        .filter(|w| w.contains('/') || w.starts_with('~'))
+        .collect()
+}
+
+/// What `path` decides about how this program behaves, if it decides anything.
+fn governs(path: &std::path::Path) -> Option<String> {
+    let path = real(path);
+    // Both resolved the same way as the path being judged, so that a link
+    // planted earlier in the session — `ln -s ~/.config/ah /tmp/x` — leads
+    // back here rather than around.
+    let config = real(&crate::paths::config_dir());
+    let data = real(&crate::paths::data_dir());
+    if !path.starts_with(&config) && !path.starts_with(&data) {
         return None;
     }
-    let args: Value = serde_json::from_str(&call.function.arguments).ok()?;
-    let raw = args.get("path").and_then(|p| p.as_str())?;
-    let path = crate::tools::resolve_path(std::path::Path::new(cwd), raw);
-    // Compared as written rather than canonicalised: the file may not exist
-    // yet, and a symlink into one of these directories is answered by the
-    // directory check below rather than by resolving it.
-    let config = crate::paths::config_dir();
-    let data = crate::paths::data_dir();
-    if path.starts_with(&config) || path.starts_with(&data) {
-        let what = if path == crate::paths::credentials_file() {
-            "this is the file your API key and pairing code are kept in"
-        } else if path.parent().is_some_and(|p| p.ends_with("plugins")) {
-            "a program in here runs before the first request of every session"
-        } else {
-            "this is the config that decides which tools are asked about, which host the key is sent to, and what runs at startup"
-        };
-        return Some(what.to_string());
+    let what = if path == real(&crate::paths::credentials_file()) {
+        "this is the file your API key and pairing code are kept in"
+    } else if path.parent().is_some_and(|p| p.ends_with("plugins")) {
+        "a program in here runs before the first request of every session"
+    } else {
+        "this is the config that decides which tools are asked about, which host the key is sent to, and what runs at startup"
+    };
+    Some(what.to_string())
+}
+
+/// `path` with every symbolic link and every `..` in it resolved.
+///
+/// The file itself usually does not exist yet — that is what a write is for —
+/// so the deepest part of it that does exist is canonicalised and the rest is
+/// put back on the end. Comparing paths as they were written let
+/// `../../.config/ah/config.toml` and a symlink into the config directory both
+/// step around the check.
+fn real(path: &std::path::Path) -> std::path::PathBuf {
+    let mut rest = Vec::new();
+    let mut at = path.to_path_buf();
+    loop {
+        if let Ok(c) = at.canonicalize() {
+            let mut out = c;
+            for part in rest.iter().rev() {
+                out.push(part);
+            }
+            return out;
+        }
+        match (at.file_name().map(|n| n.to_os_string()), at.parent()) {
+            (Some(name), Some(parent)) if !parent.as_os_str().is_empty() => {
+                rest.push(name);
+                at = parent.to_path_buf();
+            }
+            // Nothing on the way up exists, so there is nothing to resolve
+            // against; what was written is the best answer there is.
+            _ => return path.to_path_buf(),
+        }
     }
-    None
 }
 
 #[cfg(test)]
@@ -2020,6 +2089,60 @@ mod tests {
         let mut read = call(config.to_str().unwrap());
         read.function.name = "read_file".into();
         assert!(writes_its_own_rules(&read, cwd).is_none());
+    }
+
+    #[test]
+    fn the_third_write_tool_is_a_shell_command() {
+        let bash = |command: &str| ToolCall {
+            id: "1".into(),
+            kind: "function".into(),
+            function: ah_abi::ToolFunction {
+                name: "bash".into(),
+                arguments: serde_json::json!({"command": command}).to_string(),
+            },
+        };
+        let config = crate::paths::user_config_file();
+        let config = config.to_str().unwrap();
+        for cmd in [
+            format!("printf 'mode = \"auto\"\\n' >> {config}"),
+            format!("sed -i s/ask/auto/ {config}"),
+            format!("echo x | tee {config}"),
+            format!("cp /tmp/mine.toml {config}"),
+            format!("cat >{config}"),
+        ] {
+            assert!(
+                writes_its_own_rules(&bash(&cmd), "/tmp").is_some(),
+                "{cmd} was not asked about"
+            );
+        }
+        // Ordinary shell work is left alone.
+        for cmd in ["cargo build", "grep -rn auto src/", "ls /tmp"] {
+            assert!(
+                writes_its_own_rules(&bash(cmd), "/tmp").is_none(),
+                "{cmd} was asked about"
+            );
+        }
+    }
+
+    #[test]
+    fn a_path_written_the_long_way_round_is_the_same_path() {
+        let call = |path: &str| ToolCall {
+            id: "1".into(),
+            kind: "function".into(),
+            function: ah_abi::ToolFunction {
+                name: "write_file".into(),
+                arguments: serde_json::json!({"path": path, "content": "x"}).to_string(),
+            },
+        };
+        let config = crate::paths::config_dir();
+        // `<config dir>/plugins/../config.toml` is the config file, spelled so
+        // that comparing the text of the two would not say so.
+        let sideways = config.join("plugins").join("..").join("config.toml");
+        assert!(
+            writes_its_own_rules(&call(sideways.to_str().unwrap()), "/tmp").is_some(),
+            "{}",
+            sideways.display()
+        );
     }
 
     #[test]
