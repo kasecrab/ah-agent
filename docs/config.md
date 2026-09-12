@@ -190,6 +190,7 @@ decisions, and the first does not imply the second.
 | `roots` | `[]` | directories `ah remote serve` may start a session in; empty means `$HOME` |
 | `trust_paired_device` | `false` | let sessions the daemon starts run tools without asking |
 | `max_sessions` | `4` | sessions the daemon holds open at once |
+| `allow_sudo` | `false` | let sessions the daemon starts run `sudo`, with the password asked for once at startup |
 
 ## [voice]
 
@@ -367,6 +368,15 @@ so this is paid once per image, not once per turn.
 | `mode` | `"auto"` | `auto` runs every tool call; `ask` prompts for tools in `ask_for` |
 | `ask_for` | `["bash", "write_file", "edit_file"]` | tools that prompt in `ask` mode |
 | `deny` | built-in list | shell commands refused in every mode |
+| `allow_sudo` | `true` | let a command become another user (`sudo`, `doas`, `pkexec`, `su`) |
+
+`allow_sudo` is about the password prompt, not the privilege. Off, a `bash`
+command that would run one of those four is refused before it runs, because
+its prompt would go to a terminal nobody is reading and the command would wait
+there until the tool timed out. Only words in command position count, so
+`grep sudo /etc/group` is a search and `sudo apt update` is not. `ah remote
+serve` turns this off for the sessions it starts unless it was told otherwise;
+see [remote](remote.md).
 
 `deny` rules apply to the `bash` tool only. The command is split into
 segments on `;`, `|`, `&`, `&&`, `||` and newlines; a leading `sudo`, `env`,

@@ -54,6 +54,63 @@ pub fn read_only(command: &str, rules: &[String]) -> bool {
             .all(|s| rules.iter().any(|r| rule_matches(r, s)))
 }
 
+/// Programs that take somebody else's privileges, and ask for a password at a
+/// terminal to do it.
+///
+/// The asking is what matters. A password prompt goes to whatever terminal the
+/// agent was started from, so in a session nobody is sitting in front of — one
+/// the daemon started for a phone — the command does not fail, it waits, and
+/// keeps waiting until the tool times out with nothing to show for it.
+const ESCALATORS: [&str; 4] = ["sudo", "doas", "pkexec", "su"];
+
+/// Words that pass the start of a command along to the next word rather than
+/// being the command themselves.
+const WRAPPERS: [&str; 6] = ["env", "nohup", "time", "command", "exec", "setsid"];
+
+/// The first privilege escalation `command` would run, if any.
+///
+/// Only words in command position count, so `grep sudo /etc/group` is a search
+/// and `sudo apt update` is not. A command substitution counts as a position of
+/// its own, because it is one. This reads a shell command without a shell, so
+/// it is a guard against the ordinary case and not a sandbox: something built
+/// to get past it, `sh -c` with the name in a string, will.
+pub fn escalates(command: &str) -> Option<&'static str> {
+    let mut found = None;
+    let mut at_start = true;
+    let mut word = String::new();
+    // The extra newline closes whatever word the command ends on.
+    for ch in command.chars().chain(core::iter::once('\n')) {
+        let breaks = matches!(ch, ';' | '&' | '|' | '\n' | '(' | ')' | '{' | '}' | '`');
+        if !breaks && !ch.is_whitespace() {
+            if ch != '"' && ch != '\'' {
+                word.push(ch);
+            }
+            continue;
+        }
+        if !word.is_empty() && at_start {
+            // A leading backslash is how an alias is stepped around, and a
+            // full path is the same program by a longer name.
+            let head = word.trim_start_matches('\\');
+            let head = head.rsplit('/').next().unwrap_or(head);
+            let passes_along = WRAPPERS.contains(&head)
+                || head.starts_with('-')
+                || (head.contains('=') && !head.starts_with('-'));
+            if !passes_along {
+                if let Some(name) = ESCALATORS.iter().find(|e| **e == head) {
+                    found = Some(*name);
+                    break;
+                }
+                at_start = false;
+            }
+        }
+        word.clear();
+        if breaks {
+            at_start = true;
+        }
+    }
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -73,6 +130,33 @@ mod tests {
         assert_eq!(denied("git push --force-with-lease", &rules), None);
         assert_eq!(denied("mkfs.ext4 /dev/sdb", &rules), Some("mkfs*"));
         assert_eq!(denied("git reset --soft HEAD~1", &rules), None);
+    }
+
+    #[test]
+    fn a_password_prompt_is_seen_coming() {
+        assert_eq!(escalates("sudo apt update"), Some("sudo"));
+        assert_eq!(escalates("cd /tmp && sudo make install"), Some("sudo"));
+        assert_eq!(escalates("env FOO=1 sudo sh"), Some("sudo"));
+        assert_eq!(escalates("BAR=2 \\sudo -k id"), Some("sudo"));
+        assert_eq!(escalates("/usr/bin/sudo id"), Some("sudo"));
+        assert_eq!(escalates("echo $(sudo id)"), Some("sudo"));
+        assert_eq!(escalates("pkexec id"), Some("pkexec"));
+        assert_eq!(escalates("su - rabe"), Some("su"));
+    }
+
+    #[test]
+    fn the_word_somewhere_else_in_a_command_is_just_a_word() {
+        // Every one of these is somebody reading about sudo, not running it.
+        assert_eq!(escalates("grep -rn sudo /etc/group"), None);
+        assert_eq!(escalates("man sudo"), None);
+        assert_eq!(escalates("git commit -m \"say why sudo is refused\""), None);
+        assert_eq!(escalates("ls -l /usr/bin/sudo"), None);
+        assert_eq!(escalates("cat /etc/sudoers"), None);
+        assert_eq!(escalates("apt-get install -y sudo"), None);
+        assert_eq!(escalates(""), None);
+        // And a program whose name merely begins the same way.
+        assert_eq!(escalates("sudoedit /etc/hosts"), None);
+        assert_eq!(escalates("superimpose a.png b.png"), None);
     }
 
     #[test]

@@ -1053,16 +1053,35 @@ impl<'a> Agent<'a> {
         if call.function.name == "bash"
             && let Ok(args) = serde_json::from_str::<Value>(&call.function.arguments)
             && let Some(cmd) = args.get("command").and_then(|c| c.as_str())
-            && let Some(rule) = crate::policy::denied(cmd, &self.settings.permissions.deny)
         {
-            let reason = format!("matches deny rule `{rule}`");
-            io.emit(AgentEvent::ToolDenied {
-                call,
-                reason: reason.clone(),
-            });
-            return Gate::Refused(ToolResult::err(format!(
-                "denied by policy: {reason}. Ask the user to run it themselves if it is really needed."
-            )));
+            if let Some(rule) = crate::policy::denied(cmd, &self.settings.permissions.deny) {
+                let reason = format!("matches deny rule `{rule}`");
+                io.emit(AgentEvent::ToolDenied {
+                    call,
+                    reason: reason.clone(),
+                });
+                return Gate::Refused(ToolResult::err(format!(
+                    "denied by policy: {reason}. Ask the user to run it themselves if it is really needed."
+                )));
+            }
+            // Refusing costs a turn. Waiting on a password prompt that nobody
+            // will ever see costs the whole tool timeout and shows nothing at
+            // the end of it, so this is the kinder of the two.
+            if !self.settings.permissions.allow_sudo
+                && let Some(name) = crate::policy::escalates(cmd)
+            {
+                let reason = format!("`{name}` is not allowed in this session");
+                io.emit(AgentEvent::ToolDenied {
+                    call,
+                    reason: reason.clone(),
+                });
+                return Gate::Refused(ToolResult::err(format!(
+                    "denied by policy: {reason}, because its password prompt would go to a \
+                     terminal nobody is reading (permissions.allow_sudo is off). Do it without \
+                     {name} if you can; `ah remote serve --sudo` allows it for sessions driven \
+                     from a phone."
+                )));
+            }
         }
         if must_ask && !io.ask_permission(&call, &ask_reason) {
             io.emit(AgentEvent::ToolDenied {
@@ -1896,6 +1915,43 @@ mod tests {
         let io = RecordingIo::default();
         agent.run_turn(&mut messages, &io).unwrap();
         assert!(messages[2].content.contains("deny rule `git reset --hard`"));
+    }
+
+    #[test]
+    fn a_session_with_no_keyboard_refuses_sudo_instead_of_waiting_for_it() {
+        let provider = MockProvider::new(vec![
+            tool_call_script("bash", "{\"command\":\"sudo systemctl restart nginx\"}"),
+            vec![StreamEvent::Text("ok".into())],
+        ]);
+        let mut settings = Settings::default();
+        settings.permissions.allow_sudo = false;
+        let registry = Registry::builtins(&settings.tools);
+        let mut hooks = NoHooks;
+        let cancel = AtomicBool::new(false);
+        let mut agent = Agent::new(
+            &provider,
+            &registry,
+            &mut hooks,
+            &settings,
+            std::env::current_dir().unwrap(),
+            &cancel,
+        );
+        agent.notices = false;
+        let mut messages = vec![Message::user("x")];
+        let io = RecordingIo::default();
+        agent.run_turn(&mut messages, &io).unwrap();
+        assert!(
+            messages[2].content.contains("`sudo` is not allowed"),
+            "{}",
+            messages[2].content
+        );
+        // And it says what to do about it, since the model is the one reading.
+        assert!(messages[2].content.contains("remote serve --sudo"));
+    }
+
+    #[test]
+    fn sudo_is_allowed_by_default_because_somebody_is_usually_there() {
+        assert!(Settings::default().permissions.allow_sudo);
     }
 
     #[test]

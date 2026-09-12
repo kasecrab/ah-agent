@@ -858,6 +858,12 @@ pub struct RemoteSettings {
     pub trust_paired_device: bool,
     /// Sessions `ah remote serve` will hold open at once.
     pub max_sessions: usize,
+    /// Let sessions the daemon starts run `sudo`. Off, they are refused it,
+    /// because the password prompt would go to a terminal nobody is at and the
+    /// command would wait there until it timed out. On, the daemon asks for the
+    /// password once when it starts and keeps it fresh, so none is ever asked
+    /// for later. Read from the same trusted places as `roots`.
+    pub allow_sudo: bool,
 }
 
 impl Default for RemoteSettings {
@@ -873,6 +879,7 @@ impl Default for RemoteSettings {
             roots: Vec::new(),
             trust_paired_device: false,
             max_sessions: 4,
+            allow_sudo: false,
         }
     }
 }
@@ -1063,6 +1070,11 @@ pub struct Permissions {
     /// that equals it or starts with it followed by a space; a trailing `*`
     /// matches any continuation. Setting this replaces the built-in list.
     pub deny: Vec<String>,
+    /// Let a command become another user: `sudo`, `doas`, `pkexec`, `su`. Off,
+    /// one is refused before it runs rather than left waiting on a password
+    /// prompt at a terminal nobody is reading. `ah remote serve` turns this off
+    /// for the sessions it starts unless it was told otherwise.
+    pub allow_sudo: bool,
 }
 
 /// Commands no mode runs unless the user edits `permissions.deny`.
@@ -1108,6 +1120,7 @@ impl Default for Permissions {
                 .map(|s| String::from(*s))
                 .collect(),
             deny: DEFAULT_DENY.iter().map(|s| String::from(*s)).collect(),
+            allow_sudo: true,
         }
     }
 }
