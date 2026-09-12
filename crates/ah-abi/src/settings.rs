@@ -426,10 +426,19 @@ pub struct ToolSettings {
     pub parallel: bool,
     /// Most tool calls in flight at once.
     pub max_parallel: u32,
-    /// Shell commands treated as read-only, and so safe to run beside another
-    /// call. Matched like `permissions.deny`: a rule matches a command segment
-    /// that equals it or starts with it followed by a space, `*` matches any
-    /// continuation. A command that redirects or substitutes is never parallel.
+    /// Shell commands allowed to run beside another call, because running them
+    /// at the same time as something else changes nothing.
+    ///
+    /// Not a safety list, whatever the shape of it suggests. The test is the
+    /// command's name and its flags, so `find` added here would carry
+    /// `find . -delete` with it. What is at stake is a race between two calls
+    /// and not what either of them may do; widening this as though it were
+    /// about safety is how that stops being true.
+    ///
+    /// Matched like `permissions.deny`: a rule matches a command segment that
+    /// equals it or starts with it followed by a space, `*` matches any
+    /// continuation. A command that redirects or substitutes is never
+    /// parallel.
     pub parallel_bash: Vec<String>,
     /// A foreground command that outruns its timeout keeps running as a
     /// background job instead of being killed.
@@ -861,6 +870,11 @@ pub struct RemoteSettings {
     /// Let sessions the daemon starts run tools without asking. Off, they are
     /// forced to ask however this machine is otherwise configured — nobody is
     /// at that keyboard to notice. Read from the same trusted places.
+    ///
+    /// Off does not mean the phone is not trusted. It means the phone is
+    /// asked, and the phone answers: whoever holds the pairing code holds
+    /// every answer. What this protects against is the model, not the person
+    /// at the other end of the link.
     pub trust_paired_device: bool,
     /// Sessions `ah remote serve` will hold open at once.
     pub max_sessions: usize,
@@ -1090,8 +1104,13 @@ pub struct Permissions {
     pub deny_replace: bool,
     /// Let a command become another user: `sudo`, `doas`, `pkexec`, `su`. Off,
     /// one is refused before it runs rather than left waiting on a password
-    /// prompt at a terminal nobody is reading. `ah remote serve` turns this off
-    /// for the sessions it starts unless it was told otherwise.
+    /// prompt at a terminal nobody is reading.
+    ///
+    /// This is about the password prompt, not the privilege. Off does not mean
+    /// the agent cannot become root — it means a command whose first word is
+    /// one of those four is refused, and a command that reaches one some other
+    /// way is a command this program cannot read. `ah remote serve` turns it
+    /// off for the sessions it starts unless it was told otherwise.
     pub allow_sudo: bool,
 }
 

@@ -188,7 +188,7 @@ decisions, and the first does not imply the second.
 | `snapshot_messages` | `20` | messages of scrollback a phone gets on attaching |
 | `notice` | `true` | say in the transcript when a phone attaches |
 | `roots` | `[]` | directories `ah remote serve` may start a session in; empty means `$HOME` |
-| `trust_paired_device` | `false` | let sessions the daemon starts run tools without asking |
+| `trust_paired_device` | `false` | let sessions the daemon starts run tools without asking. Off does not mean the phone is untrusted: it means the phone is asked, and the phone answers. Whoever holds the pairing code holds the answers |
 | `max_sessions` | `4` | sessions the daemon holds open at once |
 | `allow_sudo` | `false` | let sessions the daemon starts run `sudo`, with the password asked for once at startup |
 
@@ -253,7 +253,7 @@ or `AH_VOICE_CAPTURE_CMD` only. A project's `.ah/config.toml` cannot set it.
 | `read_default_limit` | `2000` | lines `read_file` returns without an explicit limit |
 | `parallel` | `true` | run consecutive read-only calls from one model message at the same time |
 | `max_parallel` | `8` | most calls in flight at once |
-| `parallel_bash` | `["ls", "cat", "rg", "git log", …]` | shell commands treated as read-only |
+| `parallel_bash` | `["ls", "cat", "rg", "git log", …]` | shell commands allowed to run beside another call. Not a safety list: the test is the command's name and flags, so `find . -delete` and `git branch -D main` would pass it if you added `find` or `git branch`. The only thing at stake is a race with another read, and widening it as though it were about safety is how that stops being true |
 | `background_on_timeout` | `true` | a foreground command that outruns its timeout keeps running as a background job |
 | `job_buffer_bytes` | `262144` | output kept per background job: the first third, then the newest lines |
 | `job_kill_grace_ms` | `2000` | time between the polite stop and the hard kill |
