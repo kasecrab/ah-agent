@@ -1,4 +1,6 @@
 use std::fmt::Write as _;
+use std::io::Read as _;
+use std::path::{Path, PathBuf};
 
 use ah_abi::{ToolResult, ToolSettings, ToolSpec};
 use serde_json::{Value, json};
@@ -8,6 +10,61 @@ use super::{Tool, ToolCtx, arg_str, arg_u64, edit, resolve_path};
 pub struct ReadFile;
 pub struct WriteFile;
 pub struct EditFile;
+
+/// The most of one file these tools hold in memory at a time.
+///
+/// The line limit and the truncation that follow a read are no help at all
+/// while the file is still being read: they run once the whole thing is
+/// already in memory. `/dev/zero` hands out bytes until the allocator gives
+/// up — and with `panic = "abort"` that is the whole program, every agent and
+/// every background job with it — and a FIFO simply never ends. A text file
+/// worth reading is far below this; a file above it is one to look at a piece
+/// at a time through a shell command.
+const MAX_READ_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Read a file whole, with a bound on what it may be as well as how much of
+/// it there is.
+///
+/// Only a regular file is read: a device, a directory, a socket or a FIFO is
+/// refused by name rather than waited on. The size is taken from the open file
+/// rather than from a second look at the path, so the file that is measured is
+/// the file that is read, and the read still stops at the cap in case it grew
+/// in between.
+fn read_capped(path: &Path) -> std::io::Result<Vec<u8>> {
+    let file = std::fs::File::open(path)?;
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Err(std::io::Error::other("not a regular file"));
+    }
+    if meta.len() > MAX_READ_BYTES {
+        return Err(too_large(meta.len()));
+    }
+    let mut buf = Vec::with_capacity(meta.len() as usize + 1);
+    file.take(MAX_READ_BYTES + 1).read_to_end(&mut buf)?;
+    if buf.len() as u64 > MAX_READ_BYTES {
+        return Err(too_large(buf.len() as u64));
+    }
+    Ok(buf)
+}
+
+fn too_large(len: u64) -> std::io::Error {
+    std::io::Error::other(format!(
+        "{len} bytes is more than this tool reads at once ({MAX_READ_BYTES}); \
+         read it a piece at a time with a shell command such as `sed -n`"
+    ))
+}
+
+/// The same, as text, so that a caller can tell a file that is not there from
+/// a file that is not text.
+fn read_capped_text(path: &Path) -> std::io::Result<String> {
+    let bytes = read_capped(path)?;
+    String::from_utf8(bytes).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "not text (invalid UTF-8 bytes)",
+        )
+    })
+}
 
 impl Tool for ReadFile {
     fn spec(&self) -> ToolSpec {
@@ -31,7 +88,7 @@ impl Tool for ReadFile {
             return ToolResult::err("missing `path`");
         };
         let path = resolve_path(ctx.cwd, p);
-        let bytes = match std::fs::read(&path) {
+        let bytes = match read_capped(&path) {
             Ok(b) => b,
             Err(e) => return ToolResult::err(format!("{}: {e}", path.display())),
         };
@@ -106,25 +163,25 @@ impl Tool for WriteFile {
         {
             return ToolResult::err(format!("mkdir {}: {e}", parent.display()));
         }
-        let before = std::fs::read_to_string(&path).ok();
+        let existed = std::fs::symlink_metadata(&path).is_ok();
+        let before = read_capped_text(&path).ok();
         match std::fs::write(&path, content) {
             Ok(()) => {
                 let mut r = ToolResult::ok(format!(
                     "{} {} ({} bytes, {} lines)",
-                    if before.is_some() {
-                        "overwrote"
-                    } else {
-                        "created"
-                    },
+                    if existed { "overwrote" } else { "created" },
                     path.display(),
                     content.len(),
                     content.lines().count()
                 ));
-                r.diff = Some(super::diff::unified(
-                    before.as_deref().unwrap_or(""),
-                    content,
-                    2,
-                ));
+                // A file that was there and could not be read — too large for
+                // one read, or not text — has no old side to show, and a diff
+                // against nothing would claim it was empty.
+                r.diff = match (&before, existed) {
+                    (Some(b), _) => Some(super::diff::unified(b, content, 2)),
+                    (None, false) => Some(super::diff::unified("", content, 2)),
+                    (None, true) => None,
+                };
                 r
             }
             Err(e) => ToolResult::err(format!("{}: {e}", path.display())),
@@ -182,7 +239,7 @@ impl Tool for EditFile {
         let _held = lock
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let text = match std::fs::read_to_string(&path) {
+        let text = match read_capped_text(&path) {
             Ok(t) => t,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return ToolResult::err(format!(
@@ -366,6 +423,50 @@ mod tests {
         assert!(r.output.contains("write_file"), "{}", r.output);
     }
 
+    #[test]
+    fn a_file_that_is_not_a_regular_file_or_is_too_large_is_refused() {
+        let dir = std::env::temp_dir().join(format!("ah-big-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let settings = ah_abi::ToolSettings::default();
+        let ctx = ToolCtx {
+            cwd: &dir,
+            settings: &settings,
+            agent: 0,
+            cancel: crate::tools::never(),
+            ask: crate::tools::no_user(),
+            spawn: None,
+        };
+        // Sparse: as large as anything reading it is concerned, and free to
+        // make.
+        let f = std::fs::File::create(dir.join("big.log")).unwrap();
+        f.set_len(MAX_READ_BYTES + 4096).unwrap();
+        drop(f);
+        let r = ReadFile.run(&json!({"path": "big.log"}), &ctx);
+        assert!(r.is_error, "{}", r.output);
+        assert!(
+            r.output.contains("more than this tool reads"),
+            "{}",
+            r.output
+        );
+        let e = EditFile.run(
+            &json!({"path": "big.log", "old_string": "a", "new_string": "b"}),
+            &ctx,
+        );
+        assert!(e.is_error, "{}", e.output);
+
+        // Something that is not a file at all is refused rather than read
+        // until the process dies of it.
+        #[cfg(unix)]
+        {
+            let r = ReadFile.run(&json!({"path": "/dev/zero"}), &ctx);
+            assert!(r.is_error, "{}", r.output);
+            assert!(r.output.contains("regular file"), "{}", r.output);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
     #[test]
     fn read_write_roundtrip() {
         let dir = std::env::temp_dir().join(format!("ah-test-{}", std::process::id()));
