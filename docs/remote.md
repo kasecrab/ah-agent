@@ -32,7 +32,7 @@ given.
 Deploy a relay once (see `relay/README.md` in the source tree), then:
 
 ```
-ah remote pair --url https://ah-relay.<you>.workers.dev
+ah remote pair --url https://ah-relay.<you>.workers.dev --token <the secret>
 ```
 
 That prints a QR code and, under it, the same pairing code as text. Point the
@@ -42,7 +42,13 @@ type the code instead — it is grouped in fours to make that bearable, and `0`
 and `1` are read as `O` and `I`, since neither digit appears in the alphabet it
 uses.
 
-The URL is remembered, so later pairings need only `ah remote pair`.
+The token is the relay's own provisioning secret, set when it was deployed —
+see [relay/README.md](../relay/README.md). It is asked for only when a pairing
+is made, it never reaches the phone, and it is no part of the key ladder; it is
+there so that knowing the relay's URL is not enough to make pairings on it.
+`AH_PROVISION_TOKEN` in the environment does instead of `--token`.
+
+The URL is remembered, so later pairings need only `ah remote pair --token …`.
 
 ```
 ah remote status     # whether this machine is paired, and to what
@@ -135,8 +141,12 @@ the same mailbox a subagent's messages use, which the loop reads between
 requests — so it reaches the model in the middle of the work rather than after
 it. Sent while nothing is running, it simply starts a turn.
 
-`ah remote forget` ends it from this side, and the relay keeps nothing
-readable either way.
+`ah remote forget` ends it at the relay and then here: the hub drops its log
+and its device list, closes both sockets, and refuses that name for good, so
+the old code opens nothing. A relay that cannot be reached stops the command
+rather than being skipped, because a pairing forgotten only on this side is one
+that still answers whoever holds the code — `--local` forgets it here anyway
+and says what that leaves behind.
 
 ## Settings
 

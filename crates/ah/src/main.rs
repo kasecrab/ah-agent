@@ -178,6 +178,11 @@ pub enum RemoteCmd {
         /// The relay to pair against. Remembered, so it is needed once.
         #[arg(long, value_name = "URL")]
         url: Option<String>,
+        /// The relay's provisioning secret, the one set with
+        /// `npx wrangler secret put AH_PROVISION_TOKEN`. `AH_PROVISION_TOKEN`
+        /// in the environment does as well.
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
     },
     /// Publish this machine's sessions with no window open.
     Serve {
@@ -191,8 +196,14 @@ pub enum RemoteCmd {
     },
     /// Whether this machine is paired, and to what.
     Status,
-    /// Forget the pairing, so no phone holding it can reach this machine.
-    Forget,
+    /// Forget the pairing, and end it at the relay so the old code opens
+    /// nothing.
+    Forget {
+        /// Forget it here without telling the relay. The hub goes on holding
+        /// what it has and goes on answering whoever still has the code.
+        #[arg(long)]
+        local: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]

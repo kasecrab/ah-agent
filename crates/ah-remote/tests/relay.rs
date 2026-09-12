@@ -25,11 +25,17 @@ fn relay() -> String {
     std::env::var("AH_RELAY").unwrap_or_else(|_| "http://127.0.0.1:8799".into())
 }
 
+/// The relay's provisioning secret. The mock's default, unless the relay under
+/// test was given another.
+fn token() -> String {
+    std::env::var("AH_PROVISION_TOKEN").unwrap_or_else(|_| "mock-provision-token".into())
+}
+
 /// A pairing nothing else has used.
 fn pairing() -> ([u8; crypto::CODE_BYTES], Keys) {
     let code = crypto::new_code();
     let keys = Keys::derive(&code);
-    provision::provision(&relay(), &keys).expect("the relay should take a fresh pairing");
+    provision::provision(&relay(), &keys, &token()).expect("the relay should take a fresh pairing");
     (code, keys)
 }
 
@@ -269,13 +275,36 @@ fn a_second_desktop_does_not_push_a_live_one_aside() {
 #[test]
 #[ignore]
 fn a_pairing_the_relay_has_never_heard_of_is_refused() {
-    // Derived but never provisioned.
+    // Derived but never provisioned. Turned away exactly as a wrong signature
+    // is, on purpose: a hub that answered differently would tell anybody
+    // holding a list of guessed names which of them are real.
     let keys = Keys::derive(&crypto::new_code());
     let (_link, rx) = dial(keys, Role::Desk);
     match rx.recv_timeout(Duration::from_secs(10)) {
-        Ok(Event::Lost(why)) => assert!(why.contains("never heard of"), "it said {why:?}"),
+        Ok(Event::Fatal(why)) => assert!(why.contains("refused the pairing"), "it said {why:?}"),
         other => panic!("expected to be turned away, got {other:?}"),
     }
+}
+
+#[test]
+#[ignore]
+fn a_pairing_that_is_revoked_stays_revoked() {
+    let (code, keys) = pairing();
+    provision::revoke(&relay(), &keys).expect("the relay should take a revocation");
+
+    // The code that opened it a moment ago opens nothing now.
+    let (_link, rx) = dial(Keys::derive(&code), Role::Desk);
+    match rx.recv_timeout(Duration::from_secs(10)) {
+        Ok(Event::Fatal(why)) => {
+            assert!(
+                why.contains("revoked") || why.contains("refused"),
+                "{why:?}"
+            )
+        }
+        other => panic!("a revoked pairing still opened: {other:?}"),
+    }
+    // And the name cannot be taken again by whoever asks next.
+    assert!(provision::provision(&relay(), &keys, &token()).is_err());
 }
 
 #[test]

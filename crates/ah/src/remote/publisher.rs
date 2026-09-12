@@ -42,6 +42,12 @@ const YIELD_CHECK: Duration = Duration::from_millis(200);
 /// giving up and publishing nothing.
 const HANDOVER: Duration = Duration::from_secs(3);
 
+/// Images one message from a phone may carry, and how much of the frame they
+/// may be between them. Both well under what the relay will carry at all, so
+/// the desktop refuses on its own terms rather than on the relay's.
+const MAX_IMAGES: usize = 8;
+const MAX_IMAGE_CHARS: usize = 3 * 1024 * 1024;
+
 /// What the rest of the program is told about the link.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Note {
@@ -587,7 +593,17 @@ fn answer(
             session,
             text,
             images,
-        } => (session, Act::Submit { text, images }),
+        } => {
+            // An image entry is normally a path, and a path is read off this
+            // disk and sent to the model. From a phone that would be an
+            // arbitrary file read with nobody asked about it — `file:///etc/…`
+            // is a path like any other — so over the wire only the bytes
+            // themselves are taken.
+            if let Some(why) = unreadable_image(&images) {
+                return ack(Some(why));
+            }
+            (session, Act::Submit { text, images })
+        }
         FromPhone::Interrupt { session } => (session, Act::Interrupt),
         FromPhone::Compact { session, focus } => (session, Act::Compact(focus)),
         FromPhone::Clear { session } => (session, Act::Clear),
@@ -643,6 +659,27 @@ fn answer(
         }
         Err(why) => ack(Some(why)),
     }
+}
+
+/// Why a phone's images cannot be taken, or `None` when they can.
+///
+/// A phone has the picture; it does not have this filesystem. So it sends the
+/// bytes and nothing else is accepted — not a path, not a `file://` URL, not
+/// the `ah-image:` form the session file uses. Anything else would be this
+/// machine reading a file of a remote peer's choosing and posting it to the
+/// model, which is not something a tool prompt would even be shown for.
+fn unreadable_image(images: &[String]) -> Option<String> {
+    if images.len() > MAX_IMAGES {
+        return Some(format!("more than {MAX_IMAGES} images in one message"));
+    }
+    let total: usize = images.iter().map(String::len).sum();
+    if total > MAX_IMAGE_CHARS {
+        return Some("those images are too big to send in one message".into());
+    }
+    images
+        .iter()
+        .any(|i| !ah_core::image::is_data_url(i))
+        .then(|| "an image sent from a phone has to be the picture itself, not a path to one on this machine".to_string())
 }
 
 /// Whether this is an answer to the question that is actually on screen, and
@@ -885,6 +922,45 @@ mod tests {
             1,
             "dropping the only frame says nothing at all"
         );
+    }
+}
+
+#[cfg(test)]
+mod images {
+    use super::*;
+
+    #[test]
+    fn a_phone_may_send_a_picture_but_not_a_path_to_one() {
+        let png = "data:image/png;base64,iVBORw0KGgo=".to_string();
+        assert!(unreadable_image(std::slice::from_ref(&png)).is_none());
+
+        // Every one of these would be this machine reading its own disk on a
+        // remote peer\'s say-so.
+        for path in [
+            "/etc/shadow",
+            "file:///etc/shadow",
+            "file:///dev/zero",
+            "ah-image:whatever.png",
+            "~/.ssh/id_ed25519",
+        ] {
+            assert!(
+                unreadable_image(&[path.to_string()]).is_some(),
+                "{path} was accepted"
+            );
+        }
+        // And one bad entry spoils the message rather than being dropped
+        // quietly, which would change what was sent without saying so.
+        assert!(unreadable_image(&[png, "/etc/shadow".into()]).is_some());
+    }
+
+    #[test]
+    fn there_is_a_limit_to_how_much_one_message_may_carry() {
+        let big = format!("data:image/png;base64,{}", "A".repeat(MAX_IMAGE_CHARS));
+        assert!(unreadable_image(&[big]).is_some());
+        let many: Vec<String> = (0..MAX_IMAGES + 1)
+            .map(|_| "data:image/png;base64,AA==".to_string())
+            .collect();
+        assert!(unreadable_image(&many).is_some());
     }
 }
 

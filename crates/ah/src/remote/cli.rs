@@ -8,10 +8,10 @@ use crate::app::AnyError;
 
 pub fn subcommand(cmd: RemoteCmd, o: &crate::Overrides) -> Result<(), AnyError> {
     match cmd {
-        RemoteCmd::Pair { url } => pair(url),
+        RemoteCmd::Pair { url, token } => pair(url, token),
         RemoteCmd::Serve { detach, sudo } => crate::remote::daemon::serve(o, detach, sudo),
         RemoteCmd::Status => status(),
-        RemoteCmd::Forget => forget(),
+        RemoteCmd::Forget { local } => forget(local),
     }
 }
 
@@ -20,7 +20,7 @@ pub fn subcommand(cmd: RemoteCmd, o: &crate::Overrides) -> Result<(), AnyError> 
 /// The code is generated here and never travels over the network: the relay is
 /// told a key derived from it, and the phone is told the code itself, once, by
 /// being shown it.
-fn pair(url: Option<String>) -> Result<(), AnyError> {
+fn pair(url: Option<String>, token: Option<String>) -> Result<(), AnyError> {
     let url = match url.or_else(auth::remote_url) {
         Some(u) => check_url(u)?,
         None => {
@@ -30,13 +30,22 @@ fn pair(url: Option<String>) -> Result<(), AnyError> {
         }
     };
 
+    let token = token
+        .or_else(|| std::env::var("AH_PROVISION_TOKEN").ok())
+        .filter(|t| !t.trim().is_empty())
+        .ok_or(
+            "this relay wants its provisioning secret, so that its URL alone is not enough to \
+             make pairings on it. Pass --token, or set AH_PROVISION_TOKEN; it is the value you \
+             gave `npx wrangler secret put AH_PROVISION_TOKEN`.",
+        )?;
+
     let raw = crypto::new_code();
     let shown = code::format(&raw);
     let keys = crypto::Keys::derive(&raw);
 
     // The relay is told first. Writing the pairing down before it is accepted
     // would leave a machine believing in one the relay has never heard of.
-    match provision::provision(&url, &keys) {
+    match provision::provision(&url, &keys, token.trim()) {
         Ok(()) => {}
         // Two codes deriving the same hub is not a thing that happens; a hub
         // that is taken means this code was made before and is being made
@@ -96,9 +105,39 @@ fn status() -> Result<(), AnyError> {
     Ok(())
 }
 
-fn forget() -> Result<(), AnyError> {
+/// End the pairing, at the relay first and here second.
+///
+/// The order matters. Clearing the credential first would leave nothing to
+/// sign the revocation with, and a hub that is still provisioned still answers
+/// whoever holds the old code — as this machine, not merely as a listener. So
+/// the relay is told while there is still something to tell it with, and a
+/// relay that cannot be told stops the command rather than being skipped over.
+fn forget(local: bool) -> Result<(), AnyError> {
+    let pairing = auth::remote_code()
+        .and_then(|c| code::parse(&c))
+        .zip(auth::remote_url());
+    match (local, pairing) {
+        (false, Some((raw, url))) => {
+            let keys = crypto::Keys::derive(&raw);
+            if let Err(why) = provision::revoke(&url, &keys) {
+                return Err(format!(
+                    "the relay still holds this pairing, so forgetting it here would leave it \
+                     open to whoever has the code: {why}\n\
+                     Try again when the relay answers, or `ah remote forget --local` to forget \
+                     it here anyway."
+                )
+                .into());
+            }
+            println!("the pairing is revoked at the relay: the old code now opens nothing");
+        }
+        (false, None) => println!("nothing paired here"),
+        (true, _) => println!(
+            "forgotten here only. The relay still holds this pairing, and the old code still \
+             opens it"
+        ),
+    }
     auth::clear_remote()?;
-    println!("pairing forgotten. Phones holding the old code can no longer reach this machine.");
+    println!("the code and relay are gone from this machine");
     Ok(())
 }
 
