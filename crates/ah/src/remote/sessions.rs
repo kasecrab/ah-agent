@@ -74,9 +74,23 @@ pub trait Sessions: Send + Sync {
     }
 }
 
-/// The first line of something, short enough for a status area.
+/// The first line of something, short enough for a status area and safe to
+/// print.
+///
+/// What a phone says is written into the transcript, and the transcript is a
+/// terminal. An escape sequence arriving there is not text: it can set the
+/// window title, or ask the terminal to put something in the clipboard, or
+/// move the cursor over what was already drawn. So control characters are
+/// dropped rather than shortened around.
 pub fn first_line(text: &str) -> String {
-    let line = text.lines().next().unwrap_or("").trim();
+    let line: String = text
+        .lines()
+        .next()
+        .unwrap_or("")
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect();
+    let line = line.trim();
     if line.chars().count() > 60 {
         format!("{}\u{2026}", line.chars().take(60).collect::<String>())
     } else {
@@ -84,9 +98,26 @@ pub fn first_line(text: &str) -> String {
     }
 }
 
+/// The same treatment for a name, which is shown in the same places and is
+/// not shortened.
+pub fn printable(text: &str) -> String {
+    text.chars().filter(|c| !c.is_control()).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nothing_a_phone_says_can_drive_the_terminal() {
+        // A title change, a clipboard write, and a line redrawn over.
+        let nasty = "hi\u{1b}]0;owned\u{7}\u{1b}]52;c;cGF5bG9hZA==\u{7}\rgone";
+        let out = first_line(nasty);
+        assert!(!out.contains('\u{1b}'), "{out:?}");
+        assert!(!out.contains('\u{7}'), "{out:?}");
+        assert!(!out.contains('\r'), "{out:?}");
+        assert_eq!(printable("a\u{1b}[2Jb"), "a[2Jb");
+    }
 
     #[test]
     fn a_long_line_is_shortened_for_the_transcript() {

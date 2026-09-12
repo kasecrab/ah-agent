@@ -287,7 +287,12 @@ impl Sessions for Machine {
                 // Where it ran is where it goes on running, and that is not
                 // negotiable from a phone: the directory came from the
                 // session's own file.
-                let cwd = PathBuf::from(&summary.cwd);
+                //
+                // Checked against the roots all the same. Every directory this
+                // machine has ever run a session in is otherwise reachable
+                // from a phone by name, which would make the roots a rule
+                // about new sessions rather than about where an agent runs.
+                let cwd = self.allowed(Path::new(&summary.cwd))?;
                 let id = self.open(&cwd, Some(session), None)?;
                 return Ok(Some(id));
             }
@@ -544,8 +549,7 @@ pub fn serve(o: &Overrides, detach: bool, sudo: bool) -> Result<(), AnyError> {
                 // A publisher that stood down for a window leaves its thread;
                 // noticing costs one check every couple of seconds.
                 if publisher.as_ref().is_some_and(|p| {
-                    matches!(p.state(), publisher::State::Failed)
-                        || publisher::yield_path().exists()
+                    matches!(p.state(), publisher::State::Failed) || publisher::yield_asked()
                 }) {
                     publisher = None;
                 }
@@ -576,10 +580,13 @@ fn relaunch(o: &Overrides, sudo: bool) -> Result<(), AnyError> {
     if let Some(dir) = log.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let out = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log)?;
+    // Everything a phone said ends up in here. The credentials file next to it
+    // is 0600 and this is the same secret by another route.
+    let mut opts = std::fs::OpenOptions::new();
+    opts.create(true).append(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+    let out = opts.open(&log)?;
     let mut command = std::process::Command::new(std::env::current_exe()?);
     command.args(["remote", "serve"]);
     if sudo {

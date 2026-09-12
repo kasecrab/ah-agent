@@ -66,6 +66,10 @@ without asking, exactly as if you had typed it yourself. Nothing about the
 link makes it safer than sitting down at the machine, and it is not meant to
 be: the pairing code is the whole of the boundary.
 
+`remote.roots` is the one real fence, and its default — your home directory —
+is not much of one. Narrow it to the directories you actually want reachable
+from a phone, and it becomes worth something.
+
 What the link does do is show its working. Anything a phone sends appears in
 the transcript in front of you — the message, an interruption, an answer to a
 tool prompt — so a session being driven from elsewhere never looks like a
@@ -75,6 +79,25 @@ is a strange thing to want.
 Publishing is off until you ask for it. Pairing a machine and publishing from
 it are separate decisions: `ah remote pair` does the first, `remote.enabled`
 the second.
+
+### What it does not do
+
+Worth knowing before you rely on any of it:
+
+- **One code, for the life of the pairing.** Every key comes from it, so there
+  is no forward secrecy: somebody who records the traffic today and learns the
+  code later can read what they recorded. Rotating means `ah remote forget` and
+  pairing again, which takes a few seconds and is worth doing if a code has
+  ever been somewhere it should not.
+- **Paired phones are not isolated from one another.** The key a phone seals
+  under is derived from the pairing code, so any phone holding the code can
+  compute any other's. Two phones are two devices with the same key, not two
+  accounts, and the `phone <hex>` a notice names is a label, not an identity.
+- **The relay sees the shape of the traffic.** Not a word of what is in it, but
+  how many frames, how big, and when — which is enough to know when you are
+  working and roughly how much.
+- **A command reaches the machine only while it is connected.** Nothing is
+  queued for a desktop that is offline; the phone is told so instead.
 
 ## With nobody at the keyboard
 
@@ -93,11 +116,23 @@ Three things it does that a window does not, because nobody is watching it:
 
 - **Sessions it starts ask before running tools**, however this machine is
   otherwise configured. `remote.trust_paired_device = true` turns that off.
-- **It will only start a session where you said it may.** `remote.roots`
-  lists those directories and defaults to your home directory.
+  Read what this is and is not, below.
+- **It will only run an agent where you said it may.** `remote.roots` lists
+  those directories and defaults to your home directory, which is wide. A
+  session on disk is checked against the same list before it is resumed, so
+  the rule is about where an agent runs and not only about where a new session
+  starts.
 - **They may not run `sudo`.** See below. All three settings are read from the
   environment or your own config and nowhere else — a repository you cloned
   cannot widen any of them by being cloned.
+
+**What "asks before running tools" is worth.** It is a guard against the model,
+not against whoever holds the code: the prompt goes to the phone, and the phone
+is the same party that asked for the tool in the first place. It means a
+session driven from a phone cannot run a command nobody approved — it does not
+mean a code holder is limited to what you would have approved. Against a code
+holder, the things that actually hold are `remote.roots`, the `sudo` refusal,
+and `permissions.deny`.
 
 ### sudo
 

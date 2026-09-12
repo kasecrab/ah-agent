@@ -29,7 +29,7 @@ use serde_json::Value;
 
 use crate::app::UiEvent;
 use crate::remote::lock::Lock;
-use crate::remote::sessions::{Act, Sessions};
+use crate::remote::sessions::{self, Act, Sessions};
 
 /// How often the thread looks at what has gathered.
 const TICK: Duration = Duration::from_millis(20);
@@ -41,6 +41,11 @@ const YIELD_CHECK: Duration = Duration::from_millis(200);
 /// How long a window waits for whoever is publishing to stand down before
 /// giving up and publishing nothing.
 const HANDOVER: Duration = Duration::from_secs(3);
+
+/// Link ids this process will hold decryption state for at once. Twice the
+/// number of phones the relay lets attach, so a reconnect never evicts a
+/// phone that is still there.
+const MAX_OPENERS: usize = 8;
 
 /// Images one message from a phone may carry, and how much of the frame they
 /// may be between them. Both well under what the relay will carry at all, so
@@ -97,6 +102,46 @@ struct Shared {
     /// its screen comes back, which is often, and a transcript that said so
     /// every time would be mostly that.
     watching: Mutex<std::collections::HashSet<String>>,
+    /// How many more commands will be acted on before the next refill.
+    allowance: Allowance,
+}
+
+/// A bucket that fills back up over time, so a burst goes through and a loop
+/// does not.
+///
+/// It is not a security boundary — whoever holds the code is allowed to be
+/// here — it is what keeps a phone stuck in a retry loop, or a mistake in an
+/// app, from starting turns faster than a person could read them and spending
+/// a day's model budget doing it.
+struct Allowance {
+    left: Mutex<(f64, Instant)>,
+}
+
+impl Allowance {
+    /// Commands allowed at once after a quiet spell, and how many a second are
+    /// added back. Twenty is more than a person taps; two a second is more
+    /// than a person sustains.
+    const BURST: f64 = 20.0;
+    const PER_SEC: f64 = 2.0;
+
+    fn new() -> Self {
+        Self {
+            left: Mutex::new((Self::BURST, Instant::now())),
+        }
+    }
+
+    fn take(&self) -> bool {
+        let mut state = lock(&self.left);
+        let (ref mut left, ref mut when) = *state;
+        let elapsed = when.elapsed().as_secs_f64();
+        *when = Instant::now();
+        *left = (*left + elapsed * Self::PER_SEC).min(Self::BURST);
+        if *left < 1.0 {
+            return false;
+        }
+        *left -= 1.0;
+        true
+    }
 }
 
 /// What has gathered since the last frame went out.
@@ -151,6 +196,7 @@ impl Publisher {
             answered_by: Mutex::new(None),
             last_state: Mutex::new(None),
             watching: Mutex::new(std::collections::HashSet::new()),
+            allowance: Allowance::new(),
         });
 
         let (socket_tx, socket_rx) = mpsc::channel();
@@ -307,6 +353,30 @@ pub fn yield_path() -> std::path::PathBuf {
     ah_core::paths::data_dir().join("remote.yield")
 }
 
+/// Whether somebody is actually asking for the pairing.
+///
+/// The file lives in this user's data directory, so on an ordinary machine
+/// nobody else can write it; the ownership check is for the machine that is
+/// not ordinary, where a world-writable directory would otherwise let anything
+/// on the host take a session off the air by touching a file.
+#[cfg(unix)]
+pub fn yield_asked() -> bool {
+    use std::os::unix::fs::MetadataExt;
+    // SAFETY: no arguments, no allocation, cannot fail.
+    let me = unsafe { geteuid() };
+    std::fs::metadata(yield_path()).is_ok_and(|m| m.uid() == me)
+}
+
+#[cfg(not(unix))]
+pub fn yield_asked() -> bool {
+    yield_path().exists()
+}
+
+#[cfg(unix)]
+unsafe extern "C" {
+    fn geteuid() -> u32;
+}
+
 /// Ask whoever is publishing to stand down, and wait a little for them to.
 ///
 /// The file is removed either way: left behind, it would keep the next holder
@@ -403,7 +473,7 @@ fn run(
         // Somebody wanting the pairing is the one thing that ends this early.
         if last_yield_check.elapsed() >= YIELD_CHECK {
             last_yield_check = Instant::now();
-            if yield_path().exists() {
+            if yield_asked() {
                 let _ = notes.send(Note::Yield);
                 break;
             }
@@ -534,15 +604,43 @@ fn answer(
     let (Some(id), Some(phone)) = (unhex(&link), unhex(&plink)) else {
         return Vec::new();
     };
-    let opener = openers
-        .entry(plink.clone())
-        .or_insert_with(|| Opener::new(keys.link_key(Dir::P2d, &id, &phone), Dir::P2d, id, phone));
-    let Ok(plain) = opener.open(seq, &ct) else {
+    // Kept only once a frame has actually opened. An entry made on the way in
+    // would mean anything able to reach this socket could leave one behind per
+    // made-up link id, which is a list this process holds and nothing trims.
+    let plain = match openers.get_mut(&plink) {
+        Some(opener) => match opener.open(seq, &ct) {
+            Ok(plain) => plain.to_vec(),
+            Err(_) => return Vec::new(),
+        },
+        None => {
+            if openers.len() >= MAX_OPENERS {
+                // Only real phones ever get in here, and there are never many
+                // of them; the oldest key makes room for a phone that
+                // reconnected with a new link.
+                if let Some(oldest) = openers.keys().next().cloned() {
+                    openers.remove(&oldest);
+                }
+            }
+            let mut opener = Opener::new(keys.link_key(Dir::P2d, &id, &phone), Dir::P2d, id, phone);
+            let Ok(plain) = opener.open(seq, &ct) else {
+                return Vec::new();
+            };
+            let plain = plain.to_vec();
+            openers.insert(plink.clone(), opener);
+            plain
+        }
+    };
+    let Ok(asked) = serde_json::from_slice::<FromPhone>(&plain) else {
         return Vec::new();
     };
-    let Ok(asked) = serde_json::from_slice::<FromPhone>(plain) else {
+
+    // A code holder is allowed to drive this machine; a code holder in a loop
+    // is not allowed to drive it thousands of times a second. This does not
+    // make the code safer to lose — nothing here does — it keeps a mistake or
+    // a runaway from costing a day's model spend before anybody notices.
+    if !shared.allowance.take() {
         return Vec::new();
-    };
+    }
 
     let device = device_name(&plink);
     let ack = |error: Option<String>| {
@@ -607,7 +705,9 @@ fn answer(
         FromPhone::Interrupt { session } => (session, Act::Interrupt),
         FromPhone::Compact { session, focus } => (session, Act::Compact(focus)),
         FromPhone::Clear { session } => (session, Act::Clear),
-        FromPhone::Rename { session, name } => (session, Act::Rename(name)),
+        // A name is drawn in the status line and in the session list, both of
+        // which are a terminal.
+        FromPhone::Rename { session, name } => (session, Act::Rename(sessions::printable(&name))),
         FromPhone::Resume { session } => (session, Act::Resume),
         FromPhone::NewSession { cwd, model, prompt } => {
             (String::new(), Act::Start { cwd, model, prompt })
@@ -922,6 +1022,32 @@ mod tests {
             1,
             "dropping the only frame says nothing at all"
         );
+    }
+}
+
+#[cfg(test)]
+mod allowance {
+    use super::*;
+
+    #[test]
+    fn a_burst_goes_through_and_a_loop_does_not() {
+        let a = Allowance::new();
+        for i in 0..Allowance::BURST as usize {
+            assert!(a.take(), "refused command {i} of an ordinary burst");
+        }
+        assert!(!a.take(), "a loop kept going past the burst");
+    }
+
+    #[test]
+    fn it_fills_back_up() {
+        let a = Allowance::new();
+        while a.take() {}
+        // Pretend a second went by, which is what the clock would do here.
+        {
+            let mut state = lock(&a.left);
+            state.1 = Instant::now() - Duration::from_secs(2);
+        }
+        assert!(a.take(), "it never came back");
     }
 }
 
