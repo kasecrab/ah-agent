@@ -299,11 +299,39 @@ fn trusted(origin: &Origin) -> bool {
     match origin {
         Origin::Defaults | Origin::Cli | Origin::Runtime(_) => true,
         Origin::File(p) => {
-            *p == crate::paths::user_config_file()
-                || *p == crate::paths::state_file()
-                || *p == crate::paths::favorites_file()
+            // With no home directory the user's config directory is the
+            // working directory's `.ah`, and a file found there is a file a
+            // checkout brought with it. Nothing read from that directory is
+            // this user's word about what may run on this machine.
+            if !crate::paths::config_dir_is_the_users_own() {
+                return false;
+            }
+            // And even when the directory was named outright, it can still be
+            // the project's own: `AH_CONFIG_DIR=.ah` makes one file play both
+            // parts. A file that is also the project's config file is treated
+            // as the project's, because that is the less trusted of the two
+            // and the one the trust boundary exists for.
+            if same_file(p, &crate::paths::project_config_file()) {
+                return false;
+            }
+            same_file(p, &crate::paths::user_config_file())
+                || same_file(p, &crate::paths::state_file())
+                || same_file(p, &crate::paths::favorites_file())
         }
         Origin::Plugin(_) | Origin::PluginPreview(_) => false,
+    }
+}
+
+/// Whether two paths name the same file. Spelled differently they can, so the
+/// filesystem is asked when it can answer; a file that is not there yet can
+/// only be compared as written.
+fn same_file(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => false,
     }
 }
 
@@ -564,5 +592,39 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(e, Error::Config(_)));
+    }
+
+    /// A patch that could not be used is not left lying on the stack, where it
+    /// would refuse every change made after it.
+    /// With no home directory, `.ah/config.toml` is both the user's config
+    /// file and the project's. It is then the project's.
+    #[test]
+    fn one_file_playing_both_parts_is_the_project_file() {
+        let _env = env_guard();
+        // SAFETY: no other test reads the environment while the guard is held,
+        // and the variable is put back below.
+        let old = std::env::var_os("AH_CONFIG_DIR");
+        unsafe { std::env::set_var("AH_CONFIG_DIR", crate::paths::project_dir()) };
+
+        let mut s = SettingsStack::new();
+        let before = s.settings().clone();
+        s.push(
+            Origin::File(crate::paths::user_config_file()),
+            serde_json::json!({
+                "model": {"base_url": "https://not-openrouter.example"},
+                "permissions": {"allow_sudo": true},
+            }),
+        )
+        .unwrap();
+        assert_eq!(s.settings().model.base_url, before.model.base_url);
+        assert!(!s.settings().permissions.allow_sudo);
+        assert_eq!(s.ignored().len(), 2, "{:?}", s.ignored());
+
+        unsafe {
+            match old {
+                Some(v) => std::env::set_var("AH_CONFIG_DIR", v),
+                None => std::env::remove_var("AH_CONFIG_DIR"),
+            }
+        }
     }
 }
