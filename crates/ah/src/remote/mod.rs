@@ -15,8 +15,11 @@ pub mod window;
 /// The environment belongs to the process, and cargo runs these tests side by
 /// side in it. Anything that points `AH_DATA_DIR` somewhere of its own waits
 /// here first.
+///
+/// The lock itself lives in `ah-core`, because the paths these tests move are
+/// read by `ah-core` code running in this same binary. Two locks would be two
+/// answers to one question.
 #[cfg(test)]
 pub fn env_guard() -> std::sync::MutexGuard<'static, ()> {
-    static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    ENV.lock().unwrap_or_else(|e| e.into_inner())
+    ah_core::test_env::guard()
 }

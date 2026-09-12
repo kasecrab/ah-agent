@@ -1347,8 +1347,12 @@ mod files {
     use super::*;
 
     /// A session with one drawing in it, and a data directory of its own.
+    ///
+    /// The caller holds `crate::remote::env_guard()` for as long as it uses
+    /// what this returns; the variable is the process's, not this test's.
     fn drawn(dir: &std::path::Path) -> String {
-        // SAFETY: every test that moves this variable holds the same guard.
+        // SAFETY: every test that moves this variable, and every test that
+        // reads a path derived from it, holds the one guard in `ah-core`.
         unsafe { std::env::set_var("AH_DATA_DIR", dir) };
         let session = String::from("abc123");
         let images = ah_core::paths::session_images_dir(&session);

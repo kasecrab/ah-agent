@@ -66,25 +66,18 @@ impl Drop for Credentials {
 /// Overwrite a secret where it stands, before the allocator gets the memory
 /// back and hands it to whatever asks next.
 ///
-/// A volatile write, and a fence after it, rather than `clear()` or `= String::new()`.
-/// The difference is not pedantry: at the settings this workspace ships with —
-/// full optimisation, fat link-time optimisation — a plain assignment that
-/// nothing afterwards reads is a write the compiler is entitled to delete, and
-/// it does delete it. It cannot delete a volatile one, and the fence stops the
-/// write being moved past the free that follows it.
+/// A real wipe rather than `clear()` or `= String::new()`. The difference is
+/// not pedantry: at the settings this workspace ships with — full
+/// optimisation, fat link-time optimisation — a plain assignment that nothing
+/// afterwards reads is a write the compiler is entitled to delete, and it was
+/// measured deleting it. `zeroize` writes volatilely and fences afterwards, so
+/// the write survives and cannot be moved past the free that follows it.
 ///
 /// The string is left empty afterwards, so the value is gone as well as
 /// unreadable.
 fn wipe(secret: &mut String) {
-    // Safety: a run of zero bytes is valid UTF-8, so the string is still a
-    // string at every point during this, including if something unwinds
-    // through the middle of it.
-    let bytes = unsafe { secret.as_mut_vec() };
-    for byte in bytes.iter_mut() {
-        unsafe { std::ptr::write_volatile(byte, 0) };
-    }
-    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
-    bytes.clear();
+    use zeroize::Zeroize as _;
+    secret.zeroize();
 }
 
 /// The value with its edges taken off, and the copy it came from wiped.
