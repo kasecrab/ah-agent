@@ -28,7 +28,9 @@ gets by default cannot write anything.
 ## Where plugins load from
 
 1. `~/.config/ah/plugins/*.wasm`
-2. `./.ah/plugins/*.wasm`
+2. `./.ah/plugins/*.wasm`, but only when `plugins.trust_project = true`. It is
+   off by default: a plugin is a program somebody else wrote, and a directory
+   containing one is not a reason to run it.
 3. files and directories in `plugins.paths` and `--plugin PATH`
 
 `plugins.disabled` lists names or file stems to skip; `plugins.enabled =

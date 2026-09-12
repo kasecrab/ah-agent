@@ -303,7 +303,7 @@ caps how many run together. Set `parallel = false` to go back to one at a time.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `paths` | `[]` | extra `.wasm` files or directories, besides `~/.config/ah/plugins` and `.ah/plugins` |
+| `paths` | `[]` | extra `.wasm` files or directories, besides `~/.config/ah/plugins` and, when `trust_project` is on, `.ah/plugins` |
 | `disabled` | `[]` | plugin names or file stems to skip |
 | `trust_project` | `false` | also load `.ah/plugins/*.wasm` from the directory you are working in |
 | `fuel_per_call` | `50000000` | interpreter fuel per hook call, roughly one unit per wasm instruction |
