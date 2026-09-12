@@ -55,7 +55,12 @@ pub struct Machine {
     /// Whether a session started here may become another user. Off, `sudo` is
     /// refused before it runs rather than left waiting on a prompt nobody will
     /// ever type into.
-    allow_sudo: bool,
+    ///
+    /// Read per session rather than once, because the cached password can stop
+    /// being refreshable while the daemon runs — a `sudoers` that never caches,
+    /// or a laptop that slept — and a session started after that would wait on
+    /// a prompt nobody can answer.
+    allow_sudo: Arc<AtomicBool>,
     max_sessions: usize,
     /// Events from every engine, tagged with the session they came from.
     events: Sender<(String, UiEvent)>,
@@ -104,7 +109,7 @@ impl Machine {
         // this process, which is a terminal nobody is reading — so the command
         // would not fail, it would wait, and the phone would see nothing at all
         // until the tool timed out.
-        if !self.allow_sudo {
+        if !self.allow_sudo.load(Ordering::Relaxed) {
             stack
                 .push(
                     Origin::Runtime("remote".into()),
@@ -337,37 +342,61 @@ impl Sessions for Machine {
 /// user's own config, and from nowhere a repository can reach. A cloned
 /// project naming directories a phone may run an agent in would be somebody
 /// else choosing what this machine is willing to do.
-fn roots(stack: &SettingsStack) -> Vec<PathBuf> {
-    if let Ok(from_env) = std::env::var("AH_REMOTE_ROOTS") {
-        let listed: Vec<PathBuf> = from_env
+fn roots(stack: &SettingsStack) -> Result<Vec<PathBuf>, AnyError> {
+    let listed: Vec<String> = match std::env::var("AH_REMOTE_ROOTS") {
+        Ok(from_env) if !from_env.trim().is_empty() => from_env
             .split(':')
             .filter(|p| !p.trim().is_empty())
-            .filter_map(|p| PathBuf::from(p.trim()).canonicalize().ok())
-            .collect();
-        if !listed.is_empty() {
-            return listed;
+            .map(|p| p.trim().to_string())
+            .collect(),
+        _ => {
+            let user = ah_core::paths::user_config_file();
+            stack
+                .layers()
+                .iter()
+                .filter(|l| {
+                    matches!(l.origin, Origin::Defaults | Origin::Cli)
+                        || matches!(&l.origin, Origin::File(p) if *p == user)
+                })
+                .filter_map(|l| l.patch.pointer("/remote/roots").cloned())
+                .filter_map(|v| serde_json::from_value::<Vec<String>>(v).ok())
+                .next_back()
+                .unwrap_or_default()
         }
+    };
+
+    if listed.is_empty() {
+        // The home directory, resolved the same way the paths it is compared
+        // against will be. On a host where /home is a symlink, an unresolved
+        // fallback matches nothing at all and the daemon refuses everything.
+        let home = dirs::home_dir().ok_or("there is no home directory to fall back on")?;
+        let home = home
+            .canonicalize()
+            .map_err(|e| format!("{}: {e}", home.display()))?;
+        return Ok(vec![home]);
     }
-    let user = ah_core::paths::user_config_file();
-    let listed: Vec<String> = stack
-        .layers()
-        .iter()
-        .filter(|l| {
-            matches!(l.origin, Origin::Defaults | Origin::Cli)
-                || matches!(&l.origin, Origin::File(p) if *p == user)
-        })
-        .filter_map(|l| l.patch.pointer("/remote/roots").cloned())
-        .filter_map(|v| serde_json::from_value::<Vec<String>>(v).ok())
-        .next_back()
-        .unwrap_or_default();
-    let listed: Vec<PathBuf> = listed
-        .iter()
-        .filter_map(|p| PathBuf::from(p).canonicalize().ok())
-        .collect();
-    if !listed.is_empty() {
-        return listed;
+
+    // A root that cannot be resolved stops the daemon rather than being
+    // dropped. Dropping them quietly meant a typo in one of two entries
+    // narrowed the list without saying so, and a typo in the only entry
+    // widened it to the whole home directory.
+    let mut out = Vec::with_capacity(listed.len());
+    for entry in &listed {
+        let path = match entry.strip_prefix("~/") {
+            Some(rest) => dirs::home_dir()
+                .ok_or("there is no home directory for ~ to mean")?
+                .join(rest),
+            None => PathBuf::from(entry),
+        };
+        let full = path
+            .canonicalize()
+            .map_err(|e| format!("remote.roots: {}: {e}", path.display()))?;
+        if !full.is_dir() {
+            return Err(format!("remote.roots: {} is not a directory", full.display()).into());
+        }
+        out.push(full);
     }
-    dirs::home_dir().into_iter().collect()
+    Ok(out)
 }
 
 /// Whether a phone's sessions are allowed to run tools without asking. Read
@@ -428,21 +457,23 @@ pub fn serve(o: &Overrides, detach: bool, sudo: bool) -> Result<(), AnyError> {
     // phone is able to make this machine do, and because the asking needs the
     // terminal that is about to be handed over to the daemon's own output.
     let wanted = sudo || sudo_allowed(&stack) || super::sudo::ask();
-    let allow_sudo = wanted
-        && match super::sudo::cache() {
-            Ok(()) => true,
-            Err(why) => {
-                println!("sudo stays refused: {why}");
-                false
-            }
-        };
+    let allow_sudo = Arc::new(AtomicBool::new(
+        wanted
+            && match super::sudo::cache() {
+                Ok(()) => true,
+                Err(why) => {
+                    println!("sudo stays refused: {why}");
+                    false
+                }
+            },
+    ));
 
     let (events_tx, events_rx) = mpsc::channel();
     let machine = Arc::new(Machine {
         running: Mutex::new(HashMap::new()),
-        roots: roots(&stack),
+        roots: roots(&stack)?,
         trusted: trusted(&stack),
-        allow_sudo,
+        allow_sudo: allow_sudo.clone(),
         max_sessions: settings.remote.max_sessions.max(1),
         events: events_tx,
     });
@@ -461,7 +492,7 @@ pub fn serve(o: &Overrides, detach: bool, sudo: bool) -> Result<(), AnyError> {
     );
     println!(
         "  sudo {}",
-        if machine.allow_sudo {
+        if machine.allow_sudo.load(Ordering::Relaxed) {
             "is allowed, and its password is held for as long as this runs"
         } else {
             "is refused, rather than left waiting on a prompt nobody would see"
@@ -472,7 +503,8 @@ pub fn serve(o: &Overrides, detach: bool, sudo: bool) -> Result<(), AnyError> {
     crate::cli::install_ctrlc(cancel.clone());
     let refresher = machine
         .allow_sudo
-        .then(|| super::sudo::keep_fresh(cancel.clone()));
+        .load(Ordering::Relaxed)
+        .then(|| super::sudo::keep_fresh(cancel.clone(), machine.allow_sudo.clone()));
 
     let (notes_tx, notes_rx) = mpsc::channel();
     std::thread::Builder::new()
@@ -546,12 +578,18 @@ pub fn serve(o: &Overrides, detach: bool, sudo: bool) -> Result<(), AnyError> {
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                // A publisher that stood down for a window leaves its thread;
-                // noticing costs one check every couple of seconds.
-                if publisher.as_ref().is_some_and(|p| {
-                    matches!(p.state(), publisher::State::Failed) || publisher::yield_asked()
-                }) {
+                // A publisher that stood down for a window leaves its thread,
+                // and the yield file it stood down for is deleted a few
+                // seconds later — so what to look at is the thread having
+                // ended, not the file that asked it to. Watching the file
+                // meant a handover that took longer than the window's patience
+                // left the daemon holding a publisher nothing was draining.
+                if publisher
+                    .as_ref()
+                    .is_some_and(|p| p.finished() || matches!(p.state(), publisher::State::Failed))
+                {
                     publisher = None;
+                    said = None;
                 }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -568,11 +606,16 @@ pub fn serve(o: &Overrides, detach: bool, sudo: bool) -> Result<(), AnyError> {
     Ok(())
 }
 
+#[cfg(unix)]
+unsafe extern "C" {
+    fn setsid() -> i32;
+}
+
 /// Start again, detached, and let this one go.
 ///
-/// Re-exec rather than fork: the child is a fresh process with a group of its
-/// own, which is what makes it survive the terminal that started it, and it
-/// needs none of the FFI a fork would.
+/// Re-exec rather than fork: the child is a fresh process, which is what makes
+/// it survive the terminal that started it, and it needs none of the FFI a
+/// fork would beyond the one call that gives it a session of its own.
 #[cfg(unix)]
 fn relaunch(o: &Overrides, sudo: bool) -> Result<(), AnyError> {
     use std::os::unix::process::CommandExt;
@@ -595,8 +638,23 @@ fn relaunch(o: &Overrides, sudo: bool) -> Result<(), AnyError> {
     if let Some(cwd) = &o.cwd {
         command.arg("--cwd").arg(cwd);
     }
+    // A session of its own, not merely a process group. `sudo` keys its cached
+    // password to the terminal by default, so a child that kept the launching
+    // terminal would inherit a ticket somebody typed a password for minutes
+    // earlier — and every session a phone started would quietly have root,
+    // whatever `allow_sudo` said.
+    //
+    // SAFETY: called in the child between fork and exec, where the only rule
+    // is to use async-signal-safe calls. `setsid` is one.
+    unsafe {
+        command.pre_exec(|| {
+            if setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
     let child = command
-        .process_group(0)
         .stdin(std::process::Stdio::null())
         .stdout(out.try_clone()?)
         .stderr(out)
@@ -621,7 +679,7 @@ mod tests {
             running: Mutex::new(HashMap::new()),
             roots,
             trusted: false,
-            allow_sudo: false,
+            allow_sudo: Arc::new(AtomicBool::new(false)),
             max_sessions: 4,
             events,
         }
@@ -659,10 +717,41 @@ mod tests {
             )
             .unwrap();
         assert_ne!(
-            roots(&stack),
+            roots(&stack).unwrap(),
             vec![PathBuf::from("/")],
             "a repository chose where a phone may run an agent"
         );
+    }
+
+    #[test]
+    fn a_root_that_does_not_resolve_stops_the_daemon() {
+        let _env = crate::remote::env_guard();
+        let mut stack = SettingsStack::new();
+        stack
+            .push(
+                Origin::Cli,
+                serde_json::json!({"remote": {"roots": ["/no/such/place", "/tmp"]}}),
+            )
+            .unwrap();
+        // Dropped quietly, this would have narrowed the list to /tmp without
+        // saying so; if it had been the only entry it would have widened it to
+        // the whole home directory.
+        let why = roots(&stack).unwrap_err().to_string();
+        assert!(why.contains("/no/such/place"), "{why}");
+    }
+
+    #[test]
+    fn a_root_written_with_a_tilde_means_the_home_directory() {
+        let _env = crate::remote::env_guard();
+        let mut stack = SettingsStack::new();
+        stack
+            .push(
+                Origin::Cli,
+                serde_json::json!({"remote": {"roots": ["~/"]}}),
+            )
+            .unwrap();
+        let home = dirs::home_dir().unwrap().canonicalize().unwrap();
+        assert_eq!(roots(&stack).unwrap(), vec![home]);
     }
 
     #[test]

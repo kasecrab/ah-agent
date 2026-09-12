@@ -53,9 +53,12 @@ pub fn cache() -> Result<(), String> {
 ///
 /// The thread stops when `cancel` is set. If a refresh is ever refused — a
 /// `sudoers` with `timestamp_timeout=0` never caches anything, and the machine
-/// waking from sleep can lose the record — it says so once and stops trying,
+/// waking from sleep can lose the record — it clears `allowed` and stops,
 /// because a `sudo` that has to ask is exactly what this was for.
-pub fn keep_fresh(cancel: Arc<AtomicBool>) -> std::thread::JoinHandle<()> {
+pub fn keep_fresh(
+    cancel: Arc<AtomicBool>,
+    allowed: Arc<AtomicBool>,
+) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name("ah-remote-sudo".into())
         .spawn(move || {
@@ -76,9 +79,15 @@ pub fn keep_fresh(cancel: Arc<AtomicBool>) -> std::thread::JoinHandle<()> {
                     .map(|s| s.success())
                     .unwrap_or(false);
                 if !fresh {
+                    // Withdrawn, not merely reported. A session started after
+                    // this would find no cached password and wait on a prompt
+                    // at a terminal nobody is reading, which is the whole
+                    // thing this was meant to prevent.
+                    allowed.store(false, Ordering::Release);
                     println!(
-                        "sudo will not stay cached on this machine, so a session that needs it \
-                         would wait on a prompt nobody can answer. Restart with --sudo to try again"
+                        "sudo is refused from now on: it will not stay cached on this machine, \
+                         so a session that needed it would wait on a prompt nobody can answer. \
+                         Restart with --sudo to try again"
                     );
                     return;
                 }

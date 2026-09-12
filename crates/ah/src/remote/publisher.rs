@@ -94,12 +94,16 @@ struct Shared {
     sessions: Arc<dyn Sessions>,
     up: AtomicBool,
     failed: AtomicBool,
+    /// Set when the thread has stopped for good. A window taking the pairing
+    /// ends it quietly, and whoever is holding this needs to notice: the
+    /// batch has nothing draining it otherwise.
+    done: AtomicBool,
     /// The question on screen, as the session it belongs to and its number.
     /// An answer for anything else arrived too late, and sending it on would
     /// apply it to whatever came next.
-    pending: Mutex<Option<(String, u64)>>,
+    pending: Mutex<HashMap<String, u64>>,
     /// Who answered that question, when it was a phone.
-    answered_by: Mutex<Option<(u64, String)>>,
+    answered_by: Mutex<HashMap<(String, u64), String>>,
     /// What was last said about a session, so saying it again is free to ask
     /// for and costs nothing to refuse.
     last_state: Mutex<Option<ah_remote::proto::SessionState>>,
@@ -197,8 +201,9 @@ impl Publisher {
             sessions,
             up: AtomicBool::new(false),
             failed: AtomicBool::new(false),
-            pending: Mutex::new(None),
-            answered_by: Mutex::new(None),
+            done: AtomicBool::new(false),
+            pending: Mutex::new(HashMap::new()),
+            answered_by: Mutex::new(HashMap::new()),
             last_state: Mutex::new(None),
             watching: Mutex::new(std::collections::HashSet::new()),
             allowance: Allowance::new(),
@@ -242,7 +247,7 @@ impl Publisher {
             // A question is waiting on somebody, so it does not wait for a
             // batch.
             UiEvent::AskPermission { id, call, reason } => {
-                *lock(&self.shared.pending) = Some((session.to_string(), *id));
+                lock(&self.shared.pending).insert(session.to_string(), *id);
                 return self.ahead(FromDesk::AskPermission {
                     session: session.to_string(),
                     id: *id,
@@ -251,7 +256,7 @@ impl Publisher {
                 });
             }
             UiEvent::AskUser { id, ask } => {
-                *lock(&self.shared.pending) = Some((session.to_string(), *id));
+                lock(&self.shared.pending).insert(session.to_string(), *id);
                 return self.ahead(FromDesk::AskUser {
                     session: session.to_string(),
                     id: *id,
@@ -259,11 +264,10 @@ impl Publisher {
                 });
             }
             UiEvent::Answered { id } => {
-                *lock(&self.shared.pending) = None;
-                let by = match lock(&self.shared.answered_by).take() {
-                    Some((answered, who)) if answered == *id => who,
-                    _ => "the desk".to_string(),
-                };
+                lock(&self.shared.pending).remove(session);
+                let by = lock(&self.shared.answered_by)
+                    .remove(&(session.to_string(), *id))
+                    .unwrap_or_else(|| "the desk".to_string());
                 return self.ahead(FromDesk::Answered {
                     session: session.to_string(),
                     id: *id,
@@ -338,6 +342,14 @@ impl Publisher {
         } else {
             State::Dialling
         }
+    }
+}
+
+impl Publisher {
+    /// Whether the thread has stopped, so whoever is holding this knows to let
+    /// it go rather than go on handing it events nothing will send.
+    pub fn finished(&self) -> bool {
+        self.shared.done.load(Ordering::Acquire)
     }
 }
 
@@ -570,6 +582,10 @@ fn run(
         }
     }
 
+    // Whatever brought the loop to an end — the stop channel, or a window
+    // asking for the pairing — nothing is draining the batch after this.
+    shared.done.store(true, Ordering::Release);
+
     // On the way out, say so: a phone that knows the desktop left stops
     // waiting for it.
     if shared.up.load(Ordering::Acquire) {
@@ -739,14 +755,14 @@ fn answer(
             let Some(asked) = asking(shared, &session, id) else {
                 return ack(Some("that question has been answered".into()));
             };
-            *lock(&shared.answered_by) = Some((id, device));
+            lock(&shared.answered_by).insert((asked.clone(), id), device);
             (asked, Act::AllowTool(allow))
         }
         FromPhone::AnswerAsk { session, id, reply } => {
             let Some(asked) = asking(shared, &session, id) else {
                 return ack(Some("that question has been answered".into()));
             };
-            *lock(&shared.answered_by) = Some((id, device));
+            lock(&shared.answered_by).insert((asked.clone(), id), device);
             (asked, Act::Answer(reply))
         }
     };
@@ -801,20 +817,26 @@ fn unreadable_image(images: &[String]) -> Option<String> {
         .then(|| "an image sent from a phone has to be the picture itself, not a path to one on this machine".to_string())
 }
 
-/// Whether this is an answer to the question that is actually on screen, and
-/// if so which session asked it.
+/// Whether this is an answer to a question that is actually on screen, and if
+/// so which session asked it.
 ///
-/// A phone that has not attached to anything names no session, and there is
-/// only ever one question outstanding, so the number is enough to know what
-/// it is answering. Naming the wrong session is a different matter and is
-/// refused.
+/// One outstanding question per session, not one per machine. The daemon runs
+/// several at once and their prompt numbers start again from one in each, so a
+/// single slot meant two sessions both asking "id 1": one answer was refused
+/// and the other cleared the slot, leaving a session waiting on an answer that
+/// could no longer be given.
+///
+/// A phone that has not attached to anything names no session. That is only
+/// unambiguous when exactly one session is asking; when two are, it is
+/// refused, because guessing would answer the wrong one.
 fn asking(shared: &Shared, session: &str, id: u64) -> Option<String> {
-    match &*lock(&shared.pending) {
-        Some((asked, pending)) if *pending == id && (session.is_empty() || asked == session) => {
-            Some(asked.clone())
-        }
-        _ => None,
+    let pending = lock(&shared.pending);
+    if !session.is_empty() {
+        return (pending.get(session) == Some(&id)).then(|| session.to_string());
     }
+    let mut asking = pending.iter().filter(|(_, pending)| **pending == id);
+    let only = asking.next()?;
+    asking.next().is_none().then(|| only.0.clone())
 }
 
 /// Which phone this was, as far as anything here knows: the first characters
@@ -1041,6 +1063,71 @@ mod tests {
             1,
             "dropping the only frame says nothing at all"
         );
+    }
+}
+
+#[cfg(test)]
+mod questions {
+    use super::*;
+
+    fn shared() -> Shared {
+        Shared {
+            settings: Default::default(),
+            batch: Mutex::new(Batch::default()),
+            sessions: Arc::new(crate::remote::window::Window::new(
+                crate::remote::window::Reach {
+                    cmd: mpsc::channel().0,
+                    perm: mpsc::channel().0,
+                    ask: mpsc::channel().0,
+                    cancel: Arc::new(AtomicBool::new(false)),
+                    inbox: Arc::new(crate::app::Inbox::default()),
+                },
+                Default::default(),
+            )),
+            up: AtomicBool::new(false),
+            failed: AtomicBool::new(false),
+            done: AtomicBool::new(false),
+            pending: Mutex::new(HashMap::new()),
+            answered_by: Mutex::new(HashMap::new()),
+            last_state: Mutex::new(None),
+            watching: Mutex::new(std::collections::HashSet::new()),
+            allowance: Allowance::new(),
+        }
+    }
+
+    #[test]
+    fn two_sessions_asking_at_once_do_not_answer_each_other() {
+        // Prompt numbers start again in every engine, so both of these are
+        // question 1 and neither is the other.
+        let s = shared();
+        lock(&s.pending).insert("alpha".into(), 1);
+        lock(&s.pending).insert("beta".into(), 1);
+
+        assert_eq!(asking(&s, "alpha", 1).as_deref(), Some("alpha"));
+        assert_eq!(asking(&s, "beta", 1).as_deref(), Some("beta"));
+        // Answering alpha leaves beta still waiting, rather than clearing it.
+        lock(&s.pending).remove("alpha");
+        assert!(asking(&s, "alpha", 1).is_none());
+        assert_eq!(asking(&s, "beta", 1).as_deref(), Some("beta"));
+    }
+
+    #[test]
+    fn a_phone_that_named_no_session_is_only_obeyed_when_there_is_no_doubt() {
+        let s = shared();
+        lock(&s.pending).insert("alpha".into(), 1);
+        assert_eq!(asking(&s, "", 1).as_deref(), Some("alpha"));
+        // A second session asking the same number makes the empty name
+        // ambiguous, and a guess would answer the wrong one.
+        lock(&s.pending).insert("beta".into(), 1);
+        assert!(asking(&s, "", 1).is_none());
+    }
+
+    #[test]
+    fn an_answer_to_a_question_that_is_gone_is_refused() {
+        let s = shared();
+        lock(&s.pending).insert("alpha".into(), 7);
+        assert!(asking(&s, "alpha", 6).is_none());
+        assert!(asking(&s, "somebody-else", 7).is_none());
     }
 }
 
