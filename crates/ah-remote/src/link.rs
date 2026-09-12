@@ -48,6 +48,12 @@ pub struct Config {
     /// `https://…` in earnest, `http://127.0.0.1:…` against a local one.
     pub url: String,
     pub role: Role,
+    /// Usually a second copy of the caller's ladder, because this one lives on
+    /// the socket thread and that one lives on the publisher's. A copy is not
+    /// a leak as long as it is a copy somebody is accounted for: this one is
+    /// owned by the config, the config is owned by the socket thread, and the
+    /// thread is joined before `Link::drop` returns — so the copy is cleared,
+    /// not merely abandoned, when the link goes.
     pub keys: Keys,
 }
 

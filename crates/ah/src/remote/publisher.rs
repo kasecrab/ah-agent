@@ -25,6 +25,7 @@ use ah_core::agent::{AgentEvent, event_json};
 use ah_remote::crypto::{self, Keys, Opener, Sealer};
 use ah_remote::link::{Config, Event, Link};
 use ah_remote::proto::{Bye, Dir, Envelope, FromDesk, FromPhone, Hello, PROTO, Role};
+use ah_remote::zeroize::Zeroizing;
 use serde_json::Value;
 
 use crate::app::UiEvent;
@@ -175,7 +176,14 @@ pub fn start(
     sessions: Arc<dyn Sessions>,
     notes: mpsc::Sender<Note>,
 ) -> Option<Publisher> {
-    let raw = ah_remote::code::parse(&ah_core::auth::remote_code()?)?;
+    // The code comes off the disk as text and is needed for exactly the one
+    // line that derives the ladder from it. Both forms of it are named here
+    // rather than left as temporaries in an expression, so that both are
+    // cleared when this function returns instead of being freed with the whole
+    // pairing still legible in them — this runs in a window and in a daemon,
+    // and both of those go on running for hours afterwards.
+    let stored = Zeroizing::new(ah_core::auth::remote_code()?);
+    let raw = ah_remote::code::parse(&stored)?;
     let url = ah_core::auth::remote_url()?;
     Publisher::start(&settings.remote, url, Keys::derive(&raw), sessions, notes)
 }
@@ -505,7 +513,12 @@ fn run(
                     // A new connection is a new link, so numbering starts
                     // again under a key nothing has used.
                     id = crypto::new_link();
-                    seal = sealer(&keys, &id);
+                    // The retired sealer and the retired openers are let go
+                    // here and named while it happens, because each of them
+                    // holds a key schedule that nothing can wipe once it is
+                    // inside it — the least that can be done for a key
+                    // nothing will ever use again is to stop holding it.
+                    drop(std::mem::replace(&mut seal, sealer(&keys, &id)));
                     openers.clear();
                     // A new link is a new conversation with every phone, so
                     // none of them counts as watching until it says so.
@@ -597,6 +610,18 @@ fn run(
         // Long enough for the socket thread to take it off the queue.
         std::thread::sleep(Duration::from_millis(60));
     }
+
+    // And then everything the ladder led to goes, here, on purpose. Publishing
+    // stopping is not the process stopping: a window closes a session and goes
+    // on running, a daemon stands down for a window and goes on running. The
+    // ladder is wiped as it is dropped, the openers and the sealer are let go,
+    // and dropping the link joins the socket thread — which is what makes the
+    // second copy of the ladder, the one that thread holds, go with it rather
+    // than after it.
+    drop(openers);
+    drop(seal);
+    drop(link);
+    drop(keys);
 }
 
 /// Keep the newest of what could not be sent. What falls off the front is
@@ -688,7 +713,7 @@ fn answer(
                 // of them; the oldest key makes room for a phone that
                 // reconnected with a new link.
                 if let Some(oldest) = openers.keys().next().copied() {
-                    openers.remove(&oldest);
+                    drop(openers.remove(&oldest));
                 }
             }
             let mut opener = Opener::new(keys.link_key(Dir::P2d, &id, &phone), Dir::P2d, id, phone);

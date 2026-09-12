@@ -1,6 +1,7 @@
 //! `ah remote`: pairing, and what the link is doing.
 
 use ah_core::auth;
+use ah_remote::zeroize::Zeroizing;
 use ah_remote::{code, crypto, provision, qr};
 
 use crate::RemoteCmd;
@@ -32,29 +33,38 @@ fn pair(url: Option<String>, token: Option<String>) -> Result<(), AnyError> {
 
     // Asked for rather than required on the command line: an argument is in
     // the shell history of everybody who ever typed it, and this one is the
-    // relay's own secret.
-    let token = match token
-        .or_else(|| std::env::var("AH_PROVISION_TOKEN").ok())
-        .filter(|t| !t.trim().is_empty())
-    {
-        Some(t) => t,
-        None if std::io::IsTerminal::is_terminal(&std::io::stdin()) => {
-            crate::cli::read_secret("the relay's provisioning secret: ")?
-        }
-        None => {
-            return Err(
-                "this relay wants its provisioning secret, so that its URL alone is not \
+    // relay's own secret. Held wrapped once it is in hand, too: this command
+    // exits in a moment and most of what it touches dies with the process, but
+    // it is the one command holding two different people's secrets at once,
+    // and a command that hands out a pairing code is a poor place to start
+    // making exceptions.
+    let token = Zeroizing::new(
+        match token
+            .or_else(|| std::env::var("AH_PROVISION_TOKEN").ok())
+            .filter(|t| !t.trim().is_empty())
+        {
+            Some(t) => t,
+            None if std::io::IsTerminal::is_terminal(&std::io::stdin()) => {
+                crate::cli::read_secret("the relay's provisioning secret: ")?
+            }
+            None => {
+                return Err(
+                    "this relay wants its provisioning secret, so that its URL alone is not \
                         enough to make pairings on it. Set AH_PROVISION_TOKEN, or pass --token; \
                         it is the value you gave `npx wrangler secret put AH_PROVISION_TOKEN`."
-                    .into(),
-            );
-        }
-    };
+                        .into(),
+                );
+            }
+        },
+    );
     if token.trim().is_empty() {
         return Err("no secret given, so nothing was paired".into());
     }
 
-    let raw = crypto::new_code();
+    // Wrapped the moment it exists. From here it is the one secret this
+    // machine has, and this function holds it in three shapes at once — bytes,
+    // grouped text, and a deep link — each of which has to go at the end.
+    let raw = Zeroizing::new(crypto::new_code());
     let shown = code::format(&raw);
     let keys = crypto::Keys::derive(&raw);
 
@@ -72,11 +82,13 @@ fn pair(url: Option<String>, token: Option<String>) -> Result<(), AnyError> {
     }
     auth::save_remote(&shown, &url)?;
 
-    let link = format!(
+    // The deep link has the code in it with the dashes taken out, so it is the
+    // same secret in a second wrapper and is kept the same way.
+    let link = Zeroizing::new(format!(
         "razorback://pair?u={}&c={}",
         escape(&url),
-        shown.replace('-', "")
-    );
+        Zeroizing::new(shown.replace('-', "")).as_str()
+    ));
     match qr::Qr::encode(link.as_bytes()) {
         Some(symbol) => {
             println!();
@@ -87,7 +99,7 @@ fn pair(url: Option<String>, token: Option<String>) -> Result<(), AnyError> {
         None => println!("\n(the relay URL is too long to fit in a QR code)"),
     }
     println!("  scan it with the phone's camera, or type the code:\n");
-    println!("      {shown}\n");
+    println!("      {}\n", shown.as_str());
     println!("  relay {url}");
     println!("  hub   {}…", &keys.hub_id[..8]);
     println!();
@@ -98,7 +110,8 @@ fn pair(url: Option<String>, token: Option<String>) -> Result<(), AnyError> {
 }
 
 fn status() -> Result<(), AnyError> {
-    let (Some(stored), Some(url)) = (auth::remote_code(), auth::remote_url()) else {
+    let (Some(stored), Some(url)) = (auth::remote_code().map(Zeroizing::new), auth::remote_url())
+    else {
         println!("not paired. `ah remote pair --url <relay>` sets one up.");
         return Ok(());
     };
@@ -129,6 +142,7 @@ fn status() -> Result<(), AnyError> {
 /// relay that cannot be told stops the command rather than being skipped over.
 fn forget(local: bool) -> Result<(), AnyError> {
     let pairing = auth::remote_code()
+        .map(Zeroizing::new)
         .and_then(|c| code::parse(&c))
         .zip(auth::remote_url());
     match (local, pairing) {
@@ -270,7 +284,7 @@ mod tests {
         // The app parses `c` back with the same reader that accepts a typed
         // code, so the two paths cannot drift apart.
         let c = link.split("&c=").nth(1).unwrap();
-        assert_eq!(code::parse(c), Some(raw));
+        assert_eq!(code::parse(c), Some(Zeroizing::new(raw)));
         assert!(qr::Qr::encode(link.as_bytes()).is_some(), "it has to fit");
     }
 }

@@ -15,6 +15,21 @@
 //! therefore forge a frame that looks like the desktop's to another phone.
 //! That is the pairing code's trust boundary, not a hole inside it — anyone
 //! holding the code could start a session and say anything anyway.
+//!
+//! Every key here is wiped when it is done with, and every wipe goes through
+//! `zeroize`. That is not fussiness about which library to use: measured
+//! against this workspace's release profile, a `field = [0u8; 32]` in a `Drop`
+//! and a `ptr::write_bytes` without a fence are both deleted by the optimiser
+//! and leave the key sitting whole in the dead frame. A volatile write is the
+//! one form of it the compiler is not allowed to remove.
+//!
+//! Two things here cannot be wiped, and saying so is better than implying
+//! otherwise. ring keeps the pairing code's HKDF state and the expanded AES
+//! key schedule in structures that hold a `&'static` pointer beside the key
+//! bytes, so overwriting them wholesale would leave a null reference behind —
+//! undefined behaviour, in exchange for a partial wipe. What is done instead
+//! is to own as few copies as possible, wipe every copy that is ours, and let
+//! the ring-held ones die with the frame they were built in.
 
 use ah_remote_proto::{
     Dir, INFO_D2P, INFO_HUB, INFO_P2D, INFO_RELAY, LINK_SALT, Role, SALT, aad, connect_message,
@@ -23,6 +38,7 @@ use data_encoding::{BASE64URL_NOPAD, HEXLOWER};
 use ring::aead::{AES_256_GCM, Aad, LessSafeKey, NONCE_LEN, Nonce, UnboundKey};
 use ring::rand::{SecureRandom, SystemRandom};
 use ring::{hkdf, hmac};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 /// The pairing code, in bytes. 160 bits, which is 32 characters of base32 with
 /// nothing left over — long enough that it never has to be stretched, short
@@ -55,22 +71,55 @@ pub struct Keys {
     p2d: [u8; 32],
 }
 
+/// Wiped the moment the last holder lets go, wherever that is.
+///
+/// This is the one thing in the ladder that lives as long as publishing does,
+/// and a window or a daemon goes on running after publishing stops. Shortening
+/// its life is not the fix — it is needed for every frame — so the fix is that
+/// it clears itself when it is finally dropped, in whichever thread that turns
+/// out to be.
+impl Zeroize for Keys {
+    fn zeroize(&mut self) {
+        self.relay_key.zeroize();
+        self.d2p.zeroize();
+        self.p2d.zeroize();
+        // The hub name is public — it is in the URL the relay is dialled on —
+        // so it is left alone rather than pretended about.
+    }
+}
+
+impl Drop for Keys {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for Keys {}
+
 impl Keys {
-    pub fn derive(code: &[u8]) -> Self {
-        let prk = hkdf::Salt::new(hkdf::HKDF_SHA256, SALT).extract(code);
+    /// Borrows anything that can be read as bytes, so that a caller holding
+    /// the code in a wrapper that wipes it can lend it as it stands. Taking a
+    /// plain `&[u8]` would mean unwrapping it at every call site, and
+    /// unwrapping it is how a copy ends up outside the wrapper.
+    pub fn derive(code: &impl AsRef<[u8]>) -> Self {
+        let prk = hkdf::Salt::new(hkdf::HKDF_SHA256, SALT).extract(code.as_ref());
         let mut hub = [0u8; 16];
-        let mut relay_key = [0u8; 32];
-        let mut d2p = [0u8; 32];
-        let mut p2d = [0u8; 32];
+        // Wrapped rather than bare, because these three locals are the reason
+        // the frame of this function held three whole keys after it returned.
+        // Moving them into the struct at the end copies them; the copy left
+        // behind here is what gets cleared.
+        let mut relay_key = Zeroizing::new([0u8; 32]);
+        let mut d2p = Zeroizing::new([0u8; 32]);
+        let mut p2d = Zeroizing::new([0u8; 32]);
         expand(&prk, &[INFO_HUB], &mut hub);
-        expand(&prk, &[INFO_RELAY], &mut relay_key);
-        expand(&prk, &[INFO_D2P], &mut d2p);
-        expand(&prk, &[INFO_P2D], &mut p2d);
+        expand(&prk, &[INFO_RELAY], relay_key.as_mut());
+        expand(&prk, &[INFO_D2P], d2p.as_mut());
+        expand(&prk, &[INFO_P2D], p2d.as_mut());
         Self {
             hub_id: HEXLOWER.encode(&hub),
-            relay_key,
-            d2p,
-            p2d,
+            relay_key: *relay_key,
+            d2p: *d2p,
+            p2d: *p2d,
         }
     }
 
@@ -80,26 +129,44 @@ impl Keys {
     /// has to open it. A phone's key binds both links, so two phones — and the
     /// same phone twice — never share a key, and a reattaching phone starting
     /// its count again at one cannot land on a nonce that has been used.
+    ///
+    /// Handed back wrapped, because a link key is wanted for exactly as long
+    /// as it takes to build a sealer out of it and never again: whoever holds
+    /// one of these drops it a line or two later and it is cleared on the way
+    /// out.
     pub fn link_key(
         &self,
         dir: Dir,
         link: &[u8; LINK_BYTES],
         plink: &[u8; LINK_BYTES],
-    ) -> [u8; 32] {
+    ) -> Zeroizing<[u8; 32]> {
         let (base, info): (&[u8; 32], &[&[u8]]) = match dir {
             Dir::D2p => (&self.d2p, &[INFO_D2P, link]),
             Dir::P2d => (&self.p2d, &[INFO_P2D, link, plink]),
         };
         let prk = hkdf::Salt::new(hkdf::HKDF_SHA256, LINK_SALT).extract(base);
-        let mut out = [0u8; 32];
-        expand(&prk, info, &mut out);
+        let mut out = Zeroizing::new([0u8; 32]);
+        expand(&prk, info, out.as_mut());
         out
+    }
+
+    /// The key a connect signature is made and checked with.
+    ///
+    /// One place rather than two, so there is one answer to "where does this
+    /// live". It cannot be cleared afterwards: ring's `hmac::Key` is a pair of
+    /// keyed SHA-256 states sitting next to a `&'static` pointer, and writing
+    /// zeros over the whole of it would null that pointer. What limits the
+    /// damage is that the thing this is made from — `relay_key` — is cleared,
+    /// and that the relay already holds it: it opens a socket, it does not
+    /// open a frame.
+    fn connect_mac(&self) -> hmac::Key {
+        hmac::Key::new(hmac::HMAC_SHA256, &self.relay_key)
     }
 
     /// The signature that gets a socket open. Proves the pairing code was
     /// known without handing the relay anything it could read a frame with.
     pub fn sign_connect(&self, role: Role, ts: u64, nonce: &str) -> String {
-        let key = hmac::Key::new(hmac::HMAC_SHA256, &self.relay_key);
+        let key = self.connect_mac();
         let msg = connect_message(&self.hub_id, role, ts, nonce);
         BASE64URL_NOPAD.encode(hmac::sign(&key, msg.as_bytes()).as_ref())
     }
@@ -110,7 +177,7 @@ impl Keys {
         let Ok(sig) = BASE64URL_NOPAD.decode(sig.as_bytes()) else {
             return false;
         };
-        let key = hmac::Key::new(hmac::HMAC_SHA256, &self.relay_key);
+        let key = self.connect_mac();
         let msg = connect_message(&self.hub_id, role, ts, nonce);
         hmac::verify(&key, msg.as_bytes(), &sig).is_ok()
     }
@@ -124,6 +191,12 @@ fn expand(prk: &hkdf::Prk, info: &[&[u8]], out: &mut [u8]) {
 }
 
 /// A fresh pairing code.
+///
+/// Handed back bare, unlike everything else here, because a code that has just
+/// been made is not yet a secret anybody holds: whoever asked for it decides
+/// what it is for and is the one who has to keep it wrapped — `ah remote pair`
+/// does. Deriving from it takes anything readable as bytes, so wrapping it is
+/// the caller's to do and costs them nothing.
 pub fn new_code() -> [u8; CODE_BYTES] {
     let mut out = [0u8; CODE_BYTES];
     fill(&mut out);
@@ -169,7 +242,17 @@ pub struct Sealer {
 }
 
 impl Sealer {
-    pub fn new(key: [u8; 32], dir: Dir, link: [u8; LINK_BYTES], plink: [u8; LINK_BYTES]) -> Self {
+    /// Takes the link key rather than borrowing it, so that the copy the
+    /// caller made to hand over is this one's to clear. ring expands it into a
+    /// key schedule that keeps the key verbatim in its first round and that
+    /// cannot be cleared from out here (see the note at the top of this file),
+    /// so the most that can be done is to leave no copy of it anywhere else.
+    pub fn new(
+        key: Zeroizing<[u8; 32]>,
+        dir: Dir,
+        link: [u8; LINK_BYTES],
+        plink: [u8; LINK_BYTES],
+    ) -> Self {
         Self {
             key: unbound(&key),
             link,
@@ -227,7 +310,14 @@ pub struct Opener {
 }
 
 impl Opener {
-    pub fn new(key: [u8; 32], dir: Dir, link: [u8; LINK_BYTES], plink: [u8; LINK_BYTES]) -> Self {
+    /// Takes the link key the same way a [`Sealer`] does, and for the same
+    /// reason.
+    pub fn new(
+        key: Zeroizing<[u8; 32]>,
+        dir: Dir,
+        link: [u8; LINK_BYTES],
+        plink: [u8; LINK_BYTES],
+    ) -> Self {
         Self {
             key: unbound(&key),
             link,
@@ -320,7 +410,7 @@ mod tests {
         let plink = [2u8; LINK_BYTES];
         let k = keys.link_key(Dir::P2d, &link, &plink);
         (
-            Sealer::new(k, Dir::P2d, link, plink),
+            Sealer::new(k.clone(), Dir::P2d, link, plink),
             Opener::new(k, Dir::P2d, link, plink),
         )
     }
@@ -541,6 +631,32 @@ mod tests {
         assert_ne!(new_link(), new_link());
         assert_ne!(new_nonce(), new_nonce());
     }
+
+    #[test]
+    fn a_ladder_that_has_been_wiped_has_nothing_left_in_it() {
+        // What `Drop` does, done where it can be looked at: dropping the value
+        // is the one moment a test cannot read it afterwards.
+        let mut k = Keys::derive(&[4u8; CODE_BYTES]);
+        assert_ne!(k.relay_key, [0u8; 32], "there was something to wipe");
+        let hub = k.hub_id.clone();
+        k.zeroize();
+        assert_eq!(k.relay_key, [0u8; 32]);
+        assert_eq!(k.d2p, [0u8; 32]);
+        assert_eq!(k.p2d, [0u8; 32]);
+        // The hub name is public and is left alone on purpose, so that a
+        // wiped `Keys` still says which pairing it was.
+        assert_eq!(k.hub_id, hub);
+    }
+
+    #[test]
+    fn a_link_key_clears_itself_when_it_is_let_go() {
+        let keys = Keys::derive(&[4u8; CODE_BYTES]);
+        let link = [1u8; LINK_BYTES];
+        let mut k = keys.link_key(Dir::D2p, &link, &link);
+        assert_ne!(*k, [0u8; 32], "there was something to wipe");
+        k.zeroize();
+        assert_eq!(*k, [0u8; 32]);
+    }
 }
 
 #[cfg(test)]
@@ -583,13 +699,13 @@ mod vectors {
         let d2p = keys.link_key(Dir::D2p, &link, &plink);
         let p2d = keys.link_key(Dir::P2d, &link, &plink);
 
-        println!("code_shown {}", crate::code::format(&code));
+        println!("code_shown {}", crate::code::format(&code).as_str());
         println!("hub {}", keys.hub_id);
         println!("relay_key {}", BASE64URL_NOPAD.encode(&keys.relay_key));
         println!("link {}", HEXLOWER.encode(&link));
         println!("plink {}", HEXLOWER.encode(&plink));
-        println!("k_d2p {}", BASE64URL_NOPAD.encode(&d2p));
-        println!("k_p2d {}", BASE64URL_NOPAD.encode(&p2d));
+        println!("k_d2p {}", BASE64URL_NOPAD.encode(&d2p[..]));
+        println!("k_p2d {}", BASE64URL_NOPAD.encode(&p2d[..]));
 
         // A frame the phone has to be able to open, sealed the way the
         // desktop seals one.

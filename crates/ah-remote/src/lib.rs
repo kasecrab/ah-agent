@@ -9,6 +9,16 @@
 /// lives in: whatever talks to a relay does it through here.
 pub use ah_remote_proto as proto;
 
+/// Wiping secrets, re-exported for the same reason.
+///
+/// Half of what has to be wiped is held by whoever drives a link rather than
+/// by the link itself — the pairing code as it was read off the disk, the text
+/// of it on its way to a screen — and the wiping has to be done the same way
+/// on both sides of the boundary. Handing out the one crate that does it is
+/// cheaper than every caller declaring a dependency on it and the two drifting
+/// on to different versions.
+pub use zeroize;
+
 /// Base64 for the one thing that travels outside a sealed frame: a file a
 /// phone asked to see.
 pub fn base64(bytes: &[u8]) -> String {

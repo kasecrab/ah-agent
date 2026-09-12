@@ -21,3 +21,8 @@ webpki-roots = "1"
 # The same HTTP client `ah-core` already links, for the one plain request
 # pairing makes.
 ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
+# Already compiled as rustls's own way of clearing TLS key material, so none of
+# this is a new download. Every wipe in this crate goes through it: a plain
+# assignment or an unfenced `write_bytes` is deleted outright by the release
+# profile (opt-level 3, fat LTO), and only a volatile write survives.
+zeroize = "1"

@@ -11,6 +11,7 @@ use std::time::Duration;
 use crate::crypto::Keys;
 use ah_remote_proto::Role;
 use data_encoding::BASE64URL_NOPAD;
+use zeroize::Zeroize;
 
 /// Why a relay would not take a pairing.
 #[derive(Debug, Clone, PartialEq)]
@@ -47,14 +48,21 @@ pub fn provision(url: &str, keys: &Keys, token: &str) -> Result<(), Error> {
         .http_status_as_error(false)
         .build()
         .into();
-    let body = serde_json::json!({
+    // This body is the one place a key leaves the machine as text, so the copy
+    // made to send it is cleared as soon as it has been sent. What the HTTP
+    // client kept of it on the way out is beyond reach from here; what is in
+    // reach is not leaving a second copy lying about.
+    let mut body = serde_json::json!({
         "relay_key": BASE64URL_NOPAD.encode(&keys.relay_key),
     });
-    let response = agent
+    let sent = agent
         .post(format!("{url}/hub/{}/provision", keys.hub_id))
         .header("x-ah-provision", token)
-        .send_json(&body)
-        .map_err(|e| Error::Unreachable(e.to_string()))?;
+        .send_json(&body);
+    if let Some(serde_json::Value::String(encoded)) = body.get_mut("relay_key") {
+        encoded.zeroize();
+    }
+    let response = sent.map_err(|e| Error::Unreachable(e.to_string()))?;
     match response.status().as_u16() {
         200..=299 => Ok(()),
         401 => Err(Error::Refused(

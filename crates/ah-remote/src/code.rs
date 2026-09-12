@@ -4,17 +4,25 @@
 //! `0` or `1` in it, so a zero typed where an `O` was shown can be put back
 //! without guessing. Grouped in fours because a run of 32 characters is easy
 //! to lose your place in.
+//!
+//! The code is the whole secret, and it is a secret in text here rather than
+//! in bytes, which is the form that survives longest: a `String` lives on the
+//! heap, and a freed heap chunk keeps what was in it until something else
+//! happens to want that memory. So every string and every buffer either side
+//! of the encoding is wrapped in `Zeroizing` and cleared when it goes,
+//! including the ones that only exist for the length of a function.
 
 use crate::crypto::CODE_BYTES;
 use data_encoding::BASE32_NOPAD;
+use zeroize::Zeroizing;
 
 /// Characters per group, between dashes.
 const GROUP: usize = 4;
 
 /// The code as it is shown: 32 characters in 8 groups.
-pub fn format(code: &[u8; CODE_BYTES]) -> String {
-    let raw = BASE32_NOPAD.encode(code);
-    let mut out = String::with_capacity(raw.len() + raw.len() / GROUP);
+pub fn format(code: &[u8; CODE_BYTES]) -> Zeroizing<String> {
+    let raw = Zeroizing::new(BASE32_NOPAD.encode(code));
+    let mut out = Zeroizing::new(String::with_capacity(raw.len() + raw.len() / GROUP));
     for (i, c) in raw.chars().enumerate() {
         if i > 0 && i % GROUP == 0 {
             out.push('-');
@@ -27,8 +35,10 @@ pub fn format(code: &[u8; CODE_BYTES]) -> String {
 /// The code as it was typed. Dashes and spaces are ignored, case is ignored,
 /// and the two characters that are not in the alphabet at all are read as the
 /// two that look like them.
-pub fn parse(typed: &str) -> Option<[u8; CODE_BYTES]> {
-    let mut clean = String::with_capacity(32);
+pub fn parse(typed: &str) -> Option<Zeroizing<[u8; CODE_BYTES]>> {
+    // Wrapped before the first character goes in, so that the half-built
+    // string is cleared as well on the paths that give up partway through.
+    let mut clean = Zeroizing::new(String::with_capacity(32));
     for c in typed.chars() {
         match c {
             '-' | ' ' | '\t' | '\u{2013}' | '\u{2014}' => continue,
@@ -40,8 +50,12 @@ pub fn parse(typed: &str) -> Option<[u8; CODE_BYTES]> {
             _ => return None,
         }
     }
-    let bytes = BASE32_NOPAD.decode(clean.as_bytes()).ok()?;
-    bytes.try_into().ok()
+    let bytes = Zeroizing::new(BASE32_NOPAD.decode(clean.as_bytes()).ok()?);
+    // Copied out of the buffer rather than the buffer being turned into the
+    // array, because turning it into one would consume it and leave the
+    // allocation to be freed with the code still written in it.
+    let out: [u8; CODE_BYTES] = bytes[..].try_into().ok()?;
+    Some(Zeroizing::new(out))
 }
 
 #[cfg(test)]
@@ -56,36 +70,46 @@ mod tests {
         c
     }
 
+    /// What `parse` hands back, for comparing against a plain array.
+    fn same(c: [u8; CODE_BYTES]) -> Option<Zeroizing<[u8; CODE_BYTES]>> {
+        Some(Zeroizing::new(c))
+    }
+
     #[test]
     fn a_code_survives_the_grouping() {
         let c = code();
         let shown = format(&c);
-        assert_eq!(shown.len(), 32 + 7, "32 characters in 8 groups: {shown}");
-        assert_eq!(parse(&shown), Some(c));
+        assert_eq!(
+            shown.len(),
+            32 + 7,
+            "32 characters in 8 groups: {}",
+            shown.as_str()
+        );
+        assert_eq!(parse(&shown), same(c));
     }
 
     #[test]
     fn the_dashes_are_only_for_reading() {
         let c = code();
         let shown = format(&c);
-        assert_eq!(parse(&shown.replace('-', "")), Some(c));
-        assert_eq!(parse(&shown.replace('-', " ")), Some(c));
+        assert_eq!(parse(&shown.replace('-', "")), same(c));
+        assert_eq!(parse(&shown.replace('-', " ")), same(c));
     }
 
     #[test]
     fn case_is_not_part_of_the_code() {
         let c = code();
-        assert_eq!(parse(&format(&c).to_lowercase()), Some(c));
+        assert_eq!(parse(&format(&c).to_lowercase()), same(c));
     }
 
     #[test]
     fn a_zero_typed_for_an_o_still_pairs() {
         let raw = BASE32_NOPAD.encode(&code());
         if raw.contains('O') {
-            assert_eq!(parse(&raw.replace('O', "0")), Some(code()));
+            assert_eq!(parse(&raw.replace('O', "0")), same(code()));
         }
         if raw.contains('I') {
-            assert_eq!(parse(&raw.replace('I', "1")), Some(code()));
+            assert_eq!(parse(&raw.replace('I', "1")), same(code()));
         }
         // And with nothing to substitute, the substitution is still harmless:
         // neither character is in the alphabet, so it can never have been one.
@@ -115,7 +139,7 @@ mod tests {
             for (i, b) in c.iter_mut().enumerate() {
                 *b = (seed as u8).wrapping_add(i as u8).wrapping_mul(31);
             }
-            assert_eq!(parse(&format(&c)), Some(c), "seed {seed}");
+            assert_eq!(parse(&format(&c)), same(c), "seed {seed}");
         }
     }
 }
