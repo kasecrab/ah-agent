@@ -20,7 +20,11 @@ fn wasm_dir() -> Option<PathBuf> {
 fn host_with(settings: &mut SettingsStack, names: &[&str]) -> Option<PluginHost> {
     let dir = wasm_dir()?;
     let tmp = std::env::temp_dir().join(format!("ah-plugtest-{}", std::process::id()));
-    // same values in every test, so concurrent sets are harmless
+    let _env = ah_core::test_env::guard();
+    // SAFETY: the environment lock is held across the write. Every test in
+    // this binary sets the same two values, so this is belt and braces — but
+    // "the values happen to be equal" is not what makes `set_var` sound, and
+    // the next person to add a test here should not have to know that.
     unsafe {
         std::env::set_var("AH_DATA_DIR", &tmp);
         std::env::set_var("AH_CONFIG_DIR", tmp.join("cfg"));

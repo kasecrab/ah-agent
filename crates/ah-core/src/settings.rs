@@ -506,15 +506,7 @@ fn unset_markers(v: &mut Value) {
 mod tests {
     use super::*;
 
-    /// The environment belongs to the process, not to a test, and cargo runs
-    /// tests side by side in it. Anything that sets `AH_CONFIG_DIR` or reads a
-    /// path derived from it waits here first, or it will occasionally see the
-    /// directory another test was borrowing.
-    static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
-        ENV.lock().unwrap_or_else(|e| e.into_inner())
-    }
+    use crate::test_env::guard as env_guard;
 
     #[test]
     fn a_remembered_choice_survives_and_is_added_to() {

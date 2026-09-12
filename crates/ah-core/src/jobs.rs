@@ -651,8 +651,10 @@ mod secrets_tests {
 
     #[test]
     fn a_command_is_not_handed_this_processs_keys() {
-        // SAFETY: the variable is set and read on this thread only, and the
-        // job below is the only reader of it.
+        let _env = crate::test_env::guard();
+        // SAFETY: the environment lock is held for the whole of this test, and
+        // every other test that writes or reads one of these takes it too, so
+        // nothing else is looking at the environment while this runs.
         unsafe { std::env::set_var("OPENROUTER_API_KEY", "sk-not-for-you") };
         let table = table();
         let job = table
