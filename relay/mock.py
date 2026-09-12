@@ -79,6 +79,7 @@ class Peer:
         self.hub = hub
         self.sub = False
         self.since = 0
+        self.seen = time.time()
         self.lock = threading.Lock()
 
     def send(self, payload: str) -> None:
@@ -286,7 +287,11 @@ def pump(peer: Peer) -> None:
             return
         kind = frame.get("t")
 
-        if kind == "pub" and peer.role == "desk":
+        # Being heard is the whole of what a keepalive does.
+        if kind == "ka" and peer.role == "desk":
+            peer.seen = time.time()
+
+        elif kind == "pub" and peer.role == "desk":
             n = hub.append(frame["link"], frame["seq"], frame["ct"])
             out = json.dumps({
                 "t": "evt", "v": PROTO, "link": frame["link"],
@@ -306,6 +311,10 @@ def pump(peer: Peer) -> None:
         elif kind == "sub" and peer.role == "phone":
             since = int(frame.get("since", 0))
             limit = max(1, min(int(frame.get("max", 200)), 500))
+            # Asking again for what this socket already had is the shape every
+            # replay loop takes.
+            if peer.sub and since < peer.since:
+                continue
             with hub.lock:
                 kept = [row for row in hub.log if row["n"] > since][:limit]
                 oldest = hub.log[0]["n"] if hub.log else 0

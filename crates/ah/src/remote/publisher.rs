@@ -38,6 +38,11 @@ const TICK: Duration = Duration::from_millis(20);
 /// pairing. Five times a second is free; fifty would be rude.
 const YIELD_CHECK: Duration = Duration::from_millis(200);
 
+/// How often a desktop with nothing to say tells the relay it is still there.
+/// Comfortably under the relay's patience, and rare enough that a day of
+/// sitting idle costs a few hundred frames rather than a few hundred thousand.
+const KEEPALIVE: Duration = Duration::from_secs(120);
+
 /// How long a window waits for whoever is publishing to stand down before
 /// giving up and publishing nothing.
 const HANDOVER: Duration = Duration::from_secs(3);
@@ -467,6 +472,7 @@ fn run(
     let mut outbox: Vec<FromDesk> = Vec::new();
     let mut last_flush = Instant::now();
     let mut last_yield_check = Instant::now();
+    let mut last_heard = Instant::now();
     let flush_after = Duration::from_millis(shared.settings.flush_ms);
 
     while let Err(RecvTimeoutError::Timeout) = stop.recv_timeout(TICK) {
@@ -532,6 +538,16 @@ fn run(
             }
         }
 
+        // A desktop with nothing to say says so anyway, now and then. The
+        // relay judges whether one is still there by when it last heard from
+        // it, and protocol pings are answered by the runtime without the hub
+        // ever waking — so a quiet desktop that never did this could be pushed
+        // off its own pairing by anybody holding the code.
+        if shared.up.load(Ordering::Acquire) && last_heard.elapsed() >= KEEPALIVE {
+            last_heard = Instant::now();
+            link.send(serde_json::to_string(&Envelope::keepalive()).unwrap_or_default());
+        }
+
         if outbox.is_empty() {
             continue;
         }
@@ -548,6 +564,9 @@ fn run(
             link.send(
                 serde_json::to_string(&Envelope::publish(&hex(&id), seq, ct)).unwrap_or_default(),
             );
+            // A frame is as good as a keepalive, and better: it is the thing
+            // the keepalive stands in for.
+            last_heard = Instant::now();
         }
     }
 

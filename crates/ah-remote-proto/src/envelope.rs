@@ -42,6 +42,15 @@ pub enum Envelope {
     /// Phone to relay: start sending from here. The one control the relay
     /// itself acts on, which is why it is not sealed.
     Sub { v: u8, since: u64, max: u32 },
+    /// Desktop to relay: still here.
+    ///
+    /// A desktop with nothing to say sends nothing, and the relay judges
+    /// whether one is still there by when it last heard from it. Protocol
+    /// pings do not count — the runtime answers those without waking the hub —
+    /// so without this a desktop that had been idle for a couple of minutes
+    /// could be pushed aside by anybody holding the pairing code. Nothing is
+    /// stored and nothing is forwarded; it exists to be heard.
+    Ka { v: u8 },
     /// Relay to phone: what you asked for is older than what is kept. The
     /// phone draws a rule in the transcript and asks for a fresh snapshot.
     Gap { v: u8, from: u64 },
@@ -74,6 +83,11 @@ pub enum Ctl {
 }
 
 impl Envelope {
+    /// Still here. Sent by a desktop that has been quiet.
+    pub fn keepalive() -> Self {
+        Envelope::Ka { v: PROTO }
+    }
+
     pub fn publish(link: &str, seq: u64, ct: String) -> Self {
         Envelope::Pub {
             v: PROTO,
@@ -129,7 +143,8 @@ impl Envelope {
             | Envelope::Evt { v, .. }
             | Envelope::Sub { v, .. }
             | Envelope::Gap { v, .. }
-            | Envelope::Ctl { v, .. } => *v,
+            | Envelope::Ctl { v, .. }
+            | Envelope::Ka { v } => *v,
         }
     }
 }
@@ -146,6 +161,17 @@ pub fn is_hub_id(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_keepalive_is_the_smallest_frame_there_is() {
+        let text = serde_json::to_string(&Envelope::keepalive()).unwrap();
+        assert_eq!(text, r#"{"t":"ka","v":1}"#);
+        assert_eq!(
+            serde_json::from_str::<Envelope>(&text).unwrap(),
+            Envelope::keepalive()
+        );
+        assert_eq!(Envelope::keepalive().version(), PROTO);
+    }
     use alloc::string::ToString;
 
     #[test]

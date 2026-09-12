@@ -19,9 +19,13 @@ use crate::auth::{self, Denied};
 use crate::schema;
 
 /// How long a desktop may say nothing before another one may take its place.
-/// Shorter than this and a second desktop is turned away, so replaying a
-/// captured connect token cannot knock a working session off the air.
-const DESK_SILENT_MS: u64 = 90_000;
+/// Shorter than this and a second desktop is turned away, so a second
+/// connection cannot knock a working session off the air.
+///
+/// Three times the desktop's keepalive: a live one says something every two
+/// minutes whether or not it has anything to say, so six minutes of silence
+/// means it is gone rather than merely idle.
+const DESK_SILENT_MS: u64 = 360_000;
 
 /// How often a socket's own record of when it was last heard from is brought
 /// up to date. Well under [`DESK_SILENT_MS`], so the judgement it feeds stays
@@ -79,9 +83,12 @@ pub struct Hub {
 impl DurableObject for Hub {
     fn new(state: State, env: Env) -> Self {
         console_error_panic_hook::set_once();
-        // Synchronous, and this runs before any request is dispatched, so the
-        // tables are there without an atomic window to hold open.
-        let _ = state.storage().sql().exec(schema::SCHEMA, None);
+        // No tables yet. This constructor runs for any name anybody asks for,
+        // and creating storage here meant a loop of requests for made-up hub
+        // names left a SQLite file behind for each of them, on the deployer's
+        // quota, with nothing to ever collect them. They are created when a
+        // pairing is actually made; until then every read finds no table,
+        // which the code below already treats as "no such hub".
         let hub = Self {
             state,
             env,
@@ -135,6 +142,7 @@ impl DurableObject for Hub {
             let _ = ws.serialize_attachment(&who);
         }
 
+
         let Ok(frame) = serde_json::from_str::<Envelope>(&text) else {
             return send(&ws, &Envelope::control(Ctl::Offline));
         };
@@ -144,6 +152,15 @@ impl DurableObject for Hub {
         }
 
         match (who.role.as_str(), frame) {
+            // A keepalive has done its whole job by arriving: being heard is
+            // what stops an idle desktop being taken for a dead one.
+            ("desk", Envelope::Ka { .. }) => {
+                if now().saturating_sub(who.seen) > 0 {
+                    who.seen = now();
+                    let _ = ws.serialize_attachment(&who);
+                }
+                Ok(())
+            }
             ("desk", Envelope::Pub { link, seq, ct, .. }) => self.publish(&ws, link, seq, ct),
             ("phone", Envelope::Cmd { .. }) => self.command(&ws, &text),
             ("phone", Envelope::Sub { since, max, .. }) => self.subscribe(&ws, who, since, max),
@@ -231,6 +248,25 @@ impl Hub {
     /// is already in use gets nothing, and a name nobody has provisioned
     /// stores nothing at all, so guessing costs one request and evicts.
     async fn provision(&self, mut req: Request) -> Result<Response> {
+        // The secret first, before anything that would say whether this hub
+        // exists. Answering 409 or 410 ahead of it turns the endpoint into a
+        // way to ask which hub names are real, which is the question the
+        // secret is there to refuse.
+        let Ok(want) = self.env.secret("AH_PROVISION_TOKEN") else {
+            return Response::error(
+                "this relay has no provisioning secret set; see relay/README.md",
+                503,
+            );
+        };
+        let given = req
+            .headers()
+            .get("x-ah-provision")
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        if !same(&given, &want.to_string()) {
+            return Response::error("no", 401);
+        }
         if self.meta("revoked").is_some() {
             return Response::error("revoked", 410);
         }
@@ -251,26 +287,6 @@ impl Hub {
         if !ah_remote_proto::is_hub_id(&hub) {
             return Response::error("not a hub", 400);
         }
-        // The one endpoint that makes storage out of nothing, on a URL anybody
-        // can reach. Without this, a script owns every hub name it can think
-        // of — each one a Durable Object with tables of its own — on the
-        // deployer's allowance. The secret is set once, by whoever deployed
-        // it, and a relay without one provisions nothing at all.
-        let Ok(want) = self.env.secret("AH_PROVISION_TOKEN") else {
-            return Response::error(
-                "this relay has no provisioning secret set; see relay/README.md",
-                503,
-            );
-        };
-        let given = req
-            .headers()
-            .get("x-ah-provision")
-            .ok()
-            .flatten()
-            .unwrap_or_default();
-        if !same(&given, &want.to_string()) {
-            return Response::error("no", 401);
-        }
         let body: serde_json::Value = req.json().await?;
         let Some(key) = body.get("relay_key").and_then(|v| v.as_str()) else {
             return Response::error("no key", 400);
@@ -285,6 +301,9 @@ impl Hub {
         {
             return Response::error("not a key", 400);
         }
+        // Synchronous, and nothing is dispatched concurrently with it, so the
+        // tables are in place without an atomic window to hold open.
+        let _ = self.sql().exec(schema::SCHEMA, None);
         self.set_meta("relay_key", key);
         self.set_meta("hub", &hub);
         self.set_meta("created_ms", &now().to_string());
@@ -383,12 +402,14 @@ impl Hub {
     /// End the pairing. The log and the device list go; the fact that it was
     /// revoked stays, so the name can never be provisioned by somebody else.
     async fn revoke(&self, req: Request) -> Result<Response> {
+        // 401 for everything, as the socket does: a hub that answered 404 when
+        // it did not exist would say which names are real to anybody asking.
         let Some(key) = self.meta("relay_key") else {
-            return Response::error("no such hub", 404);
+            return Response::error("no", 401);
         };
         let url = req.url()?;
         let Some(hub) = self.meta("hub") else {
-            return Response::error("no such hub", 404);
+            return Response::error("no", 401);
         };
         let raw = auth::decode_key(&key);
         let signature = req.headers().get("x-ah-auth").ok().flatten();
@@ -507,11 +528,16 @@ impl Hub {
         // One replay, not a whole history: a phone further behind than this
         // asks again, and the handler stays short.
         let limit = max.clamp(1, 500) as i64;
+        // Clamped, not cast. `u64::MAX as i64` is -1, and `WHERE n > -1`
+        // replays the whole log from the first row — which is the opposite of
+        // what asking for everything after the newest frame should do, and
+        // slips past the guard above because the number is not small.
+        let from = since.min(i64::MAX as u64) as i64;
         let rows: Vec<Row> = self
             .sql()
             .exec(
                 "SELECT n, link, seq, ct FROM log WHERE n > ?1 ORDER BY n LIMIT ?2",
-                Some(vec![(since as i64).into(), limit.into()]),
+                Some(vec![from.into(), limit.into()]),
             )?
             .to_array()?;
         for r in &rows {
@@ -609,15 +635,37 @@ impl Hub {
     }
 
     /// Trim the log, in one pass, to what is worth keeping.
+    ///
+    /// Three bounds, because a count alone is not one: twenty thousand frames
+    /// of the largest size the relay will take is two and a half gigabytes,
+    /// and storage is the thing being paid for.
     fn prune(&self) {
         let _ = self.sql().exec(
             "DELETE FROM log WHERE n <= (SELECT MAX(n) - ?1 FROM log)",
             Some(vec![schema::LOG_KEEP.into()]),
         );
         let cutoff = now() as i64 - schema::LOG_RETAIN_MS;
+        let _ = self
+            .sql()
+            .exec("DELETE FROM log WHERE ts < ?1", Some(vec![cutoff.into()]));
+        // And by size: keep dropping the oldest until what is left fits.
+        // Written as one statement so it costs one pass rather than a loop of
+        // reads, and it only ever deletes rows older than what it keeps.
         let _ = self.sql().exec(
-            "DELETE FROM log WHERE ts < ?1",
-            Some(vec![cutoff.into()]),
+            "DELETE FROM log WHERE n <= (
+               SELECT COALESCE(MAX(n), 0) FROM (
+                 SELECT n, SUM(LENGTH(ct)) OVER (ORDER BY n DESC) AS after
+                 FROM log
+               ) WHERE after > ?1
+             )",
+            Some(vec![schema::LOG_BYTES.into()]),
+        );
+        // A device row is written on every connect and never read after the
+        // socket closes; without this the table is a list of every phone that
+        // ever attached.
+        let _ = self.sql().exec(
+            "DELETE FROM devices WHERE last_ms < ?1",
+            Some(vec![(now() as i64 - schema::DEVICE_KEEP_MS).into()]),
         );
     }
 }

@@ -33,6 +33,15 @@ CREATE TABLE IF NOT EXISTS devices (
 /// gap and asks the desktop for a fresh snapshot instead.
 pub const LOG_KEEP: i64 = 20_000;
 
+/// How much of a hub's log is kept, in bytes of ciphertext. A count alone is
+/// not a bound: [`LOG_KEEP`] frames at the largest size the relay will take
+/// would be gigabytes, and storage is what is being paid for.
+pub const LOG_BYTES: i64 = 64 * 1024 * 1024;
+
+/// How long a device row is kept after that device was last seen. It is
+/// written on every connect and read by nothing once the socket is closed.
+pub const DEVICE_KEEP_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+
 /// How long a frame is kept regardless of how few there are: seven days.
 pub const LOG_RETAIN_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
