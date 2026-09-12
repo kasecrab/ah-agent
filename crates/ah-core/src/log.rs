@@ -22,9 +22,9 @@ fn sink() -> Option<&'static Sink> {
         if let Some(p) = path.parent() {
             let _ = std::fs::create_dir_all(p);
         }
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
+        // It holds whatever was being debugged, which is whatever the session
+        // was doing.
+        let file = crate::paths::owner_only(OpenOptions::new().create(true).append(true))
             .open(path)
             .ok()?;
         let level = match std::env::var("AH_LOG_LEVEL").as_deref() {

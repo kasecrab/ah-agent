@@ -15,6 +15,17 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+/// Variables a command started by a tool does not need and should not be
+/// handed. Every one of them is a credential this process was given for its
+/// own use.
+const SECRETS: &[&str] = &[
+    "OPENROUTER_API_KEY",
+    "AH_API_KEY",
+    "DEEPGRAM_API_KEY",
+    "AH_REMOTE_CODE",
+    "AH_PROVISION_TOKEN",
+];
+
 /// Who has already been told that a job finished. A job belongs to one agent —
 /// the main one is 0, a subagent its own id — so both audiences carry whose
 /// news it is, and one bit each is enough for all of them.
@@ -357,6 +368,14 @@ impl Jobs {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        // The secrets this process holds are not the command's business. It
+        // is the user's own machine and the shell can read the same files this
+        // program can, so this is not a boundary — it is not leaving a key in
+        // the environment of every `npm install` the model decides to run,
+        // where a postinstall script finds it without trying.
+        for key in SECRETS {
+            cmd.env_remove(key);
+        }
         #[cfg(unix)]
         {
             // own process group, so a kill reaches the whole tree
@@ -588,6 +607,33 @@ fn signal(_pid: i32, _sig: i32) {}
 
 /// Job notices are process-wide, and reading them claims them; tests that
 /// collect notices queue up behind this.
+#[cfg(test)]
+mod secrets_tests {
+    use super::*;
+
+    #[test]
+    fn a_command_is_not_handed_this_processs_keys() {
+        // SAFETY: the variable is set and read on this thread only, and the
+        // job below is the only reader of it.
+        unsafe { std::env::set_var("OPENROUTER_API_KEY", "sk-not-for-you") };
+        let table = table();
+        let job = table
+            .spawn(
+                "sh",
+                "echo \"[${OPENROUTER_API_KEY:-gone}]\"",
+                &std::env::temp_dir(),
+                64 * 1024,
+                0,
+            )
+            .expect("spawn");
+        job.wait(Duration::from_secs(5));
+        let text = job.text();
+        table.remove(job.id);
+        assert!(text.contains("[gone]"), "{text}");
+        unsafe { std::env::remove_var("OPENROUTER_API_KEY") };
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn notice_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: Mutex<()> = Mutex::new(());

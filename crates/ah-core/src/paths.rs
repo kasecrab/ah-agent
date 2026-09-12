@@ -99,3 +99,20 @@ pub fn plugin_dirs() -> Vec<PathBuf> {
 pub fn project_plugin_dir() -> PathBuf {
     project_dir().join("plugins")
 }
+
+/// Ask for a file only this user can read.
+///
+/// Used for everything that holds what the model was shown or what was typed
+/// at it — transcripts, prompt history, the debug log. The credentials file is
+/// 0600 already; a transcript is the same material by a longer route, since a
+/// tool result can be the contents of any file the session read.
+///
+/// A no-op off unix, where the permission model is not this one.
+pub fn owner_only(opts: &mut std::fs::OpenOptions) -> &mut std::fs::OpenOptions {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    opts
+}

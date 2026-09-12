@@ -148,11 +148,36 @@ fn forget(local: bool) -> Result<(), AnyError> {
 /// `wrangler dev` serves.
 fn check_url(url: String) -> Result<String, AnyError> {
     let url = url.trim().trim_end_matches('/').to_string();
-    let loopback = url.starts_with("http://127.0.0.1") || url.starts_with("http://localhost");
-    if !url.starts_with("https://") && !loopback {
+    if !url.starts_with("https://") && !is_loopback(&url) {
         return Err(format!("the relay has to be https, or loopback for testing: {url}").into());
     }
     Ok(url)
+}
+
+/// Whether a plain-HTTP URL points at this machine.
+///
+/// By host, not by prefix. `http://localhost.example.com/` starts with
+/// `http://localhost` and is somewhere else entirely, which is the sort of
+/// thing that turns a testing convenience into a way to have a pairing code
+/// typed into somebody else's relay in the clear.
+fn is_loopback(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("http://") else {
+        return false;
+    };
+    // Up to the first `/`, `?` or `#`, then drop any port.
+    let authority = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .rsplit('@')
+        .next()
+        .unwrap_or_default();
+    let host = match authority.strip_prefix('[') {
+        // `[::1]:8787`
+        Some(v6) => return v6.split(']').next() == Some("::1"),
+        None => authority.split(':').next().unwrap_or_default(),
+    };
+    host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
 /// Percent-encode what a URL means inside another URL's query string.
@@ -190,6 +215,24 @@ mod tests {
             check_url("https://relay.example.com/ ".into()).unwrap(),
             "https://relay.example.com"
         );
+    }
+
+    #[test]
+    fn only_this_machine_counts_as_loopback() {
+        assert!(is_loopback("http://127.0.0.1:8799"));
+        assert!(is_loopback("http://localhost:8787/"));
+        assert!(is_loopback("http://[::1]:8787"));
+        // Every one of these is somebody else's host, spelled to look like
+        // this one.
+        assert!(!is_loopback("http://localhost.attacker.tld"));
+        assert!(!is_loopback("http://127.0.0.1.attacker.tld"));
+        assert!(!is_loopback("http://attacker.tld/?x=http://localhost"));
+        assert!(!is_loopback("http://user@attacker.tld"));
+        assert!(!is_loopback("https://ah-relay.example.workers.dev"));
+        // And the check that matters is the one on the whole URL.
+        assert!(check_url("http://localhost.attacker.tld".into()).is_err());
+        assert!(check_url("https://ah-relay.example.workers.dev".into()).is_ok());
+        assert!(check_url("http://127.0.0.1:8799".into()).is_ok());
     }
 
     #[test]

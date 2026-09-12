@@ -183,21 +183,28 @@ fn write_credentials(creds: &Credentials) -> Result<()> {
         }
     }
     let text = toml::to_string(creds).map_err(|e| Error::Config(e.to_string()))?;
+    // Written beside it and renamed over it, never into it. Truncating first
+    // means a crash or a full disk between the truncate and the write leaves
+    // an empty file where three secrets were, and there is no second copy of a
+    // pairing code.
+    let tmp = path.with_extension("toml.new");
     #[cfg(unix)]
     {
         use std::io::Write as _;
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        use std::os::unix::fs::OpenOptionsExt;
         let mut f = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
             .mode(0o600)
-            .open(&path)?;
+            .open(&tmp)?;
         f.write_all(text.as_bytes())?;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        // The rename is only atomic once what it is renaming is on the disk.
+        f.sync_all()?;
     }
     #[cfg(not(unix))]
-    std::fs::write(&path, text)?;
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(&tmp, &path)?;
     Ok(())
 }
 

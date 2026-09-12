@@ -61,11 +61,14 @@ pub fn read_only(command: &str, rules: &[String]) -> bool {
 /// agent was started from, so in a session nobody is sitting in front of — one
 /// the daemon started for a phone — the command does not fail, it waits, and
 /// keeps waiting until the tool times out with nothing to show for it.
-const ESCALATORS: [&str; 4] = ["sudo", "doas", "pkexec", "su"];
+const ESCALATORS: [&str; 6] = ["sudo", "doas", "pkexec", "su", "sudoedit", "run0"];
 
 /// Words that pass the start of a command along to the next word rather than
 /// being the command themselves.
-const WRAPPERS: [&str; 6] = ["env", "nohup", "time", "command", "exec", "setsid"];
+const WRAPPERS: [&str; 12] = [
+    "env", "nohup", "time", "command", "exec", "setsid", "xargs", "nice", "ionice", "timeout",
+    "stdbuf", "eval",
+];
 
 /// The first privilege escalation `command` would run, if any.
 ///
@@ -88,12 +91,22 @@ pub fn escalates(command: &str) -> Option<&'static str> {
             continue;
         }
         if !word.is_empty() && at_start {
-            // A leading backslash is how an alias is stepped around, and a
-            // full path is the same program by a longer name.
-            let head = word.trim_start_matches('\\');
+            // A leading backslash is how an alias is stepped around, `^` is
+            // how nushell says "the real program", and a full path is the same
+            // program by a longer name.
+            let head = word.trim_start_matches(['\\', '^']);
+            // A redirection is written where a command goes and is not one:
+            // `2>&1 sudo id` and `>/dev/null sudo id` both run sudo. Asked
+            // before the path is trimmed, because `>/dev/null` trimmed to its
+            // last segment is `null`, which looks like a program.
+            let redirect = head.contains('>') || head.contains('<');
             let head = head.rsplit('/').next().unwrap_or(head);
+            // `timeout 5 sudo id` is why a bare number passes along too: it
+            // only ever reaches here as a wrapper's argument.
             let passes_along = WRAPPERS.contains(&head)
                 || head.starts_with('-')
+                || redirect
+                || head.chars().all(|c| c.is_ascii_digit() || c == '.')
                 || (head.contains('=') && !head.starts_with('-'));
             if !passes_along {
                 if let Some(name) = ESCALATORS.iter().find(|e| **e == head) {
@@ -142,6 +155,25 @@ mod tests {
         assert_eq!(escalates("echo $(sudo id)"), Some("sudo"));
         assert_eq!(escalates("pkexec id"), Some("pkexec"));
         assert_eq!(escalates("su - rabe"), Some("su"));
+        assert_eq!(escalates("sudoedit /etc/hosts"), Some("sudoedit"));
+        assert_eq!(escalates("run0 id"), Some("run0"));
+    }
+
+    /// Every one of these was written where a command goes and is not one, so
+    /// the word after it is still the command.
+    #[test]
+    fn a_word_that_is_not_the_command_does_not_stand_in_for_it() {
+        assert_eq!(escalates("2>&1 sudo id"), Some("sudo"));
+        assert_eq!(escalates(">/dev/null sudo id"), Some("sudo"));
+        assert_eq!(escalates("<input sudo id"), Some("sudo"));
+        // nushell spells "the real program, not a builtin" with a caret, and
+        // an empty `tools.shell` means whatever $SHELL is.
+        assert_eq!(escalates("^sudo id"), Some("sudo"));
+        // Wrappers that take an argument of their own.
+        assert_eq!(escalates("timeout 5 sudo id"), Some("sudo"));
+        assert_eq!(escalates("nice -n 10 sudo id"), Some("sudo"));
+        assert_eq!(escalates("xargs sudo rm"), Some("sudo"));
+        assert_eq!(escalates("eval sudo id"), Some("sudo"));
     }
 
     #[test]
@@ -155,8 +187,8 @@ mod tests {
         assert_eq!(escalates("apt-get install -y sudo"), None);
         assert_eq!(escalates(""), None);
         // And a program whose name merely begins the same way.
-        assert_eq!(escalates("sudoedit /etc/hosts"), None);
         assert_eq!(escalates("superimpose a.png b.png"), None);
+        assert_eq!(escalates("sudoku --solve puzzle.txt"), None);
     }
 
     #[test]

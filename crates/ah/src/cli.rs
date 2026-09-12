@@ -30,7 +30,7 @@ impl AgentIo for PrintIo {
         match ev {
             AgentEvent::Text(t) => {
                 let mut out = std::io::stdout().lock();
-                let _ = out.write_all(t.as_bytes());
+                let _ = out.write_all(printable(&t).as_bytes());
                 let _ = out.flush();
             }
             AgentEvent::Reasoning(_) => {}
@@ -42,11 +42,7 @@ impl AgentIo for PrintIo {
                 duration_ms,
                 ..
             } if self.show_tools => {
-                let first = result
-                    .output
-                    .lines()
-                    .next()
-                    .unwrap_or("")
+                let first = printable(result.output.lines().next().unwrap_or(""))
                     .chars()
                     .take(120)
                     .collect::<String>();
@@ -257,17 +253,52 @@ fn answer(q: &Question, line: &str) -> Answer {
 }
 
 /// What a tool call is doing, in plain English where ah knows the tool.
+/// Text on its way to a terminal, with anything that is not text removed.
+///
+/// The TUI is safe here because ratatui draws characters and drops the rest.
+/// This path writes straight to the terminal, so a tool result — the contents
+/// of a file, the output of a command, anything a model was told to say — could
+/// otherwise set the window title, rewrite the line above, or ask the terminal
+/// to put something in the clipboard.
+///
+/// Newlines and tabs stay: they are what the output is made of.
+pub fn printable(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
+        .collect()
+}
+
 pub fn describe_call(call: &ah_core::abi::ToolCall) -> String {
-    serde_json::from_str(&call.function.arguments)
-        .ok()
-        .and_then(|v| ah_core::tools::describe::describe(&call.function.name, &v))
-        .unwrap_or_else(|| {
-            format!(
-                "{}({})",
-                call.function.name,
-                compact_args(&call.function.arguments)
-            )
-        })
+    // The arguments are whatever the model wrote, and this line goes to a
+    // terminal.
+    printable(
+        &serde_json::from_str(&call.function.arguments)
+            .ok()
+            .and_then(|v| ah_core::tools::describe::describe(&call.function.name, &v))
+            .unwrap_or_else(|| {
+                format!(
+                    "{}({})",
+                    call.function.name,
+                    compact_args(&call.function.arguments)
+                )
+            }),
+    )
+}
+
+#[cfg(test)]
+mod printing {
+    use super::*;
+
+    #[test]
+    fn nothing_a_tool_returns_can_drive_the_terminal() {
+        let nasty = "ok\u{1b}]0;owned\u{7}\u{1b}]52;c;cGF5bG9hZA==\u{7}\rgone";
+        let out = printable(nasty);
+        assert!(!out.contains('\u{1b}'), "{out:?}");
+        assert!(!out.contains('\u{7}'), "{out:?}");
+        assert!(!out.contains('\r'), "{out:?}");
+        // What the output is actually made of stays.
+        assert_eq!(printable("one\ntwo\tthree"), "one\ntwo\tthree");
+    }
 }
 
 pub fn compact_args(args: &str) -> String {

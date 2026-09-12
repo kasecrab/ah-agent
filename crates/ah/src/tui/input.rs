@@ -287,10 +287,11 @@ impl Editor {
         if let Some(d) = path.parent() {
             let _ = std::fs::create_dir_all(d);
         }
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
+        // Everything ever typed at a prompt, which is where people paste
+        // things they only meant to paste once.
+        if let Ok(mut f) =
+            ah_core::paths::owner_only(std::fs::OpenOptions::new().create(true).append(true))
+                .open(path)
         {
             let _ = writeln!(f, "{}", serde_json::to_string(entry).unwrap_or_default());
         }

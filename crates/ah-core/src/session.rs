@@ -94,7 +94,11 @@ impl Session {
         std::fs::create_dir_all(&dir)?;
         let id = new_id();
         let path = dir.join(format!("{id}.jsonl"));
-        let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+        // A transcript holds every tool result the model was shown, which is
+        // as much of this machine as the session touched. The credentials file
+        // beside it is 0600 and this is the same material by a longer route.
+        let mut file =
+            crate::paths::owner_only(OpenOptions::new().create(true).append(true)).open(&path)?;
         let header = Header {
             id: id.clone(),
             started_ms: now_ms(),
