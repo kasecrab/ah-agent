@@ -15,7 +15,8 @@ node_modules/
 *.pdb
 
 # Cargo
-# Cargo.lock is kept: this workspace builds binaries.
+# The workspace lock is unpublished for now, with the rest of the block below.
+# relay/Cargo.lock is tracked: a Worker build has to be reproducible.
 
 # Profiling / coverage
 *.profraw

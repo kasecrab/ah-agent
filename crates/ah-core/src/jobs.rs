@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 /// Variables a command started by a tool does not need and should not be
 /// handed. Every one of them is a credential this process was given for its
 /// own use.
-const SECRETS: &[&str] = &[
+pub const SECRETS: &[&str] = &[
     "OPENROUTER_API_KEY",
     "AH_API_KEY",
     "DEEPGRAM_API_KEY",

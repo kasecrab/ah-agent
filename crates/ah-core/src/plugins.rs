@@ -685,14 +685,26 @@ fn host_call(st: &mut State, name: &str, input: &[u8]) -> std::result::Result<Ve
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0),
         ),
-        "env_get" => std::env::var(arg.as_str().unwrap_or(""))
-            .map(Value::String)
-            .unwrap_or(Value::Null),
+        // A plugin may read the environment, and not the parts of it that are
+        // credentials. It is a program somebody else wrote; a theme has no
+        // business with the key that pays for the model.
+        "env_get" => match arg.as_str().unwrap_or("") {
+            name if crate::jobs::SECRETS.contains(&name) => Value::Null,
+            name => std::env::var(name)
+                .map(Value::String)
+                .unwrap_or(Value::Null),
+        },
         "read_file" => {
             let p = crate::tools::resolve_path(
                 Path::new(&st.cwd),
                 arg.as_str().ok_or("read_file needs a path")?,
             );
+            // Not the credentials file, by any spelling of it. Everything else
+            // this user can read, a plugin they installed can read too —
+            // installing one is the trust decision, and it is asked about.
+            if p.canonicalize().unwrap_or_else(|_| p.clone()) == crate::paths::credentials_file() {
+                return Err("read_file: not that one".to_string());
+            }
             let text = std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?;
             Value::String(text)
         }
