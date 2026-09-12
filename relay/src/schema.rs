@@ -16,6 +16,10 @@ CREATE TABLE IF NOT EXISTS log (
   seq  INTEGER NOT NULL,
   ct   TEXT    NOT NULL
 );
+CREATE TABLE IF NOT EXISTS nonces (
+  n  TEXT PRIMARY KEY,
+  ts INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS devices (
   id       TEXT PRIMARY KEY,
   role     TEXT    NOT NULL,
@@ -35,6 +39,11 @@ pub const LOG_RETAIN_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 /// How often the log is trimmed. Deleted rows count against the same daily
 /// allowance as written ones, so this happens in batches and never per insert.
 pub const PRUNE_EVERY: i64 = 256;
+
+/// How long a used connect nonce is remembered. Twice the skew window, so a
+/// signature is out of date before the relay stops recognising that it has
+/// already been used once.
+pub const NONCE_KEEP_MS: i64 = 2 * 5 * 60 * 1000;
 
 /// Frames one hub may take in a day. The allowance being spent belongs to
 /// whoever deployed this, so a pairing code that got out cannot quietly empty

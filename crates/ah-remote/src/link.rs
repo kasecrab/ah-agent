@@ -294,12 +294,15 @@ fn connect(
     let ts = now_ms();
     let nonce = crypto::new_nonce();
     let sig = cfg.keys.sign_connect(cfg.role, ts, &nonce);
+    // The signature goes in a header, not in the query. A URL is written down
+    // in access logs, in proxies and in whatever keeps a request record, and a
+    // signature sitting in one of those is a signature somebody reading them
+    // can use for as long as the clocks allow.
     let url = format!(
-        "{scheme}://{base}/hub/{}?r={}&ts={ts}&n={}&h={}",
+        "{scheme}://{base}/hub/{}?r={}&ts={ts}&n={}",
         cfg.keys.hub_id,
         cfg.role.as_str(),
         esc(&nonce),
-        esc(&sig),
     );
 
     let request = tungstenite::http::Request::builder()
@@ -313,6 +316,7 @@ fn connect(
             tungstenite::handshake::client::generate_key(),
         )
         .header("User-Agent", concat!("ah/", env!("CARGO_PKG_VERSION")))
+        .header("x-ah-auth", &sig)
         .body(())
         .map_err(|e| Error::Config(e.to_string()))?;
 

@@ -99,6 +99,11 @@ Worth knowing before you rely on any of it:
 - **A command reaches the machine only while it is connected.** Nothing is
   queued for a desktop that is offline; the phone is told so instead.
 
+The connect signature goes in a header rather than in the URL, so it is not
+kept by whatever logs requests, and the relay refuses a second use of the same
+one: a signature that did leak opens nothing, rather than opening a socket for
+as long as the clocks allow.
+
 ## With nobody at the keyboard
 
 ```

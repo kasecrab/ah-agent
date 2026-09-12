@@ -310,7 +310,8 @@ impl Hub {
             return Response::error("no", 401);
         };
         let raw = auth::decode_key(&key);
-        let role = match auth::verify(&raw, &hub, &url, now()).await {
+        let signature = req.headers().get("x-ah-auth").ok().flatten();
+        let proof = match auth::verify(&raw, &hub, &url, signature, now()).await {
             Ok(r) => r,
             Err(Denied::Skew) => {
                 return Response::from_json(&serde_json::json!({
@@ -320,6 +321,13 @@ impl Hub {
             }
             Err(Denied::Signature) => return Response::error("no", 401),
         };
+        // A signature holds for as long as the clocks allow, so without this
+        // one that was copied — out of an access log, or off the wire — opens
+        // a second socket for five minutes afterwards. Once used, never again.
+        if !self.first_use(&proof.nonce) {
+            return Response::error("no", 401);
+        }
+        let role = proof.role;
 
         let dev = url
             .query_pairs()
@@ -383,7 +391,11 @@ impl Hub {
             return Response::error("no such hub", 404);
         };
         let raw = auth::decode_key(&key);
-        if auth::verify(&raw, &hub, &url, now()).await.is_err() {
+        let signature = req.headers().get("x-ah-auth").ok().flatten();
+        let Ok(proof) = auth::verify(&raw, &hub, &url, signature, now()).await else {
+            return Response::error("no", 401);
+        };
+        if !self.first_use(&proof.nonce) {
             return Response::error("no", 401);
         }
         self.set_meta("revoked", "1");
@@ -539,6 +551,40 @@ impl Hub {
             return true;
         }
         newest - self.day_n0.get() < schema::FRAMES_PER_DAY
+    }
+
+    /// Whether this nonce has been signed with before. Remembered for twice
+    /// the skew window, which is longer than any signature stays valid, and
+    /// tidied on the same pass so the table cannot grow.
+    fn first_use(&self, nonce: &str) -> bool {
+        if nonce.is_empty() || nonce.len() > 64 {
+            return false;
+        }
+        #[derive(Deserialize)]
+        struct Row {
+            seen: i64,
+        }
+        let rows: Vec<Row> = self
+            .sql()
+            .exec(
+                "SELECT COUNT(*) AS seen FROM nonces WHERE n = ?1",
+                Some(vec![nonce.into()]),
+            )
+            .ok()
+            .and_then(|c| c.to_array().ok())
+            .unwrap_or_default();
+        if rows.first().map(|r| r.seen).unwrap_or(0) > 0 {
+            return false;
+        }
+        let _ = self.sql().exec(
+            "INSERT OR IGNORE INTO nonces (n, ts) VALUES (?1, ?2)",
+            Some(vec![nonce.into(), (now() as i64).into()]),
+        );
+        let _ = self.sql().exec(
+            "DELETE FROM nonces WHERE ts < ?1",
+            Some(vec![(now() as i64 - schema::NONCE_KEEP_MS).into()]),
+        );
+        true
     }
 
     /// The newest log number, asked for only when this incarnation has not

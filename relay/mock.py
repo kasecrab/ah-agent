@@ -62,6 +62,7 @@ class Hub:
 
 HUBS: dict[str, Hub] = {}
 REVOKED: set[str] = set()
+NONCES: set[str] = set()
 HUBS_LOCK = threading.Lock()
 
 # What the deployed relay asks for before it will make a pairing. Fixed here so
@@ -217,7 +218,10 @@ def serve(sock: socket.socket) -> None:
     if hub is None:
         return http_error(sock, 401)
 
-    role, ts, nonce, sig = q.get("r"), q.get("ts"), q.get("n"), q.get("h")
+    # The signature belongs in a header, where request logs do not keep it.
+    # The query is still read so a peer built before that still connects.
+    sig = headers.get("x-ah-auth") or q.get("h")
+    role, ts, nonce = q.get("r"), q.get("ts"), q.get("n")
     if role not in ("desk", "phone") or not ts or not nonce or not sig:
         return http_error(sock, 401)
     now = int(time.time() * 1000)
@@ -229,6 +233,12 @@ def serve(sock: socket.socket) -> None:
     # one it only talks about to somebody holding the key.
     if abs(now - int(ts)) > SKEW_MS:
         return http_error(sock, 401, json.dumps({"e": "skew", "server_ms": now}))
+    # Once used, never again: a copied signature is good for the whole skew
+    # window otherwise.
+    with HUBS_LOCK:
+        if nonce in NONCES:
+            return http_error(sock, 401)
+        NONCES.add(nonce)
 
     if method == "POST" and parts[-1] == "revoke":
         with HUBS_LOCK:

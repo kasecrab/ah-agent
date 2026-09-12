@@ -19,16 +19,34 @@ pub enum Denied {
     Skew,
 }
 
+/// What a caller proved, once it has proved it.
+pub struct Proof {
+    pub role: Role,
+    /// The nonce it signed with, which the caller keeps so it can refuse the
+    /// same one twice.
+    pub nonce: String,
+}
+
 /// Check a connect signature. `now` is the relay's clock, in milliseconds.
+///
+/// `header` is the signature as sent in `x-ah-auth`, which is where it belongs:
+/// a URL travels through request logs, proxies and anything that keeps an
+/// access record, and a signature in one is a signature anybody reading those
+/// can use until it times out. The query is still read, so a peer built before
+/// this still connects, and the header is preferred when both are there.
 pub async fn verify(
     relay_key: &[u8],
     hub: &str,
     url: &Url,
+    header: Option<String>,
     now: u64,
-) -> std::result::Result<Role, Denied> {
+) -> std::result::Result<Proof, Denied> {
     let q: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+    let sig = header
+        .filter(|h| !h.is_empty())
+        .or_else(|| q.get("h").cloned());
     let (Some(role), Some(ts), Some(nonce), Some(sig)) =
-        (q.get("r"), q.get("ts"), q.get("n"), q.get("h"))
+        (q.get("r"), q.get("ts"), q.get("n"), sig.as_ref())
     else {
         return Err(Denied::Signature);
     };
@@ -48,7 +66,10 @@ pub async fn verify(
     if now.abs_diff(ts) > SKEW_MS {
         return Err(Denied::Skew);
     }
-    Ok(role)
+    Ok(Proof {
+        role,
+        nonce: nonce.clone(),
+    })
 }
 
 /// `crypto.subtle.verify`, which compares in constant time so we do not have

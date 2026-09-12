@@ -57,8 +57,11 @@ def vectors() -> dict:
     """The key ladder, straight out of the Rust that the harness will use."""
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     out = subprocess.run(
-        ["cargo", "test", "-p", "ah-remote", "--lib", "vectors",
-         "--", "--ignored", "--nocapture"],
+        # Named exactly: the phone's vectors are dumped by a second test in
+        # the same module, under a different code, and a looser filter runs
+        # both and leaves whichever finished last in the output.
+        ["cargo", "test", "-p", "ah-remote", "--lib",
+         "vectors::dump_connect_vectors", "--", "--ignored", "--nocapture"],
         capture_output=True, text=True, check=True, cwd=root,
     ).stdout
     got = {}
@@ -73,7 +76,7 @@ def vectors() -> dict:
 
 
 def request(method: str, path: str, body: str | None = None,
-            upgrade: bool = False) -> tuple[int, str]:
+            upgrade: bool = False, extra: dict | None = None) -> tuple[int, str]:
     """One HTTP/1.1 exchange. Raw, because a 101 is one of the answers."""
     head = [f"{method} {path} HTTP/1.1", f"Host: {BASE_HOST}:{BASE_PORT}",
             "Connection: close"]
@@ -86,6 +89,8 @@ def request(method: str, path: str, body: str | None = None,
     if body is not None:
         head += ["Content-Type: application/json",
                  f"Content-Length: {len(body)}"]
+    for k, value in (extra or {}).items():
+        head.append(f"{k}: {value}")
     raw = ("\r\n".join(head) + "\r\n\r\n" + (body or "")).encode()
 
     with socket.create_connection((BASE_HOST, BASE_PORT), timeout=10) as sock:
@@ -118,13 +123,16 @@ def request(method: str, path: str, body: str | None = None,
 class Socket:
     """Just enough WebSocket to say things and hear them back."""
 
-    def __init__(self, path: str):
+    def __init__(self, path: str, extra: dict | None = None):
         self.sock = socket.create_connection((BASE_HOST, BASE_PORT), timeout=10)
+        self.extra = extra or {}
         key = base64.b64encode(os.urandom(16)).decode()
+        more = "".join(f"{k}: {v}\r\n" for k, v in self.extra.items())
         self.sock.sendall((
             f"GET {path} HTTP/1.1\r\nHost: {BASE_HOST}:{BASE_PORT}\r\n"
             "Connection: Upgrade\r\nUpgrade: websocket\r\n"
-            f"Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {key}\r\n\r\n"
+            f"Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {key}\r\n"
+            f"{more}\r\n"
         ).encode())
         head = b""
         while b"\r\n\r\n" not in head:
@@ -237,54 +245,99 @@ def main() -> int:
     sign = signer(hub, key)
 
     now = int(time.time() * 1000)
-    nonce = v["nonce"]
     unknown = "0" * 32
+    token = os.environ.get("AH_PROVISION_TOKEN", "mock-provision-token")
+
+    def fresh() -> str:
+        """A nonce nothing has signed with. The relay refuses a second use of
+        one, so every dial below needs its own."""
+        return b64u(os.urandom(12))
+
+    def dial(role: str, *, hub: str = "", sign=None, nonce: str | None = None,
+             in_query: bool = False) -> tuple[str, dict]:
+        """The path and headers one connection needs, signature in the header
+        where a request log will not keep it."""
+        nonce = nonce or fresh()
+        sig = sign(role, now, nonce)
+        path = f"/hub/{hub}?r={role}&ts={now}&n={nonce}"
+        if in_query:
+            return f"{path}&h={sig}", {}
+        return path, {"x-ah-auth": sig}
 
     print("relay")
     check("it is alive", request("GET", "/health")[0], 200)
-    check("a hub nobody paired is not there",
-          request("GET", f"/hub/{unknown}?r=desk&ts={now}&n={nonce}"
-                         f"&h={sign('desk', now, nonce)}", upgrade=True)[0], 404)
+    # The same answer a wrong signature gets. A hub that said "no such hub"
+    # here would tell anybody with a list of guesses which of them are real.
+    path, head = dial("desk", hub=unknown, sign=sign)
+    check("a hub nobody paired answers like a wrong signature",
+          request("GET", path, upgrade=True, extra=head)[0], 401)
     check("a name that is not a hub is refused",
           request("GET", "/hub/nonsense", upgrade=True)[0], 400)
 
     body = json.dumps({"relay_key": b64u(key)})
+    check("pairing without the relay's own secret is refused",
+          request("POST", f"/hub/{hub}/provision", body)[0], 401)
     check("pairing is accepted",
-          request("POST", f"/hub/{hub}/provision", body)[0], 200)
+          request("POST", f"/hub/{hub}/provision", body,
+                  extra={"x-ah-provision": token})[0], 200)
     check("pairing twice is not",
-          request("POST", f"/hub/{hub}/provision", body)[0], 409)
+          request("POST", f"/hub/{hub}/provision", body,
+                  extra={"x-ah-provision": token})[0], 409)
+    check("a key far too long to be one is refused",
+          request("POST", f"/hub/{'1' * 32}/provision",
+                  json.dumps({"relay_key": "A" * 4096}),
+                  extra={"x-ah-provision": token})[0], 400)
 
     check("an unsigned socket is refused",
           request("GET", f"/hub/{hub}?r=desk", upgrade=True)[0], 401)
     check("a forged signature is refused",
-          request("GET", f"/hub/{hub}?r=desk&ts={now}&n={nonce}&h=bm90YXNpZw",
-                  upgrade=True)[0], 401)
+          request("GET", f"/hub/{hub}?r=desk&ts={now}&n={fresh()}", upgrade=True,
+                  extra={"x-ah-auth": "bm90YXNpZw"})[0], 401)
+    wrong = fresh()
     check("a signature for the other role is refused",
-          request("GET", f"/hub/{hub}?r=desk&ts={now}&n={nonce}"
-                         f"&h={sign('phone', now, nonce)}", upgrade=True)[0], 401)
+          request("GET", f"/hub/{hub}?r=desk&ts={now}&n={wrong}", upgrade=True,
+                  extra={"x-ah-auth": sign("phone", now, wrong)})[0], 401)
 
     stale = now - 3_600_000
+    skewed = fresh()
     status, payload = request(
-        "GET", f"/hub/{hub}?r=desk&ts={stale}&n={nonce}&h={sign('desk', stale, nonce)}",
-        upgrade=True)
+        "GET", f"/hub/{hub}?r=desk&ts={stale}&n={skewed}", upgrade=True,
+        extra={"x-ah-auth": sign("desk", stale, skewed)})
     check("a clock far out is refused", status, 401)
-    check("and is told so", "skew" in payload, True)
+    check("and is told so, but only to somebody holding the key",
+          "skew" in payload, True)
+    check("while a clock far out with a forged signature is told nothing",
+          "skew" in request("GET", f"/hub/{hub}?r=desk&ts={stale}&n={fresh()}",
+                            upgrade=True, extra={"x-ah-auth": "bm90YXNpZw"})[1], False)
 
+    path, head = dial("desk", hub=hub, sign=sign)
     check("a signed desktop gets in",
-          request("GET", f"/hub/{hub}?r=desk&ts={now}&n={nonce}"
-                         f"&h={sign('desk', now, nonce)}", upgrade=True)[0], 101)
+          request("GET", path, upgrade=True, extra=head)[0], 101)
+    path, head = dial("phone", hub=hub, sign=sign)
     check("a signed phone gets in",
-          request("GET", f"/hub/{hub}?r=phone&ts={now}&n=BBBBBBBBBBBBBBBB"
-                         f"&h={sign('phone', now, 'BBBBBBBBBBBBBBBB')}",
-                  upgrade=True)[0], 101)
+          request("GET", path, upgrade=True, extra=head)[0], 101)
+
+    # A signature is good once. Copied out of a log or off the wire, it opens
+    # nothing, however long the clocks would otherwise allow.
+    again = fresh()
+    path, head = dial("phone", hub=hub, sign=sign, nonce=again)
+    check("a signature is good the first time",
+          request("GET", path, upgrade=True, extra=head)[0], 101)
+    check("and not the second",
+          request("GET", path, upgrade=True, extra=head)[0], 401)
+
+    # Still readable from the query, so a peer built before the header is not
+    # locked out by a relay built after it.
+    path, head = dial("phone", hub=hub, sign=sign, in_query=True)
+    check("a signature in the query still works",
+          request("GET", path, upgrade=True, extra=head)[0], 101)
 
     # The relay cannot read a payload, so this does not give it one: what is
     # being checked is the numbering, the fan-out and the replay.
     print("frames")
-    desk = Socket(f"/hub/{hub}?r=desk&ts={now}&n={nonce}&h={sign('desk', now, nonce)}")
+    desk = Socket(*dial("desk", hub=hub, sign=sign))
     check("the desktop is connected", desk.status, 101)
-    phone = Socket(f"/hub/{hub}?r=phone&ts={now}&n=PPPPPPPPPPPPPPPP"
-                   f"&h={sign('phone', now, 'PPPPPPPPPPPPPPPP')}")
+    phone = Socket(*dial("phone", hub=hub, sign=sign))
     check("the phone is connected", phone.status, 101)
 
     link = "ab" * 16
@@ -299,8 +352,7 @@ def main() -> int:
 
     # A phone that went away and came back asks for what it missed.
     phone.close()
-    later = Socket(f"/hub/{hub}?r=phone&ts={now}&n=QQQQQQQQQQQQQQQQ"
-                   f"&h={sign('phone', now, 'QQQQQQQQQQQQQQQQ')}")
+    later = Socket(*dial("phone", hub=hub, sign=sign))
     later.send({"t": "sub", "v": PROTO_VERSION, "since": 2, "max": 100})
     got = later.frames(1)
     check("only what was missed is replayed", [f.get("ct") for f in got], ["sealed-3"])
@@ -313,8 +365,7 @@ def main() -> int:
           ["from-the-phone"])
 
     desk.close()
-    orphan = Socket(f"/hub/{hub}?r=phone&ts={now}&n=RRRRRRRRRRRRRRRR"
-                    f"&h={sign('phone', now, 'RRRRRRRRRRRRRRRR')}")
+    orphan = Socket(*dial("phone", hub=hub, sign=sign))
     orphan.send({"t": "cmd", "v": PROTO_VERSION, "link": link, "plink": "cd" * 16,
                  "seq": 1, "ct": "nobody-is-home"})
     got = orphan.frames(1)

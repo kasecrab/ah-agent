@@ -100,11 +100,11 @@ pub fn revoke(url: &str, keys: &Keys) -> Result<(), Error> {
         .into();
     let response = agent
         .post(format!(
-            "{url}/hub/{}/revoke?r=desk&ts={ts}&n={}&h={}",
+            "{url}/hub/{}/revoke?r=desk&ts={ts}&n={}",
             keys.hub_id,
-            esc(&nonce),
-            esc(&sig)
+            esc(&nonce)
         ))
+        .header("x-ah-auth", &sig)
         .send_empty()
         .map_err(|e| Error::Unreachable(e.to_string()))?;
     match response.status().as_u16() {
