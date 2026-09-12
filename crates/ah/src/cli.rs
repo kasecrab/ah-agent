@@ -779,8 +779,13 @@ fn plugin(o: &Overrides, cmd: PluginCmd) -> Result<(), AnyError> {
 }
 
 fn install_from(src: &plugin_source::Source, user_dir: &std::path::Path) -> Result<(), AnyError> {
-    let installed = plugin_source::install(src, user_dir)?;
+    // What was installed last time, so an update can tell whether the author
+    // has pushed since and ask before running what they pushed.
+    let known = src.commit.clone();
+    let (installed, commit) = plugin_source::install(src, user_dir, known.as_deref())?;
     let mut sources = plugin_source::load_sources(user_dir);
+    let mut src = src.clone();
+    src.commit = Some(commit);
     for f in &installed {
         sources.insert(plugin_source::stem(f), src.clone());
         println!("installed {} (from {})", f.display(), src.describe());

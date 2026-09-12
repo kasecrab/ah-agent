@@ -21,6 +21,14 @@ pub struct Source {
     /// Branch, tag or commit; the remote default branch when `None`.
     #[serde(rename = "ref", default, skip_serializing_if = "Option::is_none")]
     pub git_ref: Option<String>,
+    /// The commit the installed module was actually built from.
+    ///
+    /// A branch ref, or none at all, is a moving target: `ah plugin update`
+    /// against one fetches whatever the author has pushed since, and installs
+    /// it. Remembering what was installed is what lets an update say that the
+    /// code changed, and ask, rather than swapping it silently.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
 }
 
 impl Source {
@@ -49,6 +57,7 @@ pub fn parse_source(spec: &str, subdir: Option<&str>, git_ref: Option<&str>) -> 
         url: spec.to_string(),
         path: String::new(),
         git_ref: None,
+        commit: None,
     };
     if let Some((repo, rest)) = spec.split_once("/tree/") {
         src.url = repo.trim_end_matches("/-").to_string();
@@ -92,8 +101,18 @@ impl Drop for TempDir {
 }
 
 /// Clone, build if needed, and copy the module(s) into `user_dir`.
-/// Returns the installed files.
-pub fn install(src: &Source, user_dir: &Path) -> Result<Vec<PathBuf>, AnyError> {
+///
+/// `known` is the commit the installed copy was built from, when there is one
+/// — an update rather than a first install. If the repository has moved since,
+/// this is where the person is told and asked, because the new code is code
+/// they have not agreed to run.
+///
+/// Returns the installed files and the commit they came from.
+pub fn install(
+    src: &Source,
+    user_dir: &Path,
+    known: Option<&str>,
+) -> Result<(Vec<PathBuf>, String), AnyError> {
     let data = ah_core::paths::data_dir();
     let tmp = data
         .join("tmp")
@@ -101,7 +120,13 @@ pub fn install(src: &Source, user_dir: &Path) -> Result<Vec<PathBuf>, AnyError> 
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(tmp.parent().unwrap())?;
     let tmp = TempDir(tmp);
-    clone(&src.url, src.git_ref.as_deref(), &tmp.0)?;
+    let commit = clone(&src.url, src.git_ref.as_deref(), &tmp.0)?;
+    if let Some(had) = known
+        && had != commit
+        && !agreed_to_move(&src.url, had, &commit)?
+    {
+        return Err("nothing was updated".into());
+    }
     let dir = if src.path.is_empty() {
         tmp.0.clone()
     } else {
@@ -143,10 +168,50 @@ pub fn install(src: &Source, user_dir: &Path) -> Result<Vec<PathBuf>, AnyError> 
         std::fs::copy(&f, &dest)?;
         installed.push(dest);
     }
-    Ok(installed)
+    Ok((installed, commit))
 }
 
-fn clone(url: &str, git_ref: Option<&str>, dest: &Path) -> Result<(), AnyError> {
+/// Ask before replacing an installed plugin with code the author has pushed
+/// since.
+///
+/// Pinning to a tag or a commit is the way not to be asked: what a tag or a
+/// commit names does not change, so an update against one has nothing to say.
+/// A branch, or no ref at all, is somebody else's newest work, and the run it
+/// is about to do is a run of code nobody here has looked at.
+///
+/// With nothing to ask at — a script, a pipe — it refuses rather than assumes.
+/// `AH_PLUGIN_UPDATE_YES=1` is how a script says yes on purpose.
+fn agreed_to_move(url: &str, had: &str, now: &str) -> Result<bool, AnyError> {
+    let short = |c: &str| c.chars().take(8).collect::<String>();
+    if std::env::var("AH_PLUGIN_UPDATE_YES").is_ok_and(|v| v == "1") {
+        return Ok(true);
+    }
+    if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        return Err(format!(
+            "{url} has moved from {} to {}, which is code this machine has not run before. Run \
+             this where it can ask, pin it with `--ref <tag or commit>`, or set \
+             AH_PLUGIN_UPDATE_YES=1 if you mean it.",
+            short(had),
+            short(now)
+        )
+        .into());
+    }
+    println!(
+        "{url} has moved from {} to {} since it was installed.",
+        short(had),
+        short(now)
+    );
+    println!("That is code this machine has not run before.");
+    print!("update it? [y/N] ");
+    use std::io::Write as _;
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    Ok(matches!(line.trim(), "y" | "Y" | "yes" | "Yes"))
+}
+
+/// Clone into `dest` and return the commit that was checked out.
+fn clone(url: &str, git_ref: Option<&str>, dest: &Path) -> Result<String, AnyError> {
     // Local paths as file:// URLs so shallow clones work for them too.
     let url = match std::fs::canonicalize(url) {
         Ok(p) if p.is_dir() => format!("file://{}", p.display()),
@@ -166,7 +231,7 @@ fn clone(url: &str, git_ref: Option<&str>, dest: &Path) -> Result<(), AnyError> 
     }
     args.extend([url.as_str(), dest_s.as_str()]);
     if run(&args)? {
-        return Ok(());
+        return head_of(&dest_s);
     }
     // `--branch` rejects commit hashes: full clone, then check out.
     if let Some(r) = git_ref {
@@ -174,10 +239,22 @@ fn clone(url: &str, git_ref: Option<&str>, dest: &Path) -> Result<(), AnyError> 
         if run(&["clone", "--quiet", &url, &dest_s])?
             && run(&["-C", &dest_s, "checkout", "--quiet", r])?
         {
-            return Ok(());
+            return head_of(&dest_s);
         }
     }
     Err(format!("git clone of {url} failed").into())
+}
+
+/// The commit a clone ended up on.
+fn head_of(dir: &str) -> Result<String, AnyError> {
+    let out = Command::new("git")
+        .args(["-C", dir, "rev-parse", "HEAD"])
+        .output()
+        .map_err(|e| format!("git: {e}"))?;
+    if !out.status.success() {
+        return Err("git rev-parse failed after a clone that succeeded".into());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 fn wasm_files(dir: &Path) -> Vec<PathBuf> {

@@ -6,10 +6,18 @@ prompt and every request, allow, deny, replace or confirm tool calls, add
 tools the model can call, add slash commands, draw the status line and bind
 keys. They talk to the host with JSON in both directions.
 
-Plugins are sandboxed: no filesystem, network or clock except through the
-host calls below, a fuel budget per hook call (`plugins.fuel_per_call`) and a
-memory cap (`plugins.max_memory_bytes`). A hook that traps or runs out of fuel
-is disabled for the rest of the session; the harness keeps going.
+Plugins are sandboxed when they run: no filesystem, network or clock except
+through the host calls below, a fuel budget per hook call
+(`plugins.fuel_per_call`) and a memory cap (`plugins.max_memory_bytes`). A
+hook that traps or runs out of fuel is disabled for the rest of the session;
+the harness keeps going. The exception is `before_tool`, whose failure is a
+refusal rather than silence — see [Hooks](#hooks).
+
+The sandbox does not cover installing one. Building a plugin from source runs
+its `build.rs` and every proc-macro it depends on, natively, as you, before any
+of it reaches the interpreter — so `ah plugin install` asks first when a
+repository ships no built `.wasm`, and `ah plugin update` asks again when the
+code has moved.
 
 Plugins run for the conversation you are in, not for subagents: the
 interpreter is one, and a hook cannot be in two loops at once. So a plugin
@@ -76,14 +84,22 @@ session.
 ### Updating
 
 `~/.config/ah/plugins/sources.json` maps each installed file stem to its
-`url`, `path` and `ref`. `ah plugin update` repeats the install for every
-entry (or one, `ah plugin update themes`): a fresh clone of the recorded
-ref, a build when the repository ships source, and the module replaced in
-place. A branch ref, or none, follows the branch's newest commit; a tag or
-commit ref reinstalls the same code and only changes anything when its
-build inputs did. `ah plugin rm` deletes the module and its entry. Plugins
-added by hand with `ah plugin add` or `ah plugin build` have no source and
-are not touched by `update`.
+`url`, `path`, `ref` and the `commit` the installed module was built from.
+`ah plugin update` repeats the install for every entry (or one, `ah plugin
+update themes`): a fresh clone of the recorded ref, a build when the
+repository ships source, and the module replaced in place.
+
+A tag or commit ref names code that does not change, so an update against one
+reinstalls the same thing. A branch ref, or none at all, is a moving target:
+it follows the branch's newest commit, which is code this machine has not run
+before. When the commit has moved, `update` says what it moved from and to and
+asks before installing it; `--ref <tag or commit>` at install time is how to
+pin it and not be asked. With nothing to ask at — a script, a pipe — it
+refuses, and `AH_PLUGIN_UPDATE_YES=1` is how a script says yes on purpose.
+
+`ah plugin rm` deletes the module and its entry. Plugins added by hand with
+`ah plugin add` or `ah plugin build` have no source and are not touched by
+`update`.
 
 A plugin keeps working across ah releases as long as the ABI version
 matches: new fields in hook payloads have defaults and unknown fields are
