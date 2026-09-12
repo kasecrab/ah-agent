@@ -106,8 +106,9 @@ pub fn refusals(stack: &SettingsStack) -> Vec<String> {
         })
         // A deny rule that can never match belongs in the same place: it is a
         // thing somebody wrote into the config expecting it to hold, and it
-        // does not.
+        // does not. So does a misspelled key.
         .chain(ah_core::policy::complaints(&stack.settings().permissions))
+        .chain(ah_core::settings::strange_keys(stack.value()))
         .collect()
 }
 

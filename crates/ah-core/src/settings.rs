@@ -335,6 +335,91 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// Subtrees whose keys are the user's own words rather than field names.
+const OPEN: &[&str] = &["model.favorites", "agents.defs"];
+
+/// Keys in the merged settings that no table has a field for.
+///
+/// `[permissions] mod = "ask"` and `[permisions] mode = "ask"` both parse, both
+/// merge, and both do nothing: serde fills a missing field from the default and
+/// an unknown top-level table lands in `extra`, where plugin-private keys
+/// legitimately live. A type error is caught and said out loud; a spelling
+/// error was not, so the one setting somebody changed to be safer quietly
+/// stayed as it was.
+///
+/// This does not refuse the key. A config written for a newer `ah` should still
+/// start an older one, and a plugin's own table has every right to be there.
+/// It says what it saw, and what it thinks was meant.
+pub fn strange_keys(merged: &Value) -> Vec<String> {
+    let known = match serde_json::to_value(Settings::default()) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let (Some(merged), Some(known)) = (merged.as_object(), known.as_object()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (table, value) in merged {
+        let Some(fields) = known.get(table) else {
+            // An unknown top-level table is allowed — that is what `extra` is
+            // for — unless it reads like a near miss of one that is not.
+            if let Some(meant) = nearest(table, known.keys().map(String::as_str)) {
+                out.push(format!(
+                    "[{table}] is not a table this program has; did you mean [{meant}]?"
+                ));
+            }
+            continue;
+        };
+        let (Some(value), Some(fields)) = (value.as_object(), fields.as_object()) else {
+            continue;
+        };
+        for key in value.keys() {
+            if fields.contains_key(key) || OPEN.contains(&format!("{table}.{key}").as_str()) {
+                continue;
+            }
+            let meant = nearest(key, fields.keys().map(String::as_str));
+            match meant {
+                Some(m) => out.push(format!(
+                    "{table}.{key} is not a setting; did you mean {table}.{m}?"
+                )),
+                None => out.push(format!("{table}.{key} is not a setting and did nothing")),
+            }
+        }
+    }
+    out
+}
+
+/// The candidate `word` is most likely a misspelling of, if any is close
+/// enough to be worth saying.
+fn nearest<'a>(word: &str, candidates: impl Iterator<Item = &'a str>) -> Option<&'a str> {
+    let limit = match word.len() {
+        0..=3 => 1,
+        4..=7 => 2,
+        _ => 3,
+    };
+    candidates
+        .map(|c| (distance(word, c), c))
+        .filter(|(d, _)| *d <= limit)
+        .min_by_key(|(d, _)| *d)
+        .map(|(_, c)| c)
+}
+
+/// Levenshtein distance, two rows at a time.
+fn distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut row = vec![0usize; b.len() + 1];
+    for (i, ca) in a.chars().enumerate() {
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != *cb);
+            row[j + 1] = (prev[j] + cost).min(prev[j + 1] + 1).min(row[j] + 1);
+        }
+        std::mem::swap(&mut prev, &mut row);
+    }
+    prev[b.len()]
+}
+
 /// Remove `key` from `patch` if it is there, returning what was removed.
 pub fn take(patch: &mut Value, key: &[&str]) -> Option<Value> {
     let (last, parents) = key.split_last()?;
@@ -474,6 +559,35 @@ mod tests {
     /// Everything a cloned repository would set if it could. Each one is a
     /// command run on this machine, a key sent somewhere else, or the asking
     /// turned off.
+    #[test]
+    fn a_misspelled_setting_is_said_out_loud_rather_than_ignored() {
+        let merged = serde_json::json!({
+            "permissions": {"mod": "ask", "mode": "ask"},
+            "permisions": {"mode": "ask"},
+            "guard": {"deny": ["curl"]},
+            "model": {"favorites": {"fast": "some/model"}, "id": "x"},
+        });
+        let said = strange_keys(&merged);
+        assert!(
+            said.iter().any(|s| s.contains("permissions.mod") && s.contains("permissions.mode")),
+            "{said:?}"
+        );
+        assert!(
+            said.iter().any(|s| s.contains("[permisions]") && s.contains("[permissions]")),
+            "{said:?}"
+        );
+        // A plugin's own table is not a misspelling of anything, and a
+        // favorite is a name somebody chose.
+        assert!(!said.iter().any(|s| s.contains("guard")), "{said:?}");
+        assert!(!said.iter().any(|s| s.contains("fast")), "{said:?}");
+    }
+
+    #[test]
+    fn a_settings_tree_as_written_by_this_program_has_nothing_strange_in_it() {
+        let v = serde_json::to_value(Settings::default()).unwrap();
+        assert!(strange_keys(&v).is_empty(), "{:?}", strange_keys(&v));
+    }
+
     #[test]
     fn a_repository_cannot_decide_what_this_machine_runs() {
         let _env = env_guard();
