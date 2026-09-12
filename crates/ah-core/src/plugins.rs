@@ -78,6 +78,18 @@ fn pack(ptr: i32, len: i32) -> (usize, usize) {
     (ptr as u32 as usize, len as u32 as usize)
 }
 
+/// A length a plugin named, checked against the memory it actually has.
+///
+/// The length comes out of the plugin as thirty-two bits, so it can say four
+/// gigabytes. Allocating that and then asking wasmi whether the read fits is
+/// the wrong way round: the allocation is the damage, and it happens outside
+/// the plugin's own memory limit, on the host's heap, before anything has been
+/// checked. Asking the memory first costs nothing and the answer is exact.
+fn fits(size: usize, ptr: usize, len: usize) -> Option<(usize, usize)> {
+    let end = ptr.checked_add(len)?;
+    (end <= size).then_some((ptr, len))
+}
+
 /// The settings as a plugin is allowed to see them.
 ///
 /// A plugin is a program somebody else wrote. It has no business with the API
@@ -364,6 +376,11 @@ impl PluginHost {
             .call(&mut store, ())
             .map_err(|e| perr(format!("ah_manifest trapped: {e}")))?;
         let (mptr, mlen) = pack((packed >> 32) as i32, packed as i32);
+        let (mptr, mlen) = fits(memory.data_size(&store), mptr, mlen).ok_or_else(|| {
+            perr(format!(
+                "ah_manifest returned {mlen} bytes it does not have"
+            ))
+        })?;
         let mut buf = vec![0u8; mlen];
         memory
             .read(&store, mptr, &mut buf)
@@ -587,6 +604,13 @@ impl Plugin {
         // guest frees the inputs
         let packed = packed.map_err(|e| self.err(format!("{} trapped: {e}", hook.as_str())))?;
         let (optr, olen) = pack((packed >> 32) as i32, packed as i32);
+        let (optr, olen) =
+            fits(self.memory.data_size(&self.store), optr, olen).ok_or_else(|| {
+                self.err(format!(
+                    "{} returned {olen} bytes it does not have",
+                    hook.as_str()
+                ))
+            })?;
         let mut buf = vec![0u8; olen];
         self.memory
             .read(&self.store, optr, &mut buf)
@@ -773,6 +797,7 @@ impl<O> Called<O> {
 fn read_guest(caller: &mut Caller<'_, State>, ptr: i32, len: i32) -> Option<Vec<u8>> {
     let mem = caller.get_export("memory")?.into_memory()?;
     let (p, l) = pack(ptr, len);
+    let (p, l) = fits(mem.data_size(&*caller), p, l)?;
     let mut buf = vec![0u8; l];
     mem.read(&*caller, p, &mut buf).ok()?;
     Some(buf)
@@ -1281,6 +1306,25 @@ pub mod cache {
             std::fs::write(&cache, "{ half a fi").unwrap();
             assert!(read_at(&cache, &s, &v, "/repo").is_none());
         }
+    }
+}
+
+#[cfg(test)]
+mod memory_tests {
+    use super::fits;
+
+    #[test]
+    fn a_length_a_plugin_made_up_is_refused_before_anything_is_allocated() {
+        let size = 64 * 1024;
+        assert_eq!(fits(size, 0, 16), Some((0, 16)));
+        assert_eq!(fits(size, size - 1, 1), Some((size - 1, 1)));
+        assert_eq!(fits(size, 0, 0), Some((0, 0)));
+        // The length is thirty-two bits wide on the way out of the plugin, so
+        // four gigabytes is a thing it can say.
+        assert_eq!(fits(size, 0, u32::MAX as usize), None);
+        assert_eq!(fits(size, size, 1), None);
+        // And a pointer near the top of the address space must not wrap.
+        assert_eq!(fits(size, usize::MAX, 1), None);
     }
 }
 
