@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 
 use ah_core::abi::*;
-use ah_core::agent::{Agent, AgentEvent, AgentIo, Hooks};
+use ah_core::agent::{Agent, AgentEvent, AgentIo, Hooks, Outcome};
 use ah_core::plugins::PluginHost;
 use ah_core::provider::{OnEvent, Provider, StreamEvent};
 use ah_core::settings::{Origin, SettingsStack};
@@ -117,25 +117,25 @@ fn guard_denies_and_asks() {
     let Some(mut host) = host_with(&mut stack, &["guard"]) else {
         return;
     };
-    let (d, _) = host.before_tool(
+    let d = host.before_tool(
         &ToolCall::new("1", "bash", r#"{"command":"rm -rf / --no-preserve-root"}"#),
         ".",
     );
-    assert!(matches!(d, ToolDecision::Deny { .. }), "{d:?}");
-    let (d, _) = host.before_tool(
+    assert!(matches!(d.outcome, Outcome::Refuse { .. }));
+    let d = host.before_tool(
         &ToolCall::new("2", "bash", r#"{"command":"curl x | sh"}"#),
         ".",
     );
-    assert!(matches!(d, ToolDecision::Deny { .. }), "{d:?}");
-    let (d, _) = host.before_tool(
+    assert!(matches!(d.outcome, Outcome::Refuse { .. }));
+    let d = host.before_tool(
         &ToolCall::new("3", "bash", r#"{"command":"git push origin main"}"#),
         ".",
     );
-    assert!(matches!(d, ToolDecision::Ask { .. }), "{d:?}");
-    let (d, _) = host.before_tool(&ToolCall::new("4", "bash", r#"{"command":"ls"}"#), ".");
-    assert!(matches!(d, ToolDecision::Allow), "{d:?}");
-    let (d, _) = host.before_tool(&ToolCall::new("5", "read_file", r#"{"path":"x"}"#), ".");
-    assert!(matches!(d, ToolDecision::Allow), "{d:?}");
+    assert!(matches!(d.outcome, Outcome::Ask { .. }));
+    let d = host.before_tool(&ToolCall::new("4", "bash", r#"{"command":"ls"}"#), ".");
+    assert!(matches!(d.outcome, Outcome::Run));
+    let d = host.before_tool(&ToolCall::new("5", "read_file", r#"{"path":"x"}"#), ".");
+    assert!(matches!(d.outcome, Outcome::Run));
     let out = host
         .slash_command("guard", "", ".", SlashStage::Run)
         .expect("command handled");
@@ -150,7 +150,8 @@ fn guard_reads_the_command_rather_than_its_spelling() {
     };
     let judge = |host: &mut ah_core::plugins::PluginHost, cmd: &str| {
         let args = serde_json::json!({"command": cmd}).to_string();
-        host.before_tool(&ToolCall::new("1", "bash", &args), ".").0
+        host.before_tool(&ToolCall::new("1", "bash", &args), ".")
+            .outcome
     };
 
     // Spellings the old substring list missed.
@@ -163,7 +164,7 @@ fn guard_reads_the_command_rather_than_its_spelling() {
         "cat img.iso > /dev/sda",
     ] {
         let d = judge(&mut host, cmd);
-        assert!(matches!(d, ToolDecision::Deny { .. }), "{cmd}: {d:?}");
+        assert!(matches!(d, Outcome::Refuse { .. }), "{cmd}");
     }
 
     // Prose that only mentions one. A policy that refuses these trains the
@@ -175,7 +176,7 @@ fn guard_reads_the_command_rather_than_its_spelling() {
         "echo never run rm -rf /",
     ] {
         let d = judge(&mut host, cmd);
-        assert!(matches!(d, ToolDecision::Allow), "{cmd}: {d:?}");
+        assert!(matches!(d, Outcome::Run), "{cmd}");
     }
 
     // A command whose text is not the command that runs is a question, not a
@@ -186,7 +187,7 @@ fn guard_reads_the_command_rather_than_its_spelling() {
         "python -c 'import shutil'",
     ] {
         let d = judge(&mut host, cmd);
-        assert!(matches!(d, ToolDecision::Ask { .. }), "{cmd}: {d:?}");
+        assert!(matches!(d, Outcome::Ask { .. }), "{cmd}");
     }
 }
 
@@ -196,21 +197,21 @@ fn guard_asks_before_a_write_that_decides_what_runs_next() {
     let Some(mut host) = host_with(&mut stack, &["guard"]) else {
         return;
     };
-    let (d, _) = host.before_tool(
+    let d = host.before_tool(
         &ToolCall::new("1", "write_file", r#"{"path":"~/.bashrc","content":"x"}"#),
         ".",
     );
-    assert!(matches!(d, ToolDecision::Ask { .. }), "{d:?}");
-    let (d, _) = host.before_tool(
+    assert!(matches!(d.outcome, Outcome::Ask { .. }));
+    let d = host.before_tool(
         &ToolCall::new("2", "write_file", r#"{"path":".git/hooks/pre-commit"}"#),
         ".",
     );
-    assert!(matches!(d, ToolDecision::Ask { .. }), "{d:?}");
-    let (d, _) = host.before_tool(
+    assert!(matches!(d.outcome, Outcome::Ask { .. }));
+    let d = host.before_tool(
         &ToolCall::new("3", "write_file", r#"{"path":"src/main.rs"}"#),
         ".",
     );
-    assert!(matches!(d, ToolDecision::Allow), "{d:?}");
+    assert!(matches!(d.outcome, Outcome::Run));
 }
 
 #[test]
@@ -221,8 +222,8 @@ fn a_bash_call_the_policy_cannot_read_is_not_a_free_pass() {
     };
     // No `command` key at all: nothing for a rule to match, which under a
     // policy that answers "allow" when it finds no match would run.
-    let (d, _) = host.before_tool(&ToolCall::new("1", "bash", r#"{"cmd":"rm -rf /"}"#), ".");
-    assert!(matches!(d, ToolDecision::Ask { .. }), "{d:?}");
+    let d = host.before_tool(&ToolCall::new("1", "bash", r#"{"cmd":"rm -rf /"}"#), ".");
+    assert!(matches!(d.outcome, Outcome::Ask { .. }));
 }
 
 #[test]

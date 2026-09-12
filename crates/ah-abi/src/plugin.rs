@@ -24,6 +24,18 @@ pub struct Manifest {
     pub commands: Vec<SlashCommandSpec>,
     /// Static settings patch applied at load, before `on_load` runs.
     pub settings_patch: Option<Value>,
+    /// Where this plugin sits in the hook chain. Lower runs first; plugins
+    /// with the same order keep their load order, which is by name.
+    ///
+    /// The number matters because a plugin that rewrites a tool call and a
+    /// plugin that judges one are not interchangeable in sequence: a rewrite
+    /// after a judgement means the thing that was judged is not the thing that
+    /// runs. Rewriters take a negative order, policies a positive one, and
+    /// everything that does neither can leave it at zero. Before this existed
+    /// the order was the file names' alphabet, so renaming `policy.wasm` to
+    /// `zz-policy.wasm` changed what the policy saw.
+    #[serde(default)]
+    pub order: i32,
 }
 
 impl Default for Manifest {
@@ -37,6 +49,7 @@ impl Default for Manifest {
             tools: Vec::new(),
             commands: Vec::new(),
             settings_patch: None,
+            order: 0,
         }
     }
 }

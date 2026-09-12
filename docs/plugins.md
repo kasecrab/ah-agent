@@ -224,6 +224,7 @@ in_len) -> i32` (result length, negative on error) and `host_read(dst, cap)
 | `tools` | `ToolSpec` entries (OpenAI function shape: name, description, JSON schema) added to the model's tool list; calls arrive through the `tool_call` hook |
 | `commands` | slash commands (`name`, `description`, `usage`) routed to `slash_command` |
 | `settings_patch` | merge patch applied at load, before `on_load` |
+| `order` | where in the hook chain this plugin runs; lower first, default `0` |
 
 ## Hooks
 
@@ -261,11 +262,24 @@ so instead of applying it.
 {"decision": "ask", "reason": "confirm this one even in auto mode"}
 ```
 
-Every plugin with the hook is consulted in load order. A deny stops the chain
-at once; a replace feeds the new arguments to the next plugin; an ask is kept
-unless a replace was already chosen. Built-in `permissions.deny` rules are
-checked after the plugins, on the final arguments, and a plugin cannot lift
-them.
+Every plugin with the hook is consulted in `order`, lowest first, and plugins
+that name the same order run in the order they were found. Set it in the
+manifest: rewriters negative, policies positive, everything else zero. Before
+`order` existed the sequence was the alphabet of the file names, so renaming
+`policy.wasm` to `zz-policy.wasm` changed what the policy saw.
+
+A deny stops the chain at once. A replace feeds the new arguments to the next
+plugin. An ask is sticky: once any plugin has asked, only a deny changes that
+— a replace cannot erase it, and an ask raised after a replace is still an ask.
+
+A replace that lands after another plugin has already answered turns the call
+into an ask, naming both plugins. What that earlier plugin approved is not what
+would run, and nothing downstream could tell the difference. Give your
+rewriters a negative `order` and they run before anything has judged, so this
+does not come up.
+
+Built-in `permissions.deny` rules are checked after the plugins, on the final
+arguments, and a plugin cannot lift them.
 
 ### Pickers
 

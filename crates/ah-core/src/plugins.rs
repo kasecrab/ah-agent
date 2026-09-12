@@ -146,7 +146,18 @@ impl PluginHost {
         for f in discover(settings, cwd) {
             host.load_file(&f, settings, settings_value, cwd);
         }
+        host.order();
         host
+    }
+
+    /// Put the plugins in the order their manifests asked for.
+    ///
+    /// A stable sort, so plugins that name the same order keep the one they
+    /// were found in. This is what decides which plugin sees a tool call
+    /// first, and before a manifest could say so it was decided by the
+    /// alphabet of the file names — renaming a file changed the policy.
+    pub fn order(&mut self) {
+        self.plugins.sort_by_key(|p| p.manifest.order);
     }
 
     pub fn load_file(
@@ -661,6 +672,79 @@ pub enum Called<O> {
     Failed(String),
 }
 
+/// The running state of a `before_tool` chain.
+///
+/// Two rules hold it together.
+///
+/// A question is sticky: once any plugin has asked, nothing but a refusal
+/// changes that. A rewrite used to overwrite an earlier `ask` and a later
+/// `ask` used to be dropped once a rewrite had happened, so any no-op rewrite
+/// anywhere in the chain silenced every question every other plugin raised.
+///
+/// A rewrite that lands after somebody has already judged the call turns the
+/// whole thing into a question, naming both plugins — because what that
+/// earlier plugin approved is no longer what would run, and nothing else in
+/// this program would notice the difference. Give the rewriters a negative
+/// `order` in their manifest and they run before anything judges, and this
+/// never fires.
+#[derive(Default)]
+struct Chain {
+    arguments: Option<String>,
+    ask: Option<String>,
+    /// Plugins that have answered about the arguments as they stood then.
+    judged: Vec<String>,
+    patches: crate::agent::Patches,
+}
+
+impl Chain {
+    /// Fold one plugin's answer in. `Some(reason)` means the chain stops here.
+    fn step(&mut self, name: String, decision: ToolDecision) -> Option<String> {
+        match decision {
+            ToolDecision::Allow => self.judged.push(name),
+            ToolDecision::Deny { reason } => return Some(reason),
+            ToolDecision::Replace { arguments } => {
+                if !self.judged.is_empty() && self.ask.is_none() {
+                    self.ask = Some(format!(
+                        "the {name} plugin rewrote this call after {} had already looked at it, \
+                         so what was approved is not what would run",
+                        self.judged.join(", ")
+                    ));
+                }
+                self.arguments = Some(arguments);
+                self.judged.clear();
+                self.judged.push(name);
+            }
+            ToolDecision::Ask { reason } => {
+                self.judged.push(name);
+                if self.ask.is_none() {
+                    self.ask = Some(reason);
+                }
+            }
+        }
+        None
+    }
+
+    fn refused(self, reason: String) -> crate::agent::Chained {
+        crate::agent::Chained {
+            arguments: self.arguments,
+            outcome: crate::agent::Outcome::Refuse { reason },
+            patches: self.patches,
+        }
+    }
+
+    fn done(self) -> crate::agent::Chained {
+        let outcome = match self.ask {
+            Some(reason) => crate::agent::Outcome::Ask { reason },
+            None => crate::agent::Outcome::Run,
+        };
+        crate::agent::Chained {
+            arguments: self.arguments,
+            outcome,
+            patches: self.patches,
+        }
+    }
+}
+
 impl<O> Called<O> {
     /// The answer, if there was one. For every hook but the policy one, a
     /// failure and a "no change" mean the same thing to the caller.
@@ -833,13 +917,15 @@ impl Hooks for PluginHost {
         cur.request
     }
 
-    fn before_tool(&mut self, call: &ToolCall, cwd: &str) -> (ToolDecision, crate::agent::Patches) {
+    /// Every plugin that handles `before_tool`, in order, on a call each of
+    /// them may rewrite and any of them may refuse. See `Chain` for the two
+    /// rules that hold the sequence together.
+    fn before_tool(&mut self, call: &ToolCall, cwd: &str) -> crate::agent::Chained {
         let mut input = BeforeToolIn {
             call: call.clone(),
             cwd: cwd.into(),
         };
-        let mut decision = ToolDecision::Allow;
-        let mut patches = Vec::new();
+        let mut chain = Chain::default();
         for p in &mut self.plugins {
             let name = p.manifest.name.clone();
             let r = match p.call_typed::<_, BeforeToolOut>(Hook::BeforeTool, &input) {
@@ -850,32 +936,20 @@ impl Hooks for PluginHost {
                 // handle, so treating a failure as an allow would mean the one
                 // command a policy chokes on is the one command it lets past.
                 Called::Failed(why) => {
-                    return (
-                        ToolDecision::Deny {
-                            reason: format!("the {name} plugin could not decide: {why}"),
-                        },
-                        patches,
-                    );
+                    return chain.refused(format!("the {name} plugin could not decide: {why}"));
                 }
             };
             if let Some(v) = r.settings_patch {
-                patches.push((name, v));
+                chain.patches.push((name.clone(), v));
             }
-            match r.decision {
-                ToolDecision::Allow => {}
-                ToolDecision::Deny { reason } => return (ToolDecision::Deny { reason }, patches),
-                ToolDecision::Replace { arguments } => {
-                    input.call.function.arguments = arguments.clone();
-                    decision = ToolDecision::Replace { arguments };
-                }
-                ToolDecision::Ask { reason } => {
-                    if !matches!(decision, ToolDecision::Replace { .. }) {
-                        decision = ToolDecision::Ask { reason };
-                    }
-                }
+            if let Some(reason) = chain.step(name, r.decision) {
+                return chain.refused(reason);
+            }
+            if let Some(a) = &chain.arguments {
+                input.call.function.arguments = a.clone();
             }
         }
-        (decision, patches)
+        chain.done()
     }
 
     fn after_tool(
@@ -1162,6 +1236,112 @@ pub mod cache {
             let cache = d.join("cache.json");
             std::fs::write(&cache, "{ half a fi").unwrap();
             assert!(read_at(&cache, &s, &v, "/repo").is_none());
+        }
+    }
+}
+
+#[cfg(test)]
+mod chain_tests {
+    use super::*;
+    use crate::agent::Outcome;
+
+    fn ask(r: &str) -> ToolDecision {
+        ToolDecision::Ask {
+            reason: r.to_string(),
+        }
+    }
+    fn replace(a: &str) -> ToolDecision {
+        ToolDecision::Replace {
+            arguments: a.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_rewrite_does_not_silence_a_question_somebody_else_asked() {
+        let mut c = Chain::default();
+        assert!(c.step("policy".into(), ask("force push")).is_none());
+        assert!(
+            c.step("tidy".into(), replace("{\"command\":\"ls\"}"))
+                .is_none()
+        );
+        let out = c.done();
+        assert_eq!(out.arguments.as_deref(), Some("{\"command\":\"ls\"}"));
+        match out.outcome {
+            Outcome::Ask { reason } => assert_eq!(reason, "force push"),
+            _ => panic!("the rewrite ate the question"),
+        }
+    }
+
+    #[test]
+    fn a_question_after_a_rewrite_is_still_a_question() {
+        let mut c = Chain::default();
+        assert!(c.step("tidy".into(), replace("{}")).is_none());
+        assert!(c.step("policy".into(), ask("force push")).is_none());
+        match c.done().outcome {
+            Outcome::Ask { reason } => assert_eq!(reason, "force push"),
+            _ => panic!("the question was dropped"),
+        }
+    }
+
+    #[test]
+    fn a_rewrite_after_a_judgement_is_put_to_the_person() {
+        let mut c = Chain::default();
+        // The policy looked at the original arguments and was content.
+        assert!(c.step("policy".into(), ToolDecision::Allow).is_none());
+        // Then somebody else changed them.
+        assert!(
+            c.step("tidy".into(), replace("{\"command\":\"rm -rf /\"}"))
+                .is_none()
+        );
+        match c.done().outcome {
+            Outcome::Ask { reason } => {
+                assert!(reason.contains("tidy"), "{reason}");
+                assert!(reason.contains("policy"), "{reason}");
+            }
+            _ => panic!("a rewrite slipped past a plugin that had already approved"),
+        }
+    }
+
+    #[test]
+    fn a_rewrite_before_anything_has_judged_is_just_a_rewrite() {
+        let mut c = Chain::default();
+        assert!(
+            c.step("tidy".into(), replace("{\"command\":\"ls\"}"))
+                .is_none()
+        );
+        assert!(c.step("policy".into(), ToolDecision::Allow).is_none());
+        let out = c.done();
+        assert!(matches!(out.outcome, Outcome::Run));
+        assert_eq!(out.arguments.as_deref(), Some("{\"command\":\"ls\"}"));
+    }
+
+    #[test]
+    fn a_refusal_stops_the_chain_and_keeps_the_rewrite_it_was_judging() {
+        let mut c = Chain::default();
+        assert!(
+            c.step("tidy".into(), replace("{\"command\":\"ls /\"}"))
+                .is_none()
+        );
+        let stop = c.step(
+            "policy".into(),
+            ToolDecision::Deny {
+                reason: "no".into(),
+            },
+        );
+        assert_eq!(stop.as_deref(), Some("no"));
+        let out = c.refused(stop.unwrap());
+        assert!(matches!(out.outcome, Outcome::Refuse { .. }));
+        assert_eq!(out.arguments.as_deref(), Some("{\"command\":\"ls /\"}"));
+    }
+
+    #[test]
+    fn the_first_question_is_the_one_reported() {
+        let mut c = Chain::default();
+        assert!(c.step("a".into(), ask("first")).is_none());
+        assert!(c.step("b".into(), ask("second")).is_none());
+        match c.done().outcome {
+            Outcome::Ask { reason } => assert_eq!(reason, "first"),
+            _ => panic!(),
         }
     }
 }

@@ -350,6 +350,36 @@ pub trait Mailbox: Send + Sync {
 /// Settings patches a hook returned, each with the plugin that returned it.
 pub type Patches = Vec<(String, Value)>;
 
+/// What the whole `before_tool` chain came to.
+///
+/// Not a `ToolDecision`: one plugin answers with one of those, and the chain
+/// has to carry two things at once — the arguments to run with, which a plugin
+/// may have rewritten, and whether the call runs at all. Folding them into one
+/// value is how a rewrite came to erase a question somebody else had asked.
+pub struct Chained {
+    /// The arguments to run with, when a plugin rewrote them.
+    pub arguments: Option<String>,
+    pub outcome: Outcome,
+    pub patches: Patches,
+}
+
+/// Whether a call runs, is refused, or is put to the person first.
+pub enum Outcome {
+    Run,
+    Refuse { reason: String },
+    Ask { reason: String },
+}
+
+impl Chained {
+    fn run(patches: Patches) -> Self {
+        Self {
+            arguments: None,
+            outcome: Outcome::Run,
+            patches,
+        }
+    }
+}
+
 pub trait Hooks {
     fn system_prompt(&mut self, input: SystemPromptIn) -> String {
         input.prompt
@@ -357,8 +387,8 @@ pub trait Hooks {
     fn before_request(&mut self, req: ChatRequest, _turn: u32) -> ChatRequest {
         req
     }
-    fn before_tool(&mut self, _call: &ToolCall, _cwd: &str) -> (ToolDecision, Patches) {
-        (ToolDecision::Allow, Vec::new())
+    fn before_tool(&mut self, _call: &ToolCall, _cwd: &str) -> Chained {
+        Chained::run(Vec::new())
     }
     fn after_tool(
         &mut self,
@@ -1045,8 +1075,8 @@ impl<'a> Agent<'a> {
     /// Hooks, deny rules and the permission prompt, before anything runs.
     fn gate_tool(&mut self, call: &ToolCall, cwd: &str, io: &dyn AgentIo) -> Gate {
         let mut call = call.clone();
-        let (decision, patches) = self.hooks.before_tool(&call, cwd);
-        for (plugin, patch) in patches {
+        let chained = self.hooks.before_tool(&call, cwd);
+        for (plugin, patch) in chained.patches {
             io.emit(AgentEvent::SettingsPatch { plugin, patch });
         }
         let mut must_ask = self.settings.permissions.mode == PermissionMode::Ask
@@ -1056,17 +1086,23 @@ impl<'a> Agent<'a> {
                 .ask_for
                 .contains(&call.function.name);
         let mut ask_reason = String::new();
-        match decision {
-            ToolDecision::Allow => {}
-            ToolDecision::Deny { reason } => {
+        // The arguments a plugin rewrote are the ones everything after this
+        // point sees: the deny rules, the prompt, and the tool itself. A
+        // rewrite and a question are no longer one answer, so a rewritten call
+        // can still be put to the person.
+        if let Some(arguments) = chained.arguments {
+            call.function.arguments = arguments;
+        }
+        match chained.outcome {
+            Outcome::Run => {}
+            Outcome::Refuse { reason } => {
                 io.emit(AgentEvent::ToolDenied {
                     call,
                     reason: reason.clone(),
                 });
                 return Gate::Refused(ToolResult::err(format!("denied by policy: {reason}")));
             }
-            ToolDecision::Replace { arguments } => call.function.arguments = arguments,
-            ToolDecision::Ask { reason } => {
+            Outcome::Ask { reason } => {
                 must_ask = true;
                 ask_reason = reason;
             }
