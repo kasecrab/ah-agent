@@ -320,7 +320,12 @@ fn tools_bytes(tools: &[ToolSpec]) -> usize {
 pub trait AgentIo: Sync {
     fn emit(&self, ev: AgentEvent);
     /// Blocking permission prompt. Return `false` to deny.
-    fn ask_permission(&self, call: &ToolCall, reason: &str) -> bool;
+    /// Put a tool call to the person. `standing` is true when this is the
+    /// ordinary "may this tool run" question, which a blanket yes for the tool
+    /// may answer; false when the question is about this call in particular —
+    /// a policy plugin's, or a write to a file that decides what runs next —
+    /// and has to be put every time.
+    fn ask_permission(&self, call: &ToolCall, reason: &str, standing: bool) -> bool;
     /// Put the `ask_user` tool's questions to the user and block until they
     /// answer. A driver with nobody at a keyboard leaves this alone.
     fn ask_user(&self, _ask: &Ask) -> Reply {
@@ -1086,6 +1091,10 @@ impl<'a> Agent<'a> {
                 .ask_for
                 .contains(&call.function.name);
         let mut ask_reason = String::new();
+        // Whether a blanket yes for this tool may answer the question. A
+        // question about this call in particular is a different question each
+        // time it is put.
+        let mut standing = true;
         // The arguments a plugin rewrote are the ones everything after this
         // point sees: the deny rules, the prompt, and the tool itself. A
         // rewrite and a question are no longer one answer, so a rewritten call
@@ -1105,6 +1114,7 @@ impl<'a> Agent<'a> {
             Outcome::Ask { reason } => {
                 must_ask = true;
                 ask_reason = reason;
+                standing = false;
             }
         }
         if call.function.name == "bash"
@@ -1151,8 +1161,24 @@ impl<'a> Agent<'a> {
         if let Some(what) = writes_its_own_rules(&call, cwd) {
             must_ask = true;
             ask_reason = what;
+            standing = false;
         }
-        if must_ask && !io.ask_permission(&call, &ask_reason) {
+        // Approving a command is approving it to run, and a command that
+        // outlasts the tool timeout is not stopped — it is relabelled a job and
+        // kept until this program exits or the model kills it. That is a
+        // different thing from what was agreed to, so it is said before the
+        // agreeing rather than reported after it.
+        if must_ask
+            && call.function.name == "bash"
+            && self.settings.tools.background_on_timeout
+            && ask_reason.is_empty()
+        {
+            ask_reason = format!(
+                "if it is still running after {} ms it keeps running in the background as a job,                  past the end of this turn",
+                self.settings.tools.bash_timeout_ms
+            );
+        }
+        if must_ask && !io.ask_permission(&call, &ask_reason, standing) {
             io.emit(AgentEvent::ToolDenied {
                 call,
                 reason: "user declined".into(),
@@ -1519,7 +1545,7 @@ pub mod test_support {
         fn emit(&self, ev: AgentEvent) {
             self.events.lock().unwrap().push(ev);
         }
-        fn ask_permission(&self, _call: &ToolCall, _reason: &str) -> bool {
+        fn ask_permission(&self, _call: &ToolCall, _reason: &str, _standing: bool) -> bool {
             self.allow
         }
         fn ask_user(&self, ask: &Ask) -> Reply {

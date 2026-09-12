@@ -179,6 +179,10 @@ pub enum UiEvent {
         id: u64,
         call: ToolCall,
         reason: String,
+        /// Whether a blanket yes for this tool may answer it. False for a
+        /// question about this call in particular, which is a different
+        /// question every time it is put.
+        standing: bool,
     },
     /// The `ask_user` tool wants an answer. The turn is stopped until one is
     /// sent back down the answer channel.
@@ -740,7 +744,7 @@ impl AgentIo for ChannelIo {
     fn emit(&self, ev: AgentEvent) {
         let _ = self.tx.send(UiEvent::Agent(ev));
     }
-    fn ask_permission(&self, call: &ToolCall, reason: &str) -> bool {
+    fn ask_permission(&self, call: &ToolCall, reason: &str, standing: bool) -> bool {
         let rx = lock(&self.perm_rx);
         let id = self.next_prompt.fetch_add(1, Ordering::Relaxed);
         // Anything left from an earlier prompt goes before this one is asked;
@@ -752,6 +756,7 @@ impl AgentIo for ChannelIo {
                 id,
                 call: call.clone(),
                 reason: reason.into(),
+                standing,
             })
             .is_err()
         {
@@ -1010,7 +1015,7 @@ mod tests {
                 self.0.lock().unwrap().push(n);
             }
         }
-        fn ask_permission(&self, _call: &ToolCall, _reason: &str) -> bool {
+        fn ask_permission(&self, _call: &ToolCall, _reason: &str, _standing: bool) -> bool {
             false
         }
     }

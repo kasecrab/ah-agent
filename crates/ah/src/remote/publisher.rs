@@ -254,7 +254,9 @@ impl Publisher {
             UiEvent::Agent(ev) => ev,
             // A question is waiting on somebody, so it does not wait for a
             // batch.
-            UiEvent::AskPermission { id, call, reason } => {
+            UiEvent::AskPermission {
+                id, call, reason, ..
+            } => {
                 lock(&self.shared.pending).insert(session.to_string(), *id);
                 return self.ahead(FromDesk::AskPermission {
                     session: session.to_string(),

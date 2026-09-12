@@ -284,7 +284,7 @@ impl AgentIo for Io {
     fn emit(&self, ev: AgentEvent) {
         self.0.lock().unwrap().push(ev);
     }
-    fn ask_permission(&self, _c: &ToolCall, _r: &str) -> bool {
+    fn ask_permission(&self, _c: &ToolCall, _r: &str, _s: bool) -> bool {
         true
     }
 }

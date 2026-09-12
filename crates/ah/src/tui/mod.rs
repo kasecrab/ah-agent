@@ -345,7 +345,7 @@ struct App {
     /// How many settings refusals have already been put in the transcript, so
     /// a reload does not say the same ones again.
     refusals_said: usize,
-    pending_perm: Option<(u64, ToolCall, String)>,
+    pending_perm: Option<(u64, ToolCall, String, bool)>,
     /// The question the `ask_user` tool put on screen, while it is unanswered.
     ask: Option<ask::View>,
     /// Which question `ask` is showing, so an answer from somewhere else takes
@@ -3314,16 +3314,21 @@ impl App {
                     let _ = self.ask_tx.send(Reply::Dismissed);
                 }
             },
-            UiEvent::AskPermission { id, call, reason } => {
+            UiEvent::AskPermission {
+                id,
+                call,
+                reason,
+                standing,
+            } => {
                 // "Always allow bash" is an answer about ordinary bash calls,
                 // not a standing yes to everything anybody ever says about
-                // one. A question that came with a reason came from a policy
-                // plugin or from a rule about the file being written, and that
-                // is a different question every time — it is always drawn.
-                if reason.is_empty() && self.always_allow.contains(&call.function.name) {
+                // one. A question a policy plugin raised, or one about writing
+                // the file that decides what runs next, is a different
+                // question every time — it is always drawn.
+                if standing && self.always_allow.contains(&call.function.name) {
                     let _ = self.perm_tx.send(true);
                 } else {
-                    self.pending_perm = Some((id, call, reason));
+                    self.pending_perm = Some((id, call, reason, standing));
                     self.dirty = true;
                 }
             }
@@ -4493,11 +4498,12 @@ impl App {
             }
         }
 
-        if let Some((_, call, reason)) = &self.pending_perm {
+        if let Some((_, call, _, standing)) = &self.pending_perm {
             let name = call.function.name.clone();
-            // A question with a reason is not one "always" can answer: see
-            // `UiEvent::AskPermission`. Pressing it says yes to this one call.
-            let standing = reason.is_empty();
+            // A question about this call in particular is not one "always" can
+            // answer: see `UiEvent::AskPermission`. Pressing it there says yes
+            // to this one call.
+            let standing = *standing;
             match k.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
                     self.pending_perm = None;
@@ -5195,7 +5201,7 @@ impl App {
         if !self.queue.is_empty() {
             self.draw_queue(f, queue_area, &pal, layout.paste_collapse_lines);
         }
-        if let Some((_, call, reason)) = &self.pending_perm {
+        if let Some((_, call, reason, standing)) = &self.pending_perm {
             let block = pal.block(true).title(" permission ");
             let inner = block.inner(perm_area);
             f.render_widget(Clear, perm_area);
@@ -5213,7 +5219,7 @@ impl App {
                     },
                     pal.dim(),
                 )),
-                if reason.is_empty() {
+                if *standing {
                     Line::from(vec![
                         Span::styled("[y]", pal.bold(pal.accent)),
                         Span::raw(" yes  "),
@@ -5223,8 +5229,8 @@ impl App {
                         Span::raw(" always this session"),
                     ])
                 } else {
-                    // No "always" on this one: a question that came with a
-                    // reason is a different question every time it is put.
+                    // No "always" on this one: it is a different question
+                    // every time it is put.
                     Line::from(vec![
                         Span::styled("[y]", pal.bold(pal.accent)),
                         Span::raw(" yes  "),

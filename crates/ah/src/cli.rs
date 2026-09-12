@@ -213,7 +213,7 @@ impl AgentIo for PrintIo {
         Reply::Answered { answers }
     }
 
-    fn ask_permission(&self, call: &ToolCall, reason: &str) -> bool {
+    fn ask_permission(&self, call: &ToolCall, reason: &str, _standing: bool) -> bool {
         // Whether this call needed asking about was decided before the
         // question reached here. A plugin's `ask`, and the prompt for a write
         // to a file that decides what runs next, are raised in every mode — so

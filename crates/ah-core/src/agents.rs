@@ -786,7 +786,7 @@ impl AgentIo for ChildIo {
 
     /// A child never interrupts the user: what it may do was settled when its
     /// type was written.
-    fn ask_permission(&self, _call: &ah_abi::ToolCall, _reason: &str) -> bool {
+    fn ask_permission(&self, _call: &ah_abi::ToolCall, _reason: &str, _standing: bool) -> bool {
         false
     }
 }
