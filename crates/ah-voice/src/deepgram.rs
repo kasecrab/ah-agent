@@ -217,6 +217,12 @@ const HANDSHAKE: Duration = Duration::from_secs(5);
 const CLOSING: Duration = Duration::from_millis(150);
 /// Deepgram drops a silent socket; this is well inside that.
 const KEEPALIVE: Duration = Duration::from_secs(5);
+/// Largest message this socket will take in. What Deepgram sends is a
+/// transcript and the words it is made of, which is kilobytes; tungstenite's
+/// own default is 64 MiB, which is a great deal of memory to hold on the word
+/// of the far end. A message larger than this ends the connection, and the
+/// loop dials again.
+const MAX_MESSAGE: usize = 1024 * 1024;
 /// After a failure, wait this long before dialling again, doubling to a cap.
 const BACKOFF_MIN: Duration = Duration::from_millis(400);
 const BACKOFF_MAX: Duration = Duration::from_secs(16);
@@ -485,8 +491,16 @@ fn connect(
     let _ = sock.set_write_timeout(Some(HANDSHAKE));
 
     let connector = tungstenite::Connector::Rustls(tls_config());
-    let (ws, _resp) = tungstenite::client_tls_with_config(request, sock, None, Some(connector))
-        .map_err(|e| Error::Connect(describe(e)))?;
+    // Both bounds, not just the message one: a frame is read whole before the
+    // message it belongs to is measured, so leaving the frame limit at its
+    // 16 MiB default would let one frame be held in full before anything
+    // objected to it.
+    let config = tungstenite::protocol::WebSocketConfig::default()
+        .max_message_size(Some(MAX_MESSAGE))
+        .max_frame_size(Some(MAX_MESSAGE));
+    let (ws, _resp) =
+        tungstenite::client_tls_with_config(request, sock, Some(config), Some(connector))
+            .map_err(|e| Error::Connect(describe(e)))?;
     if stopping.load(Ordering::Acquire) {
         return Err(Error::Stopped);
     }
@@ -607,10 +621,21 @@ mod json {
         }
     }
 
+    /// How deeply a message may nest before it is refused. A `Results`
+    /// message reaches six levels — the message, `channel`, `alternatives`,
+    /// the first alternative, `words`, a word — and `Metadata` reaches four,
+    /// so this is five times what Deepgram actually sends. What it is really
+    /// for is the other direction: every level of nesting is a native stack
+    /// frame here, and a peer that sends nothing but opening brackets would
+    /// otherwise walk the socket thread's stack off its end, which is not a
+    /// panic that can be caught but an abort that takes the whole harness
+    /// with it.
+    const MAX_DEPTH: usize = 32;
+
     pub fn parse(text: &str) -> Option<Value> {
         let b = text.as_bytes();
         let mut i = 0;
-        let v = value(b, &mut i)?;
+        let v = value(b, &mut i, 0)?;
         Some(v)
     }
 
@@ -620,11 +645,14 @@ mod json {
         }
     }
 
-    fn value(b: &[u8], i: &mut usize) -> Option<Value> {
+    fn value(b: &[u8], i: &mut usize, depth: usize) -> Option<Value> {
+        if depth > MAX_DEPTH {
+            return None;
+        }
         ws(b, i);
         match *b.get(*i)? {
-            b'{' => object(b, i),
-            b'[' => array(b, i),
+            b'{' => object(b, i, depth),
+            b'[' => array(b, i, depth),
             b'"' => string(b, i).map(Value::Str),
             b't' => lit(b, i, b"true", Value::Bool(true)),
             b'f' => lit(b, i, b"false", Value::Bool(false)),
@@ -716,7 +744,7 @@ mod json {
         }
     }
 
-    fn array(b: &[u8], i: &mut usize) -> Option<Value> {
+    fn array(b: &[u8], i: &mut usize, depth: usize) -> Option<Value> {
         *i += 1;
         let mut out = Vec::new();
         ws(b, i);
@@ -725,7 +753,7 @@ mod json {
             return Some(Value::Arr(out));
         }
         loop {
-            out.push(value(b, i)?);
+            out.push(value(b, i, depth + 1)?);
             ws(b, i);
             match *b.get(*i)? {
                 b',' => *i += 1,
@@ -738,7 +766,7 @@ mod json {
         }
     }
 
-    fn object(b: &[u8], i: &mut usize) -> Option<Value> {
+    fn object(b: &[u8], i: &mut usize, depth: usize) -> Option<Value> {
         *i += 1;
         let mut out = Vec::new();
         ws(b, i);
@@ -754,7 +782,7 @@ mod json {
                 return None;
             }
             *i += 1;
-            out.push((k, value(b, i)?));
+            out.push((k, value(b, i, depth + 1)?));
             ws(b, i);
             match *b.get(*i)? {
                 b',' => *i += 1,
@@ -822,6 +850,27 @@ mod tests {
             parse(t),
             vec![Event::Final("café \"quoted\" and 😀".into())]
         );
+    }
+
+    /// A frame that is nothing but opening brackets used to walk the socket
+    /// thread's stack off its end, which aborts the whole process rather than
+    /// failing one message.
+    #[test]
+    fn a_message_nested_past_all_reason_is_refused_rather_than_followed() {
+        assert!(json::parse(&"[".repeat(100_000)).is_none());
+        assert!(json::parse(&"{\"a\":".repeat(100_000)).is_none());
+        assert!(parse(&"[".repeat(100_000)).is_empty());
+    }
+
+    /// The depth a real message reaches is nowhere near the limit, and the
+    /// limit is not allowed to creep down onto it.
+    #[test]
+    fn the_nesting_a_real_message_has_still_parses() {
+        // `Results` is the deepest message Deepgram sends, and the limit sits
+        // five times further out than the deepest nesting worth allowing.
+        assert!(json::parse(RESULT).is_some());
+        let nested = format!("{}1{}", "[".repeat(30), "]".repeat(30));
+        assert!(json::parse(&nested).is_some());
     }
 
     #[test]
