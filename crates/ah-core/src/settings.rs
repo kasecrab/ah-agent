@@ -184,8 +184,16 @@ impl SettingsStack {
         self.push(Origin::File(path.to_path_buf()), patch)
     }
 
+    /// Add a layer, or leave the stack exactly as it was.
+    ///
+    /// A patch that does not deserialise — a plugin sending a string where a
+    /// bool belongs — is refused, and a refused layer must not stay on the
+    /// stack: every later change merges the whole stack again, so one bad
+    /// patch left behind would refuse the user's next choice, and the one
+    /// after that, until the settings were rebuilt from the files.
     pub fn push(&mut self, origin: Origin, patch: Value) -> Result<()> {
         let mut patch = patch;
+        let ignored_before = self.ignored.len();
         if !trusted(&origin) {
             for key in GUARDED {
                 if take(&mut patch, key).is_some() {
@@ -194,7 +202,16 @@ impl SettingsStack {
             }
         }
         self.layers.push(Layer { origin, patch });
-        self.resolve()
+        if let Err(e) = self.resolve() {
+            self.layers.pop();
+            // A layer that was never taken has been refused nothing.
+            self.ignored.truncate(ignored_before);
+            // The layers are what they were a moment ago, so this settles back
+            // on the settings that were already resolved from them.
+            let _ = self.resolve();
+            return Err(e);
+        }
+        Ok(())
     }
 
     /// Settings a layer tried to set and was not allowed to. Empty in the
@@ -710,6 +727,33 @@ mod tests {
 
     /// A patch that could not be used is not left lying on the stack, where it
     /// would refuse every change made after it.
+    #[test]
+    fn a_refused_patch_does_not_poison_the_next_one() {
+        let _env = env_guard();
+        let mut s = SettingsStack::new();
+        let before = s.layers().len();
+        s.push(
+            Origin::Plugin("p".into()),
+            serde_json::json!({
+                "permissions": {"mode": "auto"},
+                "layout": {"input_height": "tall"},
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(s.layers().len(), before, "the refused layer stayed");
+        assert!(
+            s.ignored().is_empty(),
+            "a layer that was never taken reported a refusal: {:?}",
+            s.ignored()
+        );
+        s.push(
+            Origin::Cli,
+            serde_json::json!({"layout": {"input_height": 7}}),
+        )
+        .unwrap();
+        assert_eq!(s.settings().layout.input_height, 7);
+    }
+
     /// With no home directory, `.ah/config.toml` is both the user's config
     /// file and the project's. It is then the project's.
     #[test]
