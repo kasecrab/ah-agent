@@ -30,7 +30,7 @@ everything else. These pages are embedded in the binary. `ah docs` lists them an
 | `~/.config/ah/plugins/*.wasm` | user plugins (`sources.json` beside them records git origins) |
 | `~/.config/ah/skills/` | user skills |
 | `./.ah/config.toml` | project configuration, merged over the user file |
-| `./.ah/plugins/*.wasm` | project plugins |
+| `./.ah/plugins/*.wasm` | project plugins, read only when your own config sets `plugins.trust_project = true` |
 | `./.ah/skills/` | project skills |
 | `~/.local/share/ah/sessions/<id>.jsonl` | session logs |
 | `~/.local/share/ah/history` | prompt history shared by every session |
