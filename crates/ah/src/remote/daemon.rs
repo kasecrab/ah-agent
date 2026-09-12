@@ -543,7 +543,12 @@ pub fn serve(o: &Overrides, detach: bool, sudo: bool) -> Result<(), AnyError> {
 
     while !cancel.load(Ordering::Relaxed) {
         if publisher.is_none() {
-            publisher = publisher::start(
+            // Taken only when nothing else has it and nobody is waiting for
+            // it. A daemon that asked for the pairing the way a window does
+            // would take it straight back off the window it had just stood
+            // down for, and the two would trade it until one of them lost the
+            // race for good.
+            publisher = publisher::start_when_free(
                 &settings_for_publisher,
                 machine.clone() as Arc<dyn Sessions>,
                 notes_tx.clone(),
@@ -584,22 +589,23 @@ pub fn serve(o: &Overrides, detach: bool, sudo: bool) -> Result<(), AnyError> {
                     }
                 }
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                // A publisher that stood down for a window leaves its thread,
-                // and the yield file it stood down for is deleted a few
-                // seconds later — so what to look at is the thread having
-                // ended, not the file that asked it to. Watching the file
-                // meant a handover that took longer than the window's patience
-                // left the daemon holding a publisher nothing was draining.
-                if publisher
-                    .as_ref()
-                    .is_some_and(|p| p.finished() || matches!(p.state(), publisher::State::Failed))
-                {
-                    publisher = None;
-                    said = None;
-                }
-            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+
+        // A publisher that stood down for a window leaves its thread, so what
+        // to look at is the thread having ended rather than anything on disk.
+        // Looked at on every turn of the loop and not only on a quiet one:
+        // the window that asked waits a few seconds and then gives up, and a
+        // session that is busy talking would otherwise keep this arm from
+        // running at all — a hand-over that failed because the machine was
+        // doing something is the worst possible time for it to fail.
+        if publisher
+            .as_ref()
+            .is_some_and(|p| p.finished() || matches!(p.state(), publisher::State::Failed))
+        {
+            publisher = None;
+            said = None;
         }
     }
 

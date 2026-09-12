@@ -29,7 +29,7 @@ use ah_remote::zeroize::Zeroizing;
 use serde_json::Value;
 
 use crate::app::UiEvent;
-use crate::remote::lock::Lock;
+use crate::remote::lock::{Claim, Lock};
 use crate::remote::sessions::{self, Act, Sessions};
 
 /// How often the thread looks at what has gathered.
@@ -171,11 +171,46 @@ struct Batch {
 /// Start publishing if everything it needs is in place: a pairing, a relay to
 /// reach it through, the setting turned on, and nothing else already doing
 /// it. Any of those missing is an ordinary `None`.
+///
+/// This is what a window calls, and a window asks for the pairing: a daemon
+/// may be holding it, and a window opening is the one thing a daemon stands
+/// down for.
 pub fn start(
     settings: &ah_core::abi::Settings,
     sessions: Arc<dyn Sessions>,
     notes: mpsc::Sender<Note>,
 ) -> Option<Publisher> {
+    begin(settings, sessions, notes, || ask_for_it(HANDOVER))
+}
+
+/// The same, for a daemon: it publishes when nothing else is, and it never
+/// asks anybody to stand down for it.
+///
+/// A daemon that asked would fight the window it had just handed the pairing
+/// to. It stands down when a window asks, so the window is the one holding a
+/// claim, and [`Lock::take`] refuses while a claim is outstanding — which is
+/// what keeps the daemon from taking the pairing back before the window that
+/// asked for it has managed to pick it up.
+pub fn start_when_free(
+    settings: &ah_core::abi::Settings,
+    sessions: Arc<dyn Sessions>,
+    notes: mpsc::Sender<Note>,
+) -> Option<Publisher> {
+    begin(settings, sessions, notes, Lock::take)
+}
+
+/// Everything the two have in common, with how the pairing is come by left to
+/// the caller — and left until last, so that a window with nothing to publish
+/// does not spend three seconds asking a daemon to stand down for it.
+fn begin(
+    settings: &ah_core::abi::Settings,
+    sessions: Arc<dyn Sessions>,
+    notes: mpsc::Sender<Note>,
+    take_the_pairing: impl FnOnce() -> Option<Lock>,
+) -> Option<Publisher> {
+    if !settings.remote.enabled {
+        return None;
+    }
     // The code comes off the disk as text and is needed for exactly the one
     // line that derives the ladder from it. Both forms of it are named here
     // rather than left as temporaries in an expression, so that both are
@@ -185,7 +220,15 @@ pub fn start(
     let stored = Zeroizing::new(ah_core::auth::remote_code()?);
     let raw = ah_remote::code::parse(&stored)?;
     let url = ah_core::auth::remote_url()?;
-    Publisher::start(&settings.remote, url, Keys::derive(&raw), sessions, notes)
+    let lock = take_the_pairing()?;
+    Publisher::start(
+        &settings.remote,
+        url,
+        Keys::derive(&raw),
+        sessions,
+        notes,
+        lock,
+    )
 }
 
 impl Publisher {
@@ -195,14 +238,8 @@ impl Publisher {
         keys: Keys,
         sessions: Arc<dyn Sessions>,
         notes: mpsc::Sender<Note>,
+        lock: Lock,
     ) -> Option<Self> {
-        if !settings.enabled {
-            return None;
-        }
-        // Asking rather than simply taking: a daemon may be holding this,
-        // and a window opening is the one thing it stands down for.
-        let lock = ask_for_it(HANDOVER)?;
-
         let shared = Arc::new(Shared {
             settings: settings.clone(),
             batch: Mutex::new(Batch::default()),
@@ -375,57 +412,32 @@ impl Drop for Publisher {
     }
 }
 
-/// Where a window says it wants the pairing.
-pub fn yield_path() -> std::path::PathBuf {
-    ah_core::paths::data_dir().join("remote.yield")
-}
-
-/// Whether somebody is actually asking for the pairing.
-///
-/// The file lives in this user's data directory, so on an ordinary machine
-/// nobody else can write it; the ownership check is for the machine that is
-/// not ordinary, where a world-writable directory would otherwise let anything
-/// on the host take a session off the air by touching a file.
-#[cfg(unix)]
-pub fn yield_asked() -> bool {
-    use std::os::unix::fs::MetadataExt;
-    // SAFETY: no arguments, no allocation, cannot fail.
-    let me = unsafe { geteuid() };
-    std::fs::metadata(yield_path()).is_ok_and(|m| m.uid() == me)
-}
-
-#[cfg(not(unix))]
-pub fn yield_asked() -> bool {
-    yield_path().exists()
-}
-
-#[cfg(unix)]
-unsafe extern "C" {
-    fn geteuid() -> u32;
-}
-
 /// Ask whoever is publishing to stand down, and wait a little for them to.
 ///
-/// The file is removed either way: left behind, it would keep the next holder
-/// standing down forever over a window that has long since gone.
+/// The asking is a lock held for as long as the wait lasts, so there is
+/// nothing to remove afterwards and nothing left behind by a process that was
+/// killed in the middle of it — see [`crate::remote::lock`] for why that
+/// matters, and for what it does and does not protect against.
 pub fn ask_for_it(patience: Duration) -> Option<Lock> {
     if let Some(lock) = Lock::take() {
         return Some(lock);
     }
-    let path = yield_path();
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    let _ = std::fs::write(&path, b"");
+    // Held across the whole wait, and let go by returning: a claim that
+    // outlived the taking of the pairing would have this process's own
+    // publisher stand down the moment it started.
+    let mut claim = Claim::make();
     let deadline = Instant::now() + patience;
     while Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(100));
-        if let Some(lock) = Lock::take() {
-            let _ = std::fs::remove_file(&path);
+        // Another window may have been asking at the moment this one first
+        // tried, so asking is worth another go rather than being given up on.
+        if claim.is_none() {
+            claim = Claim::make();
+        }
+        if let Some(lock) = claim.as_ref().and_then(Lock::take_as_asked) {
             return Some(lock);
         }
     }
-    let _ = std::fs::remove_file(&path);
     None
 }
 
@@ -509,7 +521,7 @@ fn run(
         // Somebody wanting the pairing is the one thing that ends this early.
         if last_yield_check.elapsed() >= YIELD_CHECK {
             last_yield_check = Instant::now();
-            if yield_asked() {
+            if Claim::outstanding() {
                 let _ = notes.send(Note::Yield);
                 break;
             }
