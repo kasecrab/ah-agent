@@ -3315,7 +3315,12 @@ impl App {
                 }
             },
             UiEvent::AskPermission { id, call, reason } => {
-                if self.always_allow.contains(&call.function.name) {
+                // "Always allow bash" is an answer about ordinary bash calls,
+                // not a standing yes to everything anybody ever says about
+                // one. A question that came with a reason came from a policy
+                // plugin or from a rule about the file being written, and that
+                // is a different question every time — it is always drawn.
+                if reason.is_empty() && self.always_allow.contains(&call.function.name) {
                     let _ = self.perm_tx.send(true);
                 } else {
                     self.pending_perm = Some((id, call, reason));
@@ -4482,15 +4487,20 @@ impl App {
             }
         }
 
-        if let Some((_, call, _)) = &self.pending_perm {
+        if let Some((_, call, reason)) = &self.pending_perm {
             let name = call.function.name.clone();
+            // A question with a reason is not one "always" can answer: see
+            // `UiEvent::AskPermission`. Pressing it says yes to this one call.
+            let standing = reason.is_empty();
             match k.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
                     self.pending_perm = None;
                     let _ = self.perm_tx.send(true);
                 }
                 KeyCode::Char('a') | KeyCode::Char('A') => {
-                    self.always_allow.insert(name);
+                    if standing {
+                        self.always_allow.insert(name);
+                    }
                     self.pending_perm = None;
                     let _ = self.perm_tx.send(true);
                 }
@@ -5197,14 +5207,25 @@ impl App {
                     },
                     pal.dim(),
                 )),
-                Line::from(vec![
-                    Span::styled("[y]", pal.bold(pal.accent)),
-                    Span::raw(" yes  "),
-                    Span::styled("[n]", pal.bold(pal.accent)),
-                    Span::raw(" no  "),
-                    Span::styled("[a]", pal.bold(pal.accent)),
-                    Span::raw(" always this session"),
-                ]),
+                if reason.is_empty() {
+                    Line::from(vec![
+                        Span::styled("[y]", pal.bold(pal.accent)),
+                        Span::raw(" yes  "),
+                        Span::styled("[n]", pal.bold(pal.accent)),
+                        Span::raw(" no  "),
+                        Span::styled("[a]", pal.bold(pal.accent)),
+                        Span::raw(" always this session"),
+                    ])
+                } else {
+                    // No "always" on this one: a question that came with a
+                    // reason is a different question every time it is put.
+                    Line::from(vec![
+                        Span::styled("[y]", pal.bold(pal.accent)),
+                        Span::raw(" yes  "),
+                        Span::styled("[n]", pal.bold(pal.accent)),
+                        Span::raw(" no"),
+                    ])
+                },
             ];
             f.render_widget(Paragraph::new(lines), inner);
         }

@@ -13,7 +13,6 @@ use crate::{Command, ConfigCmd, Overrides, PluginCmd};
 
 struct PrintIo {
     json: bool,
-    ask: bool,
     show_tools: bool,
 }
 
@@ -213,8 +212,26 @@ impl AgentIo for PrintIo {
     }
 
     fn ask_permission(&self, call: &ToolCall, reason: &str) -> bool {
-        if !self.ask {
-            return true;
+        // Whether this call needed asking about was decided before the
+        // question reached here. A plugin's `ask`, and the prompt for a write
+        // to a file that decides what runs next, are raised in every mode — so
+        // answering `true` on the strength of `permissions.mode` would make
+        // the one mechanism a plugin has for forcing a human decision a no-op
+        // in exactly the mode where it matters.
+        //
+        // With nobody to ask, the answer is no. A one-shot run in a pipeline
+        // that refuses is a turn wasted; one that silently approves is the
+        // thing the question existed to prevent.
+        if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+            let mut err = std::io::stderr().lock();
+            let _ = writeln!(
+                err,
+                "\x1b[33m✗ {} needed asking about{}{} and there is no terminal to ask at\x1b[0m",
+                describe_call(call),
+                if reason.is_empty() { "" } else { " — " },
+                printable(reason),
+            );
+            return false;
         }
         let mut err = std::io::stderr().lock();
         let _ = writeln!(err, "\x1b[33m? {}\x1b[0m", describe_call(call));
@@ -374,7 +391,6 @@ pub fn one_shot(
 
     let io = PrintIo {
         json,
-        ask: stack.settings().permissions.mode == PermissionMode::Ask,
         show_tools: true,
     };
     let res = engine.run_turn(prompt.to_string(), Vec::new(), &io);
