@@ -104,6 +104,10 @@ pub fn refusals(stack: &SettingsStack) -> Vec<String> {
                 origin.describe()
             )
         })
+        // A deny rule that can never match belongs in the same place: it is a
+        // thing somebody wrote into the config expecting it to hold, and it
+        // does not.
+        .chain(ah_core::policy::complaints(&stack.settings().permissions))
         .collect()
 }
 

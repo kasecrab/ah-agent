@@ -1111,7 +1111,9 @@ impl<'a> Agent<'a> {
             && let Ok(args) = serde_json::from_str::<Value>(&call.function.arguments)
             && let Some(cmd) = args.get("command").and_then(|c| c.as_str())
         {
-            if let Some(rule) = crate::policy::denied(cmd, &self.settings.permissions.deny) {
+            if let Some(rule) =
+                crate::policy::denied(cmd, &crate::policy::rules(&self.settings.permissions))
+            {
                 let reason = format!("matches deny rule `{rule}`");
                 io.emit(AgentEvent::ToolDenied {
                     call,

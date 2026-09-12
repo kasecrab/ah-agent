@@ -1073,9 +1073,21 @@ pub struct Permissions {
     pub mode: PermissionMode,
     pub ask_for: Vec<String>,
     /// Shell commands refused in every mode. A rule matches a command segment
-    /// that equals it or starts with it followed by a space; a trailing `*`
-    /// matches any continuation. Setting this replaces the built-in list.
+    /// that equals it or starts with it followed by a space, or names the same
+    /// program with the same flags however they are spelled; a trailing `*`
+    /// matches any continuation.
+    ///
+    /// Anything named here is added to the built-in list rather than put in
+    /// its place, because `deny = ["curl *"]` written to add one rule used to
+    /// throw the other thirty away without a word. To really replace the list,
+    /// say `deny_replace = true` as well.
     pub deny: Vec<String>,
+    /// Rules to add. The same as naming them in `deny`, and clearer about it.
+    pub deny_extra: Vec<String>,
+    /// Built-in rules to drop, by their exact text.
+    pub deny_remove: Vec<String>,
+    /// Take `deny` as the whole list and use no built-in rule at all.
+    pub deny_replace: bool,
     /// Let a command become another user: `sudo`, `doas`, `pkexec`, `su`. Off,
     /// one is refused before it runs rather than left waiting on a password
     /// prompt at a terminal nobody is reading. `ah remote serve` turns this off
@@ -1111,10 +1123,15 @@ pub const DEFAULT_DENY: &[&str] = &[
     "chmod -R 777 /",
     "mkfs*",
     "dd if=*",
+    "rm -rf *",
+    "dd of=/dev/*",
     "shutdown*",
     "reboot",
     "poweroff",
-    ":(){ :|:& };:",
+    // The fork bomb `:(){ :|:& };:` was here and never matched anything: a
+    // command is split at `;`, `|` and `&` before any rule is compared with
+    // it, so no piece of one can contain a rule that is made of them. A rule
+    // that cannot match is worse than no rule, because it reads as protection.
 ];
 
 impl Default for Permissions {
@@ -1125,7 +1142,10 @@ impl Default for Permissions {
                 .iter()
                 .map(|s| String::from(*s))
                 .collect(),
-            deny: DEFAULT_DENY.iter().map(|s| String::from(*s)).collect(),
+            deny: Vec::new(),
+            deny_extra: Vec::new(),
+            deny_remove: Vec::new(),
+            deny_replace: false,
             allow_sudo: false,
         }
     }

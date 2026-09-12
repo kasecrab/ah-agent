@@ -368,7 +368,10 @@ so this is paid once per image, not once per turn.
 |---|---|---|
 | `mode` | `"ask"` | `ask` prompts for tools in `ask_for`; `auto` runs every tool call |
 | `ask_for` | `["bash", "write_file", "edit_file"]` | tools that prompt in `ask` mode |
-| `deny` | built-in list | shell commands refused in every mode |
+| `deny` | `[]` | shell commands refused, **added** to the built-in list below |
+| `deny_extra` | `[]` | the same, named for what it does |
+| `deny_remove` | `[]` | built-in rules to drop, by exact text |
+| `deny_replace` | `false` | take `deny` as the whole list, built-ins included |
 | `allow_sudo` | `false` | let a command become another user (`sudo`, `doas`, `pkexec`, `su`) |
 
 `allow_sudo` is about the password prompt, not the privilege. Off, a `bash`
@@ -416,21 +419,60 @@ it may choose a model and a prompt, and may not hand its children a shell or
 turn the asking off.
 
 `deny` rules apply to the `bash` tool only. The command is split into
-segments on `;`, `|`, `&`, `&&`, `||` and newlines; a leading `sudo`, `env`,
-`nohup`, `time` or `VAR=value` is skipped. A rule matches a segment that
-equals it or starts with it followed by a space; a trailing `*` matches any
-continuation. Setting `deny` replaces the built-in list, so copy the entries
-you want to keep. The defaults:
+segments on `;`, `|`, `&`, `&&`, `||`, newlines and the brackets a subshell or
+a group is written with; a leading `sudo`, `env`, `nohup`, `time`, `command`,
+`exec`, a redirection or a `VAR=value` is skipped, quotes come off, and a
+program named by a full path or with a leading `\` is the same program.
+
+A rule matches a segment two ways, either of which is enough. As text: the
+segment equals the rule or starts with it followed by a space, and a trailing
+`*` written against the end of a word matches any continuation — this is what
+`mkfs*` and `dd if=*` are for. A `*` standing alone as a word is the word `*`,
+so `rm -rf *` is the shell's own everything-here and not every `rm -rf`. As
+a command: the program is the same, every flag the rule names is there however
+it is spelled or grouped, and the rule's operands are the segment's first
+operands. So `rm -rf /` covers `rm -r -f /`, `rm -fr /`,
+`rm --recursive --force /` and `rm -rf / --no-preserve-root`, and does not
+cover `rm -rf /tmp/build`.
+
+Adding a rule is what people do to this setting, so naming one **adds** it:
+
+```toml
+[permissions]
+deny_extra = ["curl", "npm publish"]   # added to the built-ins
+deny_remove = ["git push --force"]     # dropped by exact text
+deny = ["curl"]                        # also adds; see deny_replace
+deny_replace = true                    # take `deny` as the whole list
+```
+
+A merge patch replaces an array, so `deny = ["curl"]` written to add one
+rule used to throw the other thirty away without a word. It no longer does:
+`deny` and `deny_extra` both add, and `deny_replace = true` is how you say you
+really meant to start from nothing. The built-in list:
 
 ```
 rm -rf /   rm -rf ~   rm -rf ~/   rm -rf .   rm -rf ..   rm -fr /   rm -fr ~
-rm -rf --no-preserve-root*   rm -rf $HOME   rm -rf $HOME/
+rm -rf --no-preserve-root*   rm -rf $HOME   rm -rf $HOME/   rm -rf *
 git reset --hard   git push --force   git push -f
 git clean -f*   git clean -x*   git clean -d*
 git checkout -- .   git checkout .   git restore .
 git branch -D   git stash drop   git stash clear   git filter-branch*
-chmod -R 777 /   mkfs*   dd if=*   shutdown*   reboot   poweroff   :(){ :|:& };:
+chmod -R 777 /   mkfs*   dd if=*   dd of=/dev/*
+shutdown*   reboot   poweroff
 ```
+
+A rule containing `;`, `|`, `&`, a newline or a bracket can never match,
+because the command was split at that character before any rule was compared
+with it. Such a rule is dropped and said out loud at startup. The fork bomb
+`:(){ :|:& };:` used to be in the list above for exactly this reason: it read
+as protection and matched nothing.
+
+**What this is and is not.** It reads a shell command without a shell, so it
+is a guard against the ordinary case and not a sandbox. A command assembled at
+run time — `sh -c "$(…)"`, a script written by `write_file` and then run, a
+`build.rs` — is not in the text at all, and no rule here can see it. The
+permission prompt, not this list, is what stands between a model-chosen command
+and the machine.
 
 A denied call returns an error to the model asking it to let the user run
 the command by hand. Plugins with the `before_tool` hook can deny, replace or

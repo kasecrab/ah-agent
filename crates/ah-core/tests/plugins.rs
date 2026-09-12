@@ -111,7 +111,7 @@ fn guard_denies_and_asks() {
     stack
         .push(
             Origin::Cli,
-            serde_json::json!({"guard": {"deny": ["curl *"]}}),
+            serde_json::json!({"guard": {"deny": ["curl"]}}),
         )
         .unwrap();
     let Some(mut host) = host_with(&mut stack, &["guard"]) else {
@@ -139,7 +139,7 @@ fn guard_denies_and_asks() {
     let out = host
         .slash_command("guard", "", ".", SlashStage::Run)
         .expect("command handled");
-    assert!(out.message.unwrap().contains("curl *"));
+    assert!(out.message.unwrap().contains("curl"));
 }
 
 #[test]
