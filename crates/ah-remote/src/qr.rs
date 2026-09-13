@@ -27,6 +27,11 @@ const MAX_VERSION: usize = 10;
 /// Error correction level M, as the two bits that go in the format string.
 const EC_LEVEL_BITS: u32 = 0b00;
 
+/// Black ink on a bright white field, both stated. SGR 30 is the foreground
+/// and 107 the background; a pair of background codes would leave the glyph
+/// the terminal's own colour, which on a dark theme is white on white.
+const DARK_ON_LIGHT: &str = "\x1b[30;107m";
+
 /// How one version's codewords are laid out at level M.
 struct Layout {
     /// Error-correction codewords per block.
@@ -146,16 +151,19 @@ impl Qr {
     /// The symbol as lines for a terminal, two rows of modules per line.
     ///
     /// Colours are set rather than assumed: a QR has to be dark on light, and
-    /// half the terminals in the world are light on dark. The quiet zone is
-    /// four modules, which is what the spec asks for and what a phone's camera
-    /// wants in poor light.
+    /// half the terminals in the world are light on dark. Both halves of that
+    /// are said, foreground and background: naming only the background leaves
+    /// the glyph in whatever colour the terminal was already using, which on a
+    /// dark theme is a pale symbol on a white field that no camera will read.
+    /// The quiet zone is four modules, which is what the spec asks for and
+    /// what a phone's camera wants in poor light.
     pub fn to_terminal(&self) -> String {
         const QUIET: usize = 4;
         let span = self.size + QUIET * 2;
         let mut out = String::with_capacity(span * span * 4);
         let mut y = 0;
         while y < span {
-            out.push_str("\x1b[40;107m");
+            out.push_str(DARK_ON_LIGHT);
             for x in 0..span {
                 let upper = self.at(x, y, QUIET);
                 let lower = self.at(x, y + 1, QUIET);
@@ -779,11 +787,46 @@ mod tests {
         assert_eq!(lines.len(), span.div_ceil(2));
         for line in &lines {
             let modules = line
-                .replace("\x1b[40;107m", "")
+                .replace(DARK_ON_LIGHT, "")
                 .replace("\x1b[0m", "")
                 .chars()
                 .count();
             assert_eq!(modules, span, "every line is the same width");
+        }
+    }
+
+    /// The symbol is worthless if the glyph keeps whatever colour the terminal
+    /// was using, so every line has to name a foreground as well as a
+    /// background, and the foreground has to be a dark one. A pair of
+    /// background codes passes every other test in here and reads as a pale
+    /// square to a camera.
+    #[test]
+    fn a_terminal_symbol_says_both_of_its_colours() {
+        let codes: Vec<u32> = DARK_ON_LIGHT
+            .trim_start_matches("\x1b[")
+            .trim_end_matches('m')
+            .split(';')
+            .map(|c| c.parse().expect("a numeric SGR code"))
+            .collect();
+        assert!(
+            codes
+                .iter()
+                .any(|c| (30..=37).contains(c) || (90..=97).contains(c)),
+            "a foreground colour is set, not only a background"
+        );
+        assert!(
+            codes
+                .iter()
+                .any(|c| (40..=47).contains(c) || (100..=107).contains(c)),
+            "a background colour is set"
+        );
+        assert!(
+            codes.contains(&30),
+            "the ink is black, since a QR is read as dark on light"
+        );
+        for line in Qr::encode(b"hello").unwrap().to_terminal().lines() {
+            assert!(line.starts_with(DARK_ON_LIGHT), "every line sets them");
+            assert!(line.ends_with("\x1b[0m"), "and gives the terminal back");
         }
     }
 
