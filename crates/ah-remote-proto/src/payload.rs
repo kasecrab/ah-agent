@@ -27,6 +27,12 @@ pub struct SessionInfo {
     pub cwd: String,
     pub model: String,
     pub started_ms: u64,
+    /// When anything last happened in this session, milliseconds since the
+    /// epoch, for the age a phone shows on the card. Zero from a desktop too
+    /// old to send it, which means "no idea" rather than 1970 — read
+    /// `started_ms` instead when it is zero.
+    #[serde(default)]
+    pub touched_ms: u64,
     pub messages: u32,
     /// Whether this session is loaded and can be driven right now, as opposed
     /// to sitting on disk waiting to be resumed.
@@ -270,6 +276,30 @@ mod tests {
         round_trip_desk(FromDesk::Bye {
             reason: Bye::TuiTakingOver,
         });
+        round_trip_desk(FromDesk::Sessions {
+            list: vec![SessionInfo {
+                id: "abc".to_string(),
+                name: None,
+                title: "what is this".to_string(),
+                cwd: "/tmp".to_string(),
+                model: "m".to_string(),
+                started_ms: 5,
+                touched_ms: 9,
+                messages: 2,
+                live: true,
+            }],
+        });
+    }
+
+    /// A desktop too old to send the last-write time leaves the field out. It
+    /// has to arrive as "no idea" rather than as the first moment of 1970,
+    /// which is what a phone would otherwise put on the card.
+    #[test]
+    fn a_session_with_no_last_write_reads_as_unknown_rather_than_ancient() {
+        let text = r#"{"id":"a","title":"t","cwd":"/tmp","model":"m","started_ms":5,"messages":2,"live":false}"#;
+        let info: SessionInfo = serde_json::from_str(text).unwrap();
+        assert_eq!(info.touched_ms, 0, "absent is unknown");
+        assert_eq!(info.started_ms, 5, "and the rest still reads");
     }
 
     #[test]

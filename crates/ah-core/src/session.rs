@@ -160,7 +160,7 @@ impl Session {
 
     /// Most recent session id, if any.
     pub fn latest() -> Option<String> {
-        let mut ids: Vec<String> = list().into_iter().map(|(id, _)| id).collect();
+        let mut ids: Vec<String> = list().into_iter().map(|s| s.id).collect();
         ids.sort();
         ids.pop()
     }
@@ -248,6 +248,11 @@ pub struct Summary {
     pub id: String,
     pub name: Option<String>,
     pub started_ms: u128,
+    /// When the session file was last written: the age worth showing, since a
+    /// two-day-old session spoken to a minute ago is a minute old to anybody
+    /// looking for it. Never zero and never before `started_ms`, so a caller
+    /// can use it without a fallback of its own.
+    pub touched_ms: u128,
     pub cwd: String,
     pub model: String,
     /// First user message, single line, trimmed.
@@ -260,7 +265,8 @@ pub fn summaries() -> Vec<Summary> {
     let dir = crate::paths::sessions_dir();
     let mut out: Vec<Summary> = list()
         .into_iter()
-        .filter_map(|(id, _)| {
+        .filter_map(|stored| {
+            let id = &stored.id;
             let f = File::open(dir.join(format!("{id}.jsonl"))).ok()?;
             let mut lines = BufReader::new(f).lines();
             let header: Header = serde_json::from_str(&lines.next()?.ok()?).ok()?;
@@ -292,6 +298,10 @@ pub fn summaries() -> Vec<Summary> {
                 id: header.id,
                 name,
                 started_ms: header.started_ms,
+                // A clock that went backwards, or a file whose mtime the
+                // filesystem would not give up, would otherwise read as older
+                // than the session it belongs to.
+                touched_ms: stored.touched_ms.max(header.started_ms),
                 cwd: header.cwd,
                 model: header.model,
                 title,
@@ -310,7 +320,7 @@ pub fn find(what: &str) -> Option<String> {
     if what.is_empty() {
         return None;
     }
-    if list().iter().any(|(id, _)| id == what) {
+    if list().iter().any(|s| s.id == what) {
         return Some(what.to_string());
     }
     summaries()
@@ -323,21 +333,43 @@ pub fn find(what: &str) -> Option<String> {
         .map(|s| s.id)
 }
 
-/// `(id, size_bytes)` for every stored session.
-pub fn list() -> Vec<(String, u64)> {
+/// One stored session as the directory describes it, without opening it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stored {
+    pub id: String,
+    /// What the file weighs.
+    pub bytes: u64,
+    /// When it was last written, in milliseconds since the epoch. A session
+    /// file is appended to as the conversation happens, so this is the last
+    /// thing anybody said in it. Zero where the filesystem will not say, which
+    /// is a thing to fall back from rather than a date.
+    pub touched_ms: u128,
+}
+
+/// Every stored session, by id. One `stat` apiece and nothing opened: what is
+/// inside a session file is read by whoever actually wants it.
+pub fn list() -> Vec<Stored> {
     let Ok(rd) = std::fs::read_dir(crate::paths::sessions_dir()) else {
         return Vec::new();
     };
-    let mut out: Vec<(String, u64)> = rd
+    let mut out: Vec<Stored> = rd
         .flatten()
         .filter_map(|e| {
             let name = e.file_name().into_string().ok()?;
             let id = name.strip_suffix(".jsonl")?.to_string();
-            let size = e.metadata().ok()?.len();
-            Some((id, size))
+            let meta = e.metadata().ok()?;
+            Some(Stored {
+                id,
+                bytes: meta.len(),
+                touched_ms: meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map_or(0, |d| d.as_millis()),
+            })
         })
         .collect();
-    out.sort();
+    out.sort_by(|a, b| a.id.cmp(&b.id));
     out
 }
 
@@ -354,5 +386,93 @@ mod tests {
             marker(r#"{"role":"system","content":"","_clear":true}"#).is_some_and(|m| m.resets())
         );
         assert!(marker(r#"{"_compact":true}"#).is_some_and(|m| m.resets()));
+    }
+
+    /// Writes a session file by hand so its header can say a time the file
+    /// itself does not have. Returns the id.
+    fn stored(dir: &std::path::Path, id: &str, started_ms: u128) -> String {
+        let header =
+            format!(r#"{{"id":"{id}","started_ms":{started_ms},"cwd":"/tmp","model":"m"}}"#);
+        std::fs::write(
+            dir.join("sessions").join(format!("{id}.jsonl")),
+            format!("{header}\n{{\"role\":\"user\",\"content\":\"hi\"}}\n"),
+        )
+        .unwrap();
+        id.to_string()
+    }
+
+    /// The age worth showing comes from the file, not from the header: a
+    /// session started days ago and spoken to a minute ago is a minute old.
+    #[test]
+    fn a_summary_is_as_recent_as_the_last_thing_written_to_it() {
+        let _env = crate::test_env::guard();
+        let dir = std::env::temp_dir().join(format!("ah-touched-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sessions")).unwrap();
+        // SAFETY: every test that moves this variable holds the one guard.
+        let old = std::env::var_os("AH_DATA_DIR");
+        unsafe { std::env::set_var("AH_DATA_DIR", &dir) };
+
+        let ancient = stored(&dir, "aaa-old", 1_000);
+        let ahead = stored(&dir, "bbb-ahead", now_ms() + 600_000);
+        let found = summaries();
+
+        let old_one = found.iter().find(|s| s.id == ancient).expect("listed");
+        assert!(
+            old_one.touched_ms > old_one.started_ms,
+            "a file written now is newer than a session started in 1970"
+        );
+        assert!(
+            now_ms().saturating_sub(old_one.touched_ms) < 60_000,
+            "the file was written moments ago, so that is what it reports"
+        );
+
+        // A clock that ran backwards, or a header from a machine whose clock
+        // is ahead, must not read as older than the session it belongs to.
+        let ahead_one = found.iter().find(|s| s.id == ahead).expect("listed");
+        assert_eq!(
+            ahead_one.touched_ms, ahead_one.started_ms,
+            "never older than the start it came with"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        // SAFETY: as above, under the same guard.
+        unsafe {
+            match old {
+                Some(v) => std::env::set_var("AH_DATA_DIR", v),
+                None => std::env::remove_var("AH_DATA_DIR"),
+            }
+        }
+    }
+
+    /// `list` is a directory read and nothing more, so it has to carry what
+    /// the directory knows rather than making a caller open the file again.
+    #[test]
+    fn a_stored_session_carries_its_size_and_its_last_write() {
+        let _env = crate::test_env::guard();
+        let dir = std::env::temp_dir().join(format!("ah-stored-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sessions")).unwrap();
+        // SAFETY: every test that moves this variable holds the one guard.
+        let old = std::env::var_os("AH_DATA_DIR");
+        unsafe { std::env::set_var("AH_DATA_DIR", &dir) };
+
+        stored(&dir, "ccc-one", 1_000);
+        let rows = list();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].bytes > 0, "the file has something in it");
+        assert!(
+            now_ms().saturating_sub(rows[0].touched_ms) < 60_000,
+            "written moments ago"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        // SAFETY: as above, under the same guard.
+        unsafe {
+            match old {
+                Some(v) => std::env::set_var("AH_DATA_DIR", v),
+                None => std::env::remove_var("AH_DATA_DIR"),
+            }
+        }
     }
 }

@@ -79,6 +79,7 @@ impl Sessions for Window {
                 cwd: s.cwd,
                 model: s.model,
                 started_ms: s.started_ms as u64,
+                touched_ms: s.touched_ms as u64,
                 messages: s.messages as u32,
             })
             .collect();
@@ -94,6 +95,9 @@ impl Sessions for Window {
                     cwd: live.cwd.clone(),
                     model: live.model.clone(),
                     started_ms: 0,
+                    // Nothing has been said in it, so there is no last time
+                    // anything was. Zero says that rather than inventing now.
+                    touched_ms: 0,
                     messages: 0,
                     live: true,
                 },

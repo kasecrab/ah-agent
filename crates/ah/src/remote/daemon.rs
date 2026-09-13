@@ -247,6 +247,7 @@ impl Sessions for Machine {
                 cwd: s.cwd,
                 model: s.model,
                 started_ms: s.started_ms as u64,
+                touched_ms: s.touched_ms as u64,
                 messages: s.messages as u32,
             })
             .collect()
