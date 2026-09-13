@@ -772,11 +772,7 @@ fn answer(
     // Reading is answered here: it is the same answer whoever owns the
     // sessions, and none of it changes anything.
     let (session, act) = match asked {
-        FromPhone::List => {
-            return vec![FromDesk::Sessions {
-                list: shared.sessions.list(),
-            }];
-        }
+        FromPhone::List => return listing(shared.sessions.as_ref()),
         FromPhone::Attach { session, .. } => {
             if lock(&shared.watching).insert(device.clone()) && shared.settings.notice {
                 let _ = notes.send(Note::Attached(device));
@@ -998,6 +994,24 @@ fn snapshot(session: &str, want: usize) -> (Vec<ah_core::abi::Message>, bool) {
     (session.messages[from..].to_vec(), from > 0)
 }
 
+/// What a phone is told when it asks what is here: who this machine is, and
+/// then what is on it.
+///
+/// Hello goes out once when the link comes up, which is a moment a phone can
+/// easily be on the wrong side of: one that pairs later, or reconnects with a
+/// cursor past that frame, would otherwise never learn the hostname for its
+/// card or the roots it may start a session in. Every phone asks for the list
+/// when it connects, so that is where it can be said again. Cheap to repeat:
+/// six short strings out of what this process already knows.
+fn listing(sessions: &dyn Sessions) -> Vec<FromDesk> {
+    vec![
+        hello(sessions),
+        FromDesk::Sessions {
+            list: sessions.list(),
+        },
+    ]
+}
+
 fn hello(sessions: &dyn Sessions) -> FromDesk {
     FromDesk::Hello(Hello {
         host: hostname(),
@@ -1045,7 +1059,61 @@ fn unhex(s: &str) -> Option<[u8; crypto::LINK_BYTES]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ah_remote::proto::{SessionInfo, SessionState};
     use serde_json::json;
+
+    /// A machine with one session on it and somewhere to start another.
+    struct Desk;
+
+    impl Sessions for Desk {
+        fn list(&self) -> Vec<SessionInfo> {
+            vec![SessionInfo {
+                id: "abc".into(),
+                name: None,
+                title: "what is this".into(),
+                cwd: "/tmp".into(),
+                model: "m".into(),
+                started_ms: 5,
+                touched_ms: 9,
+                messages: 2,
+                live: true,
+            }]
+        }
+
+        fn state(&self, _session: &str) -> Option<SessionState> {
+            None
+        }
+
+        fn act(&self, _session: &str, _act: Act) -> Result<Option<String>, String> {
+            Err("not in this test".into())
+        }
+
+        fn roots(&self) -> Vec<String> {
+            vec!["/home/rabe".into()]
+        }
+    }
+
+    /// The list is the one thing every phone asks for on every connect, so a
+    /// phone that missed the hello at the top of the link still learns the
+    /// host it is looking at and the roots it may start a session in.
+    #[test]
+    fn asking_what_is_here_says_who_this_is_as_well() {
+        let out = listing(&Desk);
+        let Some(FromDesk::Hello(said)) = out.first() else {
+            panic!("hello comes first, not {out:?}");
+        };
+        assert!(!said.host.is_empty(), "a card has a name to show");
+        assert_eq!(
+            said.roots,
+            vec!["/home/rabe".to_string()],
+            "without these a phone cannot offer to start anything"
+        );
+        assert!(
+            out.iter()
+                .any(|f| matches!(f, FromDesk::Sessions { list } if list.len() == 1)),
+            "and the list it actually asked for: {out:?}"
+        );
+    }
 
     fn text(t: &str) -> Value {
         json!({"type": "text", "text": t})
