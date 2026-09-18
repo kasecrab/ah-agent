@@ -119,7 +119,7 @@ impl Machine {
         }
 
         let mut engine =
-            Engine::new(&stack, cwd.to_path_buf(), resume, true).map_err(|e| e.to_string())?;
+            Engine::new(&mut stack, cwd.to_path_buf(), resume, true).map_err(|e| e.to_string())?;
         let id = engine.session.id.clone();
         // One plan per session. Several engines in one process shared a single
         // store, so one session could overwrite another's tasks and the model
@@ -205,9 +205,14 @@ impl Machine {
         match ev {
             UiEvent::Busy(busy) => r.busy = *busy,
             UiEvent::Renamed(name) => r.name = name.clone(),
-            UiEvent::Resumed { id, name, .. } => {
+            UiEvent::Resumed {
+                id, name, model, ..
+            } => {
                 r.id = id.clone();
                 r.name = name.clone();
+                if !model.is_empty() {
+                    r.model = model.clone();
+                }
             }
             _ => {}
         }

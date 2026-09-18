@@ -501,7 +501,7 @@ fn run_inner(
         }
         None => (0, Vec::new()),
     };
-    let engine = Engine::new(&stack, cwd.clone(), resume, true)?;
+    let engine = Engine::new(&mut stack, cwd.clone(), resume, true)?;
 
     // The screen belongs to the TUI, so the microphone's troubles go to the
     // log rather than to stderr, where they would land on the conversation.
@@ -1409,6 +1409,29 @@ impl App {
             self.refusals_said += 1;
             self.warn(line);
         }
+    }
+
+    /// Put the resumed conversation's model back on top of the settings.
+    ///
+    /// The old layer goes first, so resuming back and forth between two
+    /// conversations does not leave a stack of them; and it goes on above
+    /// whatever `/model` last said, because switching conversation is
+    /// switching to the model that conversation is held with.
+    fn adopt_session_model(&mut self, model: &str) {
+        if model.is_empty() || model == self.settings().model.id {
+            return;
+        }
+        if let Err(e) = self
+            .stack
+            .retain(|o| !matches!(o, Origin::Runtime(Runtime::Session)))
+        {
+            self.push(Block::Error(format!("settings patch rejected: {e}")));
+            return;
+        }
+        self.apply_patch(
+            Origin::Runtime(Runtime::Session),
+            serde_json::json!({"model": {"id": model}}),
+        );
     }
 
     fn apply_patch(&mut self, origin: Origin, patch: serde_json::Value) {
@@ -3411,7 +3434,13 @@ impl App {
                 };
                 self.note(s);
             }
-            UiEvent::Resumed { id, name, messages } => {
+            UiEvent::Resumed {
+                id,
+                name,
+                model,
+                messages,
+            } => {
+                self.adopt_session_model(&model);
                 self.images_forget();
                 self.entries.clear();
                 self.notices.clear();

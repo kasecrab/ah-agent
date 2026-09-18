@@ -392,7 +392,7 @@ pub fn one_shot(
         said += 1;
         eprintln!("\x1b[33m{line}\x1b[0m");
     }
-    let mut engine = Engine::new(&stack, cwd, resume, resume.is_some())?;
+    let mut engine = Engine::new(&mut stack, cwd, resume, resume.is_some())?;
     let (reports, patches, _) = engine.load_plugins();
     for r in &reports {
         if !r.ok && r.message != "disabled" {
@@ -695,7 +695,7 @@ fn plugin(o: &Overrides, cmd: PluginCmd) -> Result<(), AnyError> {
         PluginCmd::List => {
             let mut stack = app::load_settings(o)?;
             let cwd = app::resolve_cwd(o)?;
-            let mut engine = Engine::new(&stack, cwd, None, false)?;
+            let mut engine = Engine::new(&mut stack, cwd, None, false)?;
             let (reports, patches, commands) = engine.load_plugins();
             for (name, p) in patches {
                 stack.push(Origin::Plugin(name), p)?;
@@ -859,7 +859,7 @@ fn config(o: &Overrides, cmd: ConfigCmd) -> Result<(), AnyError> {
             let mut stack = app::load_settings(o)?;
             if stack.settings().plugins.enabled {
                 let cwd = app::resolve_cwd(o)?;
-                let mut engine = Engine::new(&stack, cwd, None, false)?;
+                let mut engine = Engine::new(&mut stack, cwd, None, false)?;
                 let (_, patches, _) = engine.load_plugins();
                 for (name, p) in patches {
                     stack.push(Origin::Plugin(name), p)?;

@@ -14,12 +14,21 @@ no null.
 5. `./.ah/config.toml` in the working directory
 6. `settings_patch` from each plugin manifest, then patches returned by plugin hooks
 7. command line: `--model`, `--yolo`, `--ask`, `--max-tokens`, `--system`, `--set key=value`
-8. runtime: `/set`, `/yolo`, `/ask`, `/effort`, `/model`, `/reasoning` (not saved)
+8. `model.id` of a resumed conversation, unless `--model` already named one
+9. runtime: `/set`, `/yolo`, `/ask`, `/effort`, `/model`, `/reasoning`
 
 `state.toml` is written by `ah`, never by hand, and holds only what a picker
 settled — who transcribes, with which model, through which microphone. Keeping
 it apart means `config.toml`, comments and all, is never rewritten under you,
 and a project's `.ah/config.toml` still wins over both.
+
+Nothing at layer 9 is written to a config file: those choices last as long as
+the window. `/model` is the exception, and it is not written to a config file
+either — the conversation records which model it is held with, so resuming it
+comes back on that one rather than on the default (`ah docs sessions`). The
+model a conversation remembers sits above every config file and below `/model`,
+so switching again in the resumed session still works; `-m/--model` on the
+resume overrides it and becomes what the conversation remembers from then on.
 
 `ah config show` prints the merged result as TOML; `--origins` also lists the
 layers. `ah config path` prints file locations. `ah config init` writes a

@@ -16,6 +16,7 @@ marker lines in between:
 {"role":"tool","content":"1\t...","tool_call_id":"call_1"}
 {"role":"assistant","content":"Added `parses_empty` in src/lib.rs."}
 {"_name":"tests"}
+{"_model":"anthropic/claude-sonnet-4.5"}
 {"_compact":true}
 {"role":"user","content":"[The conversation so far was compacted. Summary:] ... [End of summary. Continue from here.]"}
 ```
@@ -38,6 +39,12 @@ marker lines in between:
   are truncated and have no result to pair with. The tokens were paid for, so
   the next turn carries on from what was said instead of asking for it again.
 - `{"_name": "..."}` names the session (`/rename`).
+- `{"_model": "..."}` is the model the conversation was switched to. The
+  header says which one it started on; the last `_model` line replaces it, and
+  that is what `ah -r` and `/resume` come back on. A conversation is held with
+  a particular model — picking it up again should not hand it to whatever the
+  config files have come to say since. `_clear` and `_compact` do not affect
+  it: they throw away what was said, not who it was being said to.
 - `{"_clear": true}` (`/clear`) and `{"_compact": true}` (compaction) mean
   "ignore every message above". Nothing is rewritten; the file keeps the full
   history and only the tail after the last such marker is loaded.
@@ -51,12 +58,20 @@ Session ids are hex, derived from the start time and the process id.
 | `ah sessions` | id, age, name, message count, directory |
 | `ah -r` | resume the latest session |
 | `ah -r ID` or `ah -r NAME` | resume by id or by name (newest with that name) |
+| `ah -r ID -m MODEL` | resume on `MODEL` instead of the one the session remembers, and stay on it |
 | `/resume` | picker inside the TUI, switches in place |
 | `/rename NAME` | name the current session; `/rename` alone prompts, empty removes |
 | `/session` | current id and path |
 
 On quit the TUI prints the `ah -r ...` command that brings the conversation
 back.
+
+A resumed session comes back on the model it was last switched to, above the
+config files and below `/model`. `-m/--model` on the resume, and a model a
+phone names when it asks for a session, win instead — somebody said which
+model this run is held with after the conversation was put down — and the
+session is on that one from then on. `ah sessions` and the `/resume` picker
+show the model each one will come back on.
 
 ## Compaction
 

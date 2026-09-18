@@ -19,7 +19,7 @@ One-shot mode keeps the session in memory only; the TUI writes a session file
 | Flag | Effect |
 |---|---|
 | `-p, --prompt TEXT` | one-shot prompt |
-| `-m, --model ID` | model id for this run |
+| `-m, --model ID` | model id for this run; with `-r` it overrides the model the session remembers, and becomes the one it remembers |
 | `--yolo` | run every tool call without asking |
 | `--ask` | prompt before `bash`, `write_file`, `edit_file` (`permissions.ask_for`) (default) |
 | `--no-plugins` | load no plugins |
@@ -64,14 +64,14 @@ name in, Enter runs it. Plugins can add commands (`ah docs plugins`).
 | Command | Effect |
 |---|---|
 | `/help`, `/?` | list commands and keys |
-| `/model [CATEGORY] [ID\|refresh]` | fuzzy picker over the catalogue, in categories walked with ← →; a known id or favorite name switches directly; `refresh` refetches |
+| `/model [CATEGORY] [ID\|refresh]` | fuzzy picker over the catalogue, in categories walked with ← →; a known id or favorite name switches directly; `refresh` refetches. The conversation remembers the switch, so resuming it comes back on that model |
 | `/effort [LEVEL]` | reasoning effort: `off`, `minimal`, `low`, `medium`, `high`, `xhigh` |
 | `/favorite [NAME]`, `/fav` | favorites picker; a name switches to it or creates it |
 | `/usage` | session cost per model, wall and API time, tool calls, lines changed, plus OpenRouter balance, limits and 30-day top models (`r` refreshes) |
 | `/voice` | arm dictation: hold the talk key and speak, the words land in the input box in grey and turn white when the phrase is done. `/voice off` disarms, `/voice model [id]` picks the transcribing model from the models that take audio input, `/voice devices` picks the microphone. Nothing is sent until you press Enter |
 | `/compact [FOCUS]` | summarise the conversation now, optionally around a focus; the summary folds behind a one-line header (Ctrl-T shows it) |
 | `/clear` | start an empty conversation in the same session file |
-| `/resume [ID\|NAME]` | switch to another session in place |
+| `/resume [ID\|NAME]` | switch to another session in place, and to the model that conversation is held with |
 | `/rename [NAME]` | name the session; empty removes the name |
 | `/session` | session id and file |
 | `/skills [NAME] [ARGS]`, `/skill` | run a saved prompt (`ah docs skills`) |

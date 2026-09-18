@@ -21,6 +21,8 @@ pub enum Runtime {
     Ui,
     /// A built-in slash command the person typed.
     Slash,
+    /// The conversation being resumed, saying which model it is held with.
+    Session,
 }
 
 impl Runtime {
@@ -29,6 +31,7 @@ impl Runtime {
             Runtime::Remote => "the phone link",
             Runtime::Ui => "this session",
             Runtime::Slash => "a slash command",
+            Runtime::Session => "the conversation being resumed",
         }
     }
 }
@@ -255,6 +258,21 @@ impl SettingsStack {
 
     pub fn layers(&self) -> &[Layer] {
         &self.layers
+    }
+
+    /// Whether something above the config files already names the model:
+    /// `-m/--model` on the command line, or a model a phone asked for when it
+    /// started the session. Both are somebody saying which model this run is
+    /// held with, so a resumed conversation must not talk over either.
+    pub fn model_pinned(&self) -> bool {
+        self.layers.iter().any(|l| {
+            matches!(l.origin, Origin::Cli | Origin::Runtime(_))
+                && l.patch
+                    .get("model")
+                    .and_then(|m| m.get("id"))
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|id| !id.is_empty())
+        })
     }
 
     /// `voice.capture_cmd`, from the environment or from the merged settings.

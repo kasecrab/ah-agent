@@ -12,7 +12,7 @@ use ah_core::plugins::{LoadReport, PluginHost};
 use ah_core::provider::Provider;
 use ah_core::provider::openrouter::OpenRouter;
 use ah_core::session::Session;
-use ah_core::settings::{Origin, SettingsStack};
+use ah_core::settings::{Origin, Runtime, SettingsStack};
 use ah_core::tools::Registry;
 use serde_json::Value;
 use unicode_width::UnicodeWidthStr;
@@ -200,6 +200,9 @@ pub enum UiEvent {
     Resumed {
         id: String,
         name: Option<String>,
+        /// The model that conversation was last held with, for whoever owns
+        /// the settings to put back on top of them.
+        model: String,
         messages: Vec<Message>,
     },
     Renamed(Option<String>),
@@ -264,12 +267,11 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(
-        stack: &SettingsStack,
+        stack: &mut SettingsStack,
         cwd: PathBuf,
         resume: Option<&str>,
         persist: bool,
     ) -> Result<Self, AnyError> {
-        let settings = stack.settings().clone();
         let session = match resume {
             Some("") => match Session::latest() {
                 Some(id) => Session::open(&id)?,
@@ -279,9 +281,32 @@ impl Engine {
                 Some(id) => Session::open(&id)?,
                 None => return Err(format!("no session named or with id {what:?}").into()),
             },
-            None if persist => Session::create(&cwd.display().to_string(), &settings.model.id)?,
+            None if persist => {
+                Session::create(&cwd.display().to_string(), &stack.settings().model.id)?
+            }
             None => Session::ephemeral(),
         };
+        // A conversation is held with a particular model, and picking it up
+        // again means picking that model up again — not whatever the config
+        // files have come to say since. This layer goes on above them and
+        // below nothing, so `/model` later in the run still wins.
+        //
+        // `-m/--model`, and a model a phone named when it asked for the
+        // session, are the exceptions: somebody said which model this run is
+        // held with, out loud, after the conversation was last put down.
+        if resume.is_some() && !session.model.is_empty() && !stack.model_pinned() {
+            stack.push(
+                Origin::Runtime(Runtime::Session),
+                serde_json::json!({"model": {"id": session.model}}),
+            )?;
+        }
+        let settings = stack.settings().clone();
+        // And the other way round: a model named over the top of what the
+        // session remembered — `-m` on the resume, or a phone's choice — is
+        // the model this conversation is held with from here on, so it is
+        // written down too. A session already on it writes nothing.
+        let mut session = session;
+        session.set_model(&settings.model.id);
         let mut e = Self {
             provider: None,
             registry: Registry::new(),
@@ -472,7 +497,8 @@ impl Engine {
     }
 
     pub fn apply_settings(&mut self, settings: Settings, value: Value) {
-        let model_changed = settings.model.id != self.settings.model.id
+        let id_changed = settings.model.id != self.settings.model.id;
+        let model_changed = id_changed
             || settings.model.base_url != self.settings.model.base_url
             || settings.model.api_key != self.settings.model.api_key;
         let tools_changed =
@@ -485,6 +511,13 @@ impl Engine {
         if model_changed {
             self.rebuild_provider();
             self.warned_no_window = false;
+        }
+        // Whoever switched it — `/model`, a favorite, `/set model.id` — the
+        // conversation is on this model now, and has to say so on disk for
+        // the next `ah -r`. A session already on it writes nothing.
+        if id_changed {
+            let id = self.settings.model.id.clone();
+            self.session.set_model(&id);
         }
         if tools_changed {
             self.rebuild_registry();
@@ -689,6 +722,7 @@ impl Engine {
                         let _ = tx.send(UiEvent::Resumed {
                             id: self.session.id.clone(),
                             name: self.session.name.clone(),
+                            model: self.session.model.clone(),
                             messages: self.session.messages.clone(),
                         });
                     }
@@ -1020,6 +1054,101 @@ mod tests {
         }
     }
 
+    /// Run `f` with a data directory of its own, holding the environment lock
+    /// for as long as it takes: session files are found through `AH_DATA_DIR`.
+    fn in_data_dir(tag: &str, f: impl FnOnce()) {
+        let _env = ah_core::test_env::guard();
+        let dir = std::env::temp_dir().join(format!("ah-app-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // SAFETY: every test that moves this variable holds the one guard.
+        let old = std::env::var_os("AH_DATA_DIR");
+        unsafe { std::env::set_var("AH_DATA_DIR", &dir) };
+        f();
+        let _ = std::fs::remove_dir_all(&dir);
+        // SAFETY: as above, under the same guard.
+        unsafe {
+            match old {
+                Some(v) => std::env::set_var("AH_DATA_DIR", v),
+                None => std::env::remove_var("AH_DATA_DIR"),
+            }
+        }
+    }
+
+    fn with_model(id: &str) -> SettingsStack {
+        let mut stack = SettingsStack::new();
+        stack
+            .push(
+                Origin::File("config.toml".into()),
+                serde_json::json!({"model": {"id": id}}),
+            )
+            .unwrap();
+        stack
+    }
+
+    /// The config file is what a new conversation starts on; a conversation
+    /// that was switched to another model is picked up on that one, however
+    /// long ago it was put down.
+    #[test]
+    fn resuming_a_conversation_resumes_its_model() {
+        in_data_dir("resume-model", || {
+            let mut stack = with_model("vendor/flash");
+            let mut e = Engine::new(&mut stack, ".".into(), None, true).unwrap();
+            assert_eq!(e.settings.model.id, "vendor/flash");
+            let id = e.session.id.clone();
+            // As `/model` does: the UI resolves its stack and hands it over.
+            let mut switched = stack.clone();
+            switched
+                .push(
+                    Origin::Runtime(Runtime::Slash),
+                    serde_json::json!({"model": {"id": "vendor/pro"}}),
+                )
+                .unwrap();
+            e.apply_settings(switched.settings().clone(), switched.value().clone());
+            drop(e);
+
+            let mut later = with_model("vendor/flash");
+            let back = Engine::new(&mut later, ".".into(), Some(&id), true).unwrap();
+            assert_eq!(
+                back.settings.model.id, "vendor/pro",
+                "the conversation's own model, not the config file's"
+            );
+            assert_eq!(later.settings().model.id, "vendor/pro", "and in the stack");
+        });
+    }
+
+    /// `-m` on the resume is somebody saying which model this run is held
+    /// with, after the conversation was put down. It wins, and the
+    /// conversation is on it from then on.
+    #[test]
+    fn a_model_named_on_the_resume_beats_the_one_the_session_remembers() {
+        in_data_dir("resume-flag", || {
+            let mut stack = with_model("vendor/pro");
+            let id = Engine::new(&mut stack, ".".into(), None, true)
+                .unwrap()
+                .session
+                .id
+                .clone();
+
+            let mut flagged = with_model("vendor/pro");
+            flagged
+                .push(
+                    Origin::Cli,
+                    serde_json::json!({"model": {"id": "vendor/other"}}),
+                )
+                .unwrap();
+            let e = Engine::new(&mut flagged, ".".into(), Some(&id), true).unwrap();
+            assert_eq!(e.settings.model.id, "vendor/other");
+            drop(e);
+
+            // And it stuck: resuming again with no flag stays on it rather
+            // than falling back to where the conversation began.
+            let mut plain = with_model("vendor/pro");
+            let back = Engine::new(&mut plain, ".".into(), Some(&id), true).unwrap();
+            assert_eq!(back.settings.model.id, "vendor/other");
+        });
+    }
+
     #[test]
     fn an_unknown_window_is_looked_up_again_and_said_once() {
         let mut stack = SettingsStack::new();
@@ -1029,7 +1158,7 @@ mod tests {
                 serde_json::json!({"model": {"id": "nobody/not-a-real-model"}}),
             )
             .unwrap();
-        let mut e = Engine::new(&stack, ".".into(), None, false).unwrap();
+        let mut e = Engine::new(&mut stack, ".".into(), None, false).unwrap();
         assert_eq!(e.context_window(), 0);
         // Remembering the miss would leave auto compaction off for the whole
         // process, and the conversation would grow until the provider refused it.

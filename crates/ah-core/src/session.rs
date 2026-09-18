@@ -24,6 +24,11 @@ struct Header {
 struct Marker {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     _name: Option<String>,
+    /// The model the conversation was switched to. The last one in the file
+    /// wins, so resuming picks up where the conversation was left rather than
+    /// wherever the config files stand today.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    _model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     _clear: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -41,6 +46,7 @@ impl Marker {
 
 fn marker(line: &str) -> Option<Marker> {
     if !(line.contains("\"_name\"")
+        || line.contains("\"_model\"")
         || line.contains("\"_clear\"")
         || line.contains("\"_compact\"")
         || line.contains("\"_plan\""))
@@ -48,13 +54,20 @@ fn marker(line: &str) -> Option<Marker> {
         return None;
     }
     serde_json::from_str::<Marker>(line).ok().filter(|m| {
-        m._name.is_some() || m._clear.is_some() || m._compact.is_some() || m._plan.is_some()
+        m._name.is_some()
+            || m._model.is_some()
+            || m._clear.is_some()
+            || m._compact.is_some()
+            || m._plan.is_some()
     })
 }
 
 pub struct Session {
     pub id: String,
     pub name: Option<String>,
+    /// The model this conversation is being held with. Empty only for an
+    /// ephemeral session, which has no file to remember one in.
+    pub model: String,
     path: PathBuf,
     file: Option<File>,
     pub messages: Vec<Message>,
@@ -82,6 +95,7 @@ impl Session {
         Self {
             id: new_id(),
             name: None,
+            model: String::new(),
             path: PathBuf::new(),
             file: None,
             messages: Vec::new(),
@@ -109,6 +123,7 @@ impl Session {
         Ok(Self {
             id,
             name: None,
+            model: model.into(),
             path,
             file: Some(file),
             messages: Vec::new(),
@@ -121,10 +136,20 @@ impl Session {
         let reader = BufReader::new(File::open(&path)?);
         let mut messages = Vec::new();
         let mut name = None;
+        let mut model = String::new();
         let mut plan = crate::plan::Plan::default();
         for (i, line) in reader.lines().enumerate() {
             let line = line?;
-            if i == 0 || line.trim().is_empty() {
+            if i == 0 {
+                // The model the conversation started on. A `_model` marker
+                // further down replaces it; a header ah cannot read leaves it
+                // empty, which the caller reads as "no model of its own".
+                if let Ok(h) = serde_json::from_str::<Header>(&line) {
+                    model = h.model;
+                }
+                continue;
+            }
+            if line.trim().is_empty() {
                 continue;
             }
             if let Some(m) = marker(&line) {
@@ -136,6 +161,11 @@ impl Session {
                 }
                 if let Some(n) = m._name {
                     name = Some(n).filter(|n| !n.is_empty());
+                }
+                // Not reset by `_clear` or `_compact`: those throw away what
+                // was said, not who it was being said to.
+                if let Some(m) = m._model.filter(|m| !m.is_empty()) {
+                    model = m;
                 }
                 if let Some(p) = m._plan {
                     plan = p;
@@ -151,6 +181,7 @@ impl Session {
         Ok(Self {
             id: id.into(),
             name,
+            model,
             path,
             file: Some(file),
             messages,
@@ -185,6 +216,22 @@ impl Session {
             ..Default::default()
         });
         self.name = (!name.is_empty()).then(|| name.to_string());
+    }
+
+    /// Record that the conversation is now being held with `model`.
+    ///
+    /// Appended like everything else, and the last one wins on reload, so a
+    /// session resumes on the model it was last switched to rather than on
+    /// whatever the config files happen to say by then.
+    pub fn set_model(&mut self, model: &str) {
+        if model.is_empty() || model == self.model {
+            return;
+        }
+        self.model = model.to_string();
+        self.write_marker(&Marker {
+            _model: Some(model.to_string()),
+            ..Default::default()
+        });
     }
 
     pub fn push(&mut self, mut m: Message) {
@@ -254,6 +301,8 @@ pub struct Summary {
     /// can use it without a fallback of its own.
     pub touched_ms: u128,
     pub cwd: String,
+    /// The model the session will resume on: the last one it was switched to,
+    /// or the one it started with.
     pub model: String,
     /// First user message, single line, trimmed.
     pub title: String,
@@ -272,6 +321,7 @@ pub fn summaries() -> Vec<Summary> {
             let header: Header = serde_json::from_str(&lines.next()?.ok()?).ok()?;
             let mut title = String::new();
             let mut name = None;
+            let mut model = header.model;
             let mut messages = 0usize;
             for line in lines.map_while(|l| l.ok()) {
                 if line.trim().is_empty() {
@@ -283,6 +333,9 @@ pub fn summaries() -> Vec<Summary> {
                     }
                     if let Some(n) = m._name {
                         name = Some(n).filter(|n| !n.is_empty());
+                    }
+                    if let Some(m) = m._model.filter(|m| !m.is_empty()) {
+                        model = m;
                     }
                     continue;
                 }
@@ -303,7 +356,7 @@ pub fn summaries() -> Vec<Summary> {
                 // than the session it belongs to.
                 touched_ms: stored.touched_ms.max(header.started_ms),
                 cwd: header.cwd,
-                model: header.model,
+                model,
                 title,
                 messages,
             })
@@ -443,6 +496,101 @@ mod tests {
                 None => std::env::remove_var("AH_DATA_DIR"),
             }
         }
+    }
+
+    /// Run `f` with a data directory of its own, so the session files a test
+    /// writes are the only ones it can see.
+    fn in_data_dir(tag: &str, f: impl FnOnce(&std::path::Path)) {
+        let _env = crate::test_env::guard();
+        let dir = std::env::temp_dir().join(format!("ah-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sessions")).unwrap();
+        // SAFETY: every test that moves this variable holds the one guard.
+        let old = std::env::var_os("AH_DATA_DIR");
+        unsafe { std::env::set_var("AH_DATA_DIR", &dir) };
+        f(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        // SAFETY: as above, under the same guard.
+        unsafe {
+            match old {
+                Some(v) => std::env::set_var("AH_DATA_DIR", v),
+                None => std::env::remove_var("AH_DATA_DIR"),
+            }
+        }
+    }
+
+    /// The whole point: a conversation switched to another model is still on
+    /// that model tomorrow, whatever the config files have come to say. The
+    /// header is only where it started, so the last switch is what counts.
+    #[test]
+    fn a_session_opens_on_the_model_it_was_last_switched_to() {
+        in_data_dir("model-marker", |_| {
+            let mut s = Session::create("/tmp", "vendor/flash").unwrap();
+            let id = s.id.clone();
+            s.push(Message::user("hello"));
+            s.set_model("vendor/mid");
+            s.push(Message::user("something harder"));
+            s.set_model("vendor/pro");
+            drop(s);
+
+            let back = Session::open(&id).unwrap();
+            assert_eq!(back.model, "vendor/pro", "the last switch, not the first");
+            assert_eq!(back.messages.len(), 2, "the messages are still there");
+            assert_eq!(
+                summaries().iter().find(|s| s.id == id).unwrap().model,
+                "vendor/pro",
+                "and the listing says the same as the resume will do"
+            );
+        });
+    }
+
+    /// A session nobody ever switched resumes on the model in its header, and
+    /// one written by an older ah — no marker anywhere — does too.
+    #[test]
+    fn a_session_never_switched_opens_on_the_model_it_started_with() {
+        in_data_dir("model-header", |dir| {
+            let s = Session::create("/tmp", "vendor/flash").unwrap();
+            let id = s.id.clone();
+            drop(s);
+            let old = stored(dir, "older-ah", 1_000);
+
+            assert_eq!(Session::open(&id).unwrap().model, "vendor/flash");
+            assert_eq!(Session::open(&old).unwrap().model, "m");
+        });
+    }
+
+    /// `/clear` and compaction throw away what was said, not who it was being
+    /// said to: the conversation is still being held with the same model.
+    #[test]
+    fn clearing_and_compacting_leave_the_model_alone() {
+        in_data_dir("model-clear", |_| {
+            let mut s = Session::create("/tmp", "vendor/flash").unwrap();
+            let id = s.id.clone();
+            s.set_model("vendor/pro");
+            s.push(Message::user("one"));
+            s.clear();
+            s.push(Message::user("two"));
+            s.reset(vec![Message::user("a summary")]);
+            drop(s);
+
+            let back = Session::open(&id).unwrap();
+            assert_eq!(back.model, "vendor/pro");
+            assert_eq!(back.messages.len(), 1);
+        });
+    }
+
+    /// Switching to the model already in use writes nothing: a session whose
+    /// model never moves must not grow a marker per turn.
+    #[test]
+    fn switching_to_the_same_model_writes_nothing() {
+        in_data_dir("model-same", |_| {
+            let mut s = Session::create("/tmp", "vendor/flash").unwrap();
+            let path = s.path().clone();
+            let before = std::fs::metadata(&path).unwrap().len();
+            s.set_model("vendor/flash");
+            s.set_model("");
+            assert_eq!(std::fs::metadata(&path).unwrap().len(), before);
+        });
     }
 
     /// `list` is a directory read and nothing more, so it has to carry what
