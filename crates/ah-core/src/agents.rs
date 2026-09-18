@@ -295,8 +295,11 @@ impl Child {
 }
 
 impl Mailbox for Child {
-    fn take(&self) -> Vec<String> {
+    fn take(&self) -> Vec<Message> {
         std::mem::take(&mut *self.inbox.lock().unwrap())
+            .into_iter()
+            .map(Message::user)
+            .collect()
     }
 }
 

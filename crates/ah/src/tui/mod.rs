@@ -37,7 +37,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph, Widget};
 
-use crate::app::{self, AnyError, Engine, EngineCmd, UiEvent};
+use crate::app::{self, AnyError, Engine, EngineCmd, Inbox, UiEvent};
 use input::Editor;
 use keys::Chord;
 use picker::{Action, Kind, Picker, Row};
@@ -308,8 +308,12 @@ struct App {
     /// what was said.
     notices: notice::Deck,
     editor: Editor,
-    /// Messages typed while a turn ran; sent one per turn once it ends.
-    queue: std::collections::VecDeque<(String, Vec<String>)>,
+    /// Messages handed to a running turn and not yet read by it: the text and
+    /// how many pictures came with it. The mailbox is where they really are —
+    /// pictures and all, which is why they are not copied here — and this
+    /// mirrors it so the screen can say what is still on its way. Each is
+    /// dropped as the turn announces reading it.
+    queue: std::collections::VecDeque<(String, usize)>,
     /// Input modalities of the current model from the catalogue.
     modalities: models::Modalities,
     /// Category the model picker was last left on. Text is what `/model` has
@@ -408,9 +412,14 @@ struct App {
     catalogue: Option<Vec<ModelInfo>>,
     self_tx: Sender<Msg>,
     tx: Sender<EngineCmd>,
+    /// Where a message typed during a turn goes: the running loop reads it at
+    /// its next request instead of the turn having to end first.
+    inbox: std::sync::Arc<Inbox>,
     perm_tx: Sender<bool>,
     ask_tx: Sender<Reply>,
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Whether the engine has already been woken for what is still unread.
+    mail_woke: bool,
     last_draw: Instant,
     dirty: bool,
     quit: bool,
@@ -512,7 +521,6 @@ fn run_inner(
     let (perm_tx, perm_rx) = mpsc::channel::<bool>();
     let (ask_tx, ask_rx) = mpsc::channel::<Reply>();
     let cancel = engine.cancel.clone();
-    #[cfg(feature = "remote")]
     let inbox = engine.inbox.clone();
     let session_id = engine.session.id.clone();
     let session_name = engine.session.name.clone();
@@ -660,9 +668,11 @@ fn run_inner(
         catalogue: None,
         self_tx: ui_tx.clone(),
         tx: eng_tx,
+        inbox,
         perm_tx,
         ask_tx,
         cancel,
+        mail_woke: false,
         last_draw: Instant::now() - Duration::from_secs(1),
         dirty: true,
         quit: false,
@@ -852,6 +862,10 @@ fn apply_event(entries: &mut Vec<Entry>, think: &mut Option<Instant>, ev: AgentE
         AgentEvent::ToolDenied { call, reason } => push_block(
             entries,
             Block::Error(format!("{} denied: {reason}", call.function.name)),
+        ),
+        AgentEvent::UserMessage(m) => push_block(
+            entries,
+            Block::User(user_display(&m.content, m.images.len())),
         ),
         AgentEvent::Notice(n) => push_block(entries, Block::Notice(n)),
         AgentEvent::Retry {
@@ -1596,10 +1610,18 @@ impl App {
                 self.note("busy; wait or press Esc to cancel");
             } else if self.queue.len() >= max {
                 self.note(format!(
-                    "queue full ({max}); Up edits the last queued message"
+                    "{max} messages are already waiting to be read; Up takes the last one back"
                 ));
             } else {
-                self.queue.push_back((text, images));
+                // Into the running loop's mailbox, which it reads at its next
+                // request. That is the earliest anything can be said to a turn
+                // already under way: between a tool call and its result the
+                // API allows nothing else through.
+                self.queue.push_back((text.clone(), images.len()));
+                self.inbox.push(text, images);
+                self.mail_woke = false;
+                self.follow = true;
+                self.dirty = true;
             }
             return;
         }
@@ -1716,26 +1738,38 @@ impl App {
         self.dirty = true;
     }
 
-    /// Send the oldest queued message once the engine is free.
-    fn drain_queue(&mut self) {
-        if !self.busy
-            && let Some((text, images)) = self.queue.pop_front()
-        {
-            self.submit_with(text, images);
+    /// Nudge the engine when a turn ended with mail still unread — something
+    /// said while the last reply was streaming, after the loop had taken its
+    /// last look at the mailbox. `Wake` runs a turn with no message of its
+    /// own, and the loop picks the mailbox up at its first request.
+    ///
+    /// Once per batch of mail. A turn that cannot run at all — no API key —
+    /// would otherwise end, be woken for the same unread message, end again,
+    /// and spin.
+    fn deliver_pending(&mut self) {
+        if !self.busy && !self.queue.is_empty() && !self.mail_woke {
+            self.mail_woke = true;
+            let _ = self.tx.send(EngineCmd::Wake);
         }
     }
 
-    /// Move the last queued message back into the editor.
+    /// Move the last unread message back into the editor. False once the turn
+    /// has read it: by then it is part of the conversation, and there is
+    /// nothing left to take back.
     fn unqueue_last(&mut self) -> bool {
-        let Some((text, images)) = self.queue.pop_back() else {
+        let Some((text, _)) = self.queue.back() else {
             return false;
         };
+        let Some(said) = self.inbox.unsay(&text.clone()) else {
+            return false;
+        };
+        self.queue.pop_back();
         let n = self.settings().layout.paste_collapse_lines;
         if !self.editor.is_empty() {
             self.editor.insert_char('\n');
         }
-        self.editor.insert_paste(&text, n);
-        for url in images {
+        self.editor.insert_paste(&said.content, n);
+        for url in said.images {
             let bytes = url.len() * 3 / 4;
             self.editor.insert_image(url, bytes);
         }
@@ -3309,7 +3343,7 @@ impl App {
                     self.close_ask();
                     self.git_branch = ah_core::plugins::git_branch(std::path::Path::new(&self.cwd));
                     self.request_status();
-                    self.drain_queue();
+                    self.deliver_pending();
                 }
                 self.dirty = true;
             }
@@ -3515,6 +3549,18 @@ impl App {
                     reasoning.push_str(&t);
                 }
                 self.dirty = true;
+            }
+            AgentEvent::UserMessage(m) => {
+                // Shown where the loop read it rather than where it was typed:
+                // until this event the model had not seen it, and a transcript
+                // that showed it earlier would be claiming otherwise.
+                self.finish_thinking();
+                if let Some(i) = self.queue.iter().position(|(t, _)| *t == m.content) {
+                    self.queue.remove(i);
+                }
+                self.mail_woke = false;
+                self.push(Block::User(user_display(&m.content, m.images.len())));
+                self.follow = true;
             }
             AgentEvent::AssistantMessage(m) => {
                 self.stats.request_end();
@@ -3952,10 +3998,9 @@ impl App {
             return;
         };
         // It reads as a message in that agent's conversation, the same way a
-        // message to the main one does.
-        if let Some(pane) = self.panes.get_mut(&id) {
-            push_block(&mut pane.entries, Block::User(text.clone()));
-        }
+        // message to the main one does: drawn from the event the child emits
+        // as it reads it, so the pane shows it where the agent got it rather
+        // than where it was typed.
         child.say(text);
         self.follow = true;
         self.dirty = true;
@@ -4058,6 +4103,7 @@ impl App {
 
     fn cancel_turn(&mut self) {
         self.cancel.store(true, Ordering::Relaxed);
+        self.mail_woke = false;
         while self.unqueue_last() {}
         if self.pending_perm.take().is_some() {
             let _ = self.perm_tx.send(false);
@@ -5329,7 +5375,7 @@ impl App {
         } else if watching.is_some() {
             "Type to tell this agent more; Esc goes back"
         } else if self.busy && self.settings().layout.queue_max > 0 {
-            "Type the next message; Enter queues it"
+            "Type the next message; Enter hands it to the running turn"
         } else {
             "Type a message, /help for commands"
         };
@@ -5497,7 +5543,7 @@ impl App {
         let n = self.queue.len();
         let block = pal
             .input_block(false)
-            .title(format!(" queued {n} · Up edits the last one "));
+            .title(format!(" steering {n} · Up takes the last one back "));
         let inner = block.inner(area);
         f.render_widget(Clear, area);
         f.render_widget(block, area);
@@ -5510,13 +5556,9 @@ impl App {
                 let lines = t.lines().count();
                 let first = t.lines().next().unwrap_or("").trim();
                 let mut spans = vec![Span::styled(format!(" {}. ", i + 1), pal.dim())];
-                if !images.is_empty() {
+                if *images > 0 {
                     spans.push(Span::styled(
-                        format!(
-                            "[{} image{}] ",
-                            images.len(),
-                            if images.len() == 1 { "" } else { "s" }
-                        ),
+                        format!("[{images} image{}] ", if *images == 1 { "" } else { "s" }),
                         pal.bold(pal.accent),
                     ));
                 }

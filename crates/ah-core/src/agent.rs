@@ -23,6 +23,11 @@ pub enum AgentEvent {
     Reasoning(String),
     /// Streaming finished for this request; the full message is attached.
     AssistantMessage(Message),
+    /// Something the user said to a turn that was already running, taken out
+    /// of the mailbox. Emitted where it joins the conversation rather than
+    /// where it was typed: until the loop reads it, the model has not seen it,
+    /// and a transcript that showed it earlier would be claiming otherwise.
+    UserMessage(Message),
     Usage(Usage),
     ToolStart(ToolCall),
     ToolEnd {
@@ -154,6 +159,7 @@ pub fn event_json(ev: &AgentEvent) -> Value {
         AgentEvent::Text(t) => json!({"type": "text", "text": t}),
         AgentEvent::Reasoning(t) => json!({"type": "reasoning", "text": t}),
         AgentEvent::AssistantMessage(m) => json!({"type": "assistant", "message": m}),
+        AgentEvent::UserMessage(m) => json!({"type": "user", "message": m}),
         AgentEvent::Usage(u) => json!({"type": "usage", "usage": u}),
         AgentEvent::ToolStart(c) => json!({"type": "tool_start", "call": c}),
         AgentEvent::ToolEnd {
@@ -345,10 +351,14 @@ impl crate::tools::AskUser for IoAsker<'_> {
 }
 
 /// Somewhere the loop looks for messages that arrived while it was working:
-/// what a subagent is told by the agent above it, or by the user watching it.
-/// Read between requests, so a message never lands mid-tool.
+/// what a subagent is told by the agent above it, or by the user steering it
+/// from the keyboard or a phone.
+///
+/// Read at the top of each request, which is the earliest a message may be
+/// taken: between a tool call and its result the API allows nothing else, so
+/// anything said mid-batch has to wait for the last result to be recorded.
 pub trait Mailbox: Send + Sync {
-    fn take(&self) -> Vec<String>;
+    fn take(&self) -> Vec<Message>;
 }
 
 /// Plugin hook surface used by the loop. `NoHooks` is the empty impl.
@@ -878,10 +888,12 @@ impl<'a> Agent<'a> {
                 }
             }
             // Anything said to this loop while it was working: an agent above
-            // it, or the user watching it.
+            // it, or the user steering it. Announced as it is taken, so a
+            // screen can show it where the model actually reads it.
             if let Some(mailbox) = self.mailbox.as_ref() {
                 for said in mailbox.take() {
-                    messages.push(Message::user(said));
+                    io.emit(AgentEvent::UserMessage(said.clone()));
+                    messages.push(said);
                 }
             }
 
@@ -1666,6 +1678,7 @@ mod tests {
     use super::*;
     use crate::tools::Tool;
     use std::path::Path;
+    use std::sync::atomic::AtomicU32;
 
     fn tool_call_script(name: &str, args: &str) -> Vec<StreamEvent> {
         vec![
@@ -2277,6 +2290,76 @@ mod tests {
         assert_eq!(reqs[1].messages[0].role, Role::System);
         assert!(reqs[1].messages[0].content.contains("Working directory"));
         assert!(reqs[0].tools.iter().any(|t| t.function.name == "edit_file"));
+    }
+
+    /// Somebody typing while the first tool call ran: nothing on the loop's
+    /// first look at the mailbox, a message on its second.
+    struct TypedMidTurn(AtomicU32);
+
+    impl Mailbox for TypedMidTurn {
+        fn take(&self) -> Vec<Message> {
+            match self.0.fetch_add(1, Ordering::Relaxed) {
+                1 => vec![Message::user("stop, that is the wrong file")],
+                _ => Vec::new(),
+            }
+        }
+    }
+
+    #[test]
+    fn a_message_typed_while_a_tool_ran_is_read_by_the_same_turn() {
+        let provider = MockProvider::new(vec![
+            tool_call_script("bash", "{\"command\":\"echo hello\"}"),
+            vec![
+                StreamEvent::Text("stopping".into()),
+                StreamEvent::Finish("stop".into()),
+            ],
+        ]);
+        let settings = Settings::default();
+        let registry = Registry::builtins(&settings.tools);
+        let mut hooks = NoHooks;
+        let cancel = AtomicBool::new(false);
+        let mut agent = Agent::new(
+            &provider,
+            &registry,
+            &mut hooks,
+            &settings,
+            std::env::current_dir().unwrap(),
+            &cancel,
+        );
+        agent.notices = false;
+        agent.mailbox = Some(std::sync::Arc::new(TypedMidTurn(AtomicU32::new(0))));
+        let mut messages = vec![Message::user("edit the config")];
+        let io = RecordingIo {
+            allow: true,
+            ..Default::default()
+        };
+        agent.run_turn(&mut messages, &io).unwrap();
+
+        // user, assistant(tool_calls), tool, the steer, assistant. The steer
+        // sits after the tool result and not between the call and it: the API
+        // allows nothing else in that gap.
+        assert_eq!(messages.len(), 5);
+        assert_eq!(messages[2].role, Role::Tool);
+        assert_eq!(messages[3].role, Role::User);
+        assert_eq!(messages[3].content, "stop, that is the wrong file");
+        assert_eq!(messages[4].content, "stopping");
+
+        // And the second request carried it, so the model saw it without the
+        // turn having to end first.
+        let reqs = provider.requests.lock().unwrap();
+        assert_eq!(reqs.len(), 2);
+        assert!(
+            reqs[1]
+                .messages
+                .iter()
+                .any(|m| m.role == Role::User && m.content == "stop, that is the wrong file")
+        );
+
+        // Announced where it was read, so a screen can put it there.
+        let events = io.events.lock().unwrap();
+        assert!(events.iter().any(
+            |e| matches!(e, AgentEvent::UserMessage(m) if m.content == "stop, that is the wrong file")
+        ));
     }
 
     #[test]

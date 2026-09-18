@@ -302,6 +302,7 @@ One JSON object per line on stdout. `type` is one of:
 | `text` | `text` (streamed delta) |
 | `reasoning` | `text` |
 | `assistant` | `message` (complete assistant message) |
+| `user` | `message` (something said to the turn while it ran, at the moment the loop read it) |
 | `usage` | `usage` (`prompt_tokens`, `completion_tokens`, `cost`, ...) |
 | `tool_start` | `call` |
 | `tool_end` | `call`, `result`, `duration_ms` |

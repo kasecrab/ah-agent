@@ -219,17 +219,31 @@ pub type PluginLoad = (
 /// requests, so what is said mid-turn reaches the model without waiting for
 /// the turn to finish and without landing in the middle of a tool call.
 #[derive(Default)]
-pub struct Inbox(Mutex<Vec<String>>);
+pub struct Inbox(Mutex<Vec<Message>>);
 
 impl Inbox {
     /// Leave something for the loop to find between requests.
-    pub fn push(&self, text: impl Into<String>) {
-        lock(&self.0).push(text.into());
+    pub fn push(&self, text: impl Into<String>, images: Vec<String>) {
+        lock(&self.0).push(Message::user_with_images(text, images));
+    }
+
+    pub fn is_empty(&self) -> bool {
+        lock(&self.0).is_empty()
+    }
+
+    /// Take back the last thing said with this text, if the loop has not read
+    /// it yet. Matched on the text rather than on position: a phone steering
+    /// the same session pushes here too, and Up at the keyboard must not walk
+    /// off with what somebody else said.
+    pub fn unsay(&self, text: &str) -> Option<Message> {
+        let mut mail = lock(&self.0);
+        let i = mail.iter().rposition(|m| m.content == text)?;
+        Some(mail.remove(i))
     }
 }
 
 impl ah_core::agent::Mailbox for Inbox {
-    fn take(&self) -> Vec<String> {
+    fn take(&self) -> Vec<Message> {
         std::mem::take(&mut *lock(&self.0))
     }
 }
@@ -669,7 +683,11 @@ impl Engine {
                     let _ = tx.send(UiEvent::Busy(false));
                 }
                 EngineCmd::Wake => {
-                    if ah_core::jobs::table().unheard(ah_core::jobs::Audience::Model(0))
+                    // A message that landed in the mailbox as the turn was
+                    // ending wakes the loop too: nothing else will ever read
+                    // it, and it was typed to be answered, not filed.
+                    if !self.inbox.is_empty()
+                        || ah_core::jobs::table().unheard(ah_core::jobs::Audience::Model(0))
                         || ah_core::agents::table().unheard(ah_core::agents::Audience::Model(0))
                     {
                         let _ = tx.send(UiEvent::Busy(true));
@@ -1039,6 +1057,31 @@ pub fn render_status_template(fmt: &str, ctx: &StatusContext) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_mailbox_keeps_images_and_gives_a_message_back_by_its_text() {
+        use ah_core::agent::Mailbox;
+        let inbox = Inbox::default();
+        inbox.push("first", vec!["data:image/png;base64,AAAA".into()]);
+        inbox.push("second", Vec::new());
+
+        // Up at the keyboard, on the last thing typed.
+        assert_eq!(
+            inbox.unsay("second").map(|m| m.content).as_deref(),
+            Some("second")
+        );
+        // And not twice: it is gone, so there is nothing to put in the editor.
+        assert!(inbox.unsay("second").is_none());
+
+        let mail = inbox.take();
+        assert_eq!(mail.len(), 1);
+        assert_eq!(mail[0].content, "first");
+        assert_eq!(mail[0].role, Role::User);
+        assert_eq!(mail[0].images.len(), 1);
+        assert!(inbox.is_empty());
+        // Read by the turn: too late to take it back.
+        assert!(inbox.unsay("first").is_none());
+    }
 
     /// Collects the notices an engine emits.
     struct Heard(Mutex<Vec<String>>);

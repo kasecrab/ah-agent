@@ -43,6 +43,10 @@ struct Running {
     ask: Sender<Reply>,
     cancel: Arc<AtomicBool>,
     inbox: Arc<Inbox>,
+    /// Whether this session's engine has already been woken for mail the last
+    /// turn ended without reading. Without it a session whose turn cannot run
+    /// at all would be woken for the same message over and over.
+    mail_woke: bool,
 }
 
 /// Everything this machine is offering.
@@ -177,6 +181,7 @@ impl Machine {
                 ask,
                 cancel,
                 inbox,
+                mail_woke: false,
             },
         );
         Ok(id)
@@ -203,7 +208,20 @@ impl Machine {
             return;
         };
         match ev {
-            UiEvent::Busy(busy) => r.busy = *busy,
+            UiEvent::Busy(busy) => {
+                r.busy = *busy;
+                // Said as the turn was ending, after the loop's last look at
+                // the mailbox: nothing else would ever read it, and it was
+                // sent to be answered rather than filed. `Wake` runs a turn
+                // with no message of its own, which reads the mailbox at its
+                // first request.
+                if !*busy && !r.inbox.is_empty() && !r.mail_woke {
+                    r.mail_woke = true;
+                    let _ = r.cmd.send(EngineCmd::Wake);
+                }
+            }
+            // The loop has read something; whatever is left is new.
+            UiEvent::Agent(ah_core::agent::AgentEvent::UserMessage(_)) => r.mail_woke = false,
             UiEvent::Renamed(name) => r.name = name.clone(),
             UiEvent::Resumed {
                 id, name, model, ..
@@ -320,9 +338,9 @@ impl Sessions for Machine {
         let session = self
             .which(session)
             .ok_or_else(|| "that session is not running; resume it first".to_string())?;
-        let running = lock(&self.running);
+        let mut running = lock(&self.running);
         let r = running
-            .get(&session)
+            .get_mut(&session)
             .ok_or_else(|| "that session is not running; resume it first".to_string())?;
         fn gone<T>(_: mpsc::SendError<T>) -> String {
             "the session stopped listening".to_string()
@@ -330,7 +348,10 @@ impl Sessions for Machine {
         match act {
             Act::Submit { text, images } => {
                 if r.busy {
-                    r.inbox.push(text);
+                    r.inbox.push(text, images);
+                    // New mail, so the wake this session may already have had
+                    // does not count against it.
+                    r.mail_woke = false;
                 } else {
                     r.cmd
                         .send(EngineCmd::Submit { text, images })

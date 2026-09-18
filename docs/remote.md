@@ -205,9 +205,9 @@ other is dropped rather than applied to whatever question came next, and the
 box on the losing screen comes down by itself saying who answered it.
 
 A message sent while a turn is running does not queue behind it. It goes into
-the same mailbox a subagent's messages use, which the loop reads between
-requests — so it reaches the model in the middle of the work rather than after
-it. Sent while nothing is running, it simply starts a turn.
+the mailbox the keyboard and a subagent's messages use too, which the loop
+reads at its next request — so it reaches the model in the middle of the work
+rather than after it. Sent while nothing is running, it simply starts a turn.
 
 `ah remote forget` ends it at the relay and then here: the hub drops its log
 and its device list, closes both sockets, and marks the name revoked. From

@@ -137,7 +137,7 @@ impl Sessions for Window {
             // cannot know it without being wrong about it sometimes.
             Act::Submit { text, images } => {
                 if lock(&self.live).busy {
-                    self.reach.inbox.push(text);
+                    self.reach.inbox.push(text, images);
                 } else {
                     self.reach
                         .cmd

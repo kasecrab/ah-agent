@@ -286,7 +286,8 @@ pub struct Layout {
     pub kitty_keyboard: bool,
     /// Pastes with more lines than this collapse to a `[Pasted N lines]` chip.
     pub paste_collapse_lines: usize,
-    /// Messages that can wait while a turn runs; 0 disables queueing.
+    /// Messages that can be waiting to be read by a running turn at once;
+    /// 0 refuses them, so a turn has to end before the next message.
     pub queue_max: usize,
     /// Show the model's input modalities (`TIF→T`) in pickers and the status bar.
     pub show_modalities: bool,

@@ -25,9 +25,9 @@ everywhere.
 
 | Action | Default | Effect |
 |---|---|---|
-| `submit` | `["enter"]` | send the message, or queue it while a turn runs |
+| `submit` | `["enter"]` | send the message, or hand it to the turn already running |
 | `newline` | `["shift-enter", "alt-enter", "ctrl-j"]` | insert a line break |
-| `cancel` | `["esc"]` | cancel the running turn, stopping a command that is still running; keeps what the model had already written, marked `[cut short]`; returns queued messages to the input |
+| `cancel` | `["esc"]` | cancel the running turn, stopping a command that is still running; keeps what the model had already written, marked `[cut short]`; returns messages the turn has not read yet to the input |
 | `quit` | `["ctrl-c", "ctrl-d"]` | exit (Ctrl-C cancels first while busy) |
 | `scroll_up` | `["ctrl-up", "alt-k"]` | scroll transcript one step |
 | `scroll_down` | `["ctrl-down", "alt-j"]` | |
@@ -39,7 +39,7 @@ everywhere.
 | `toggle_tools` | `["ctrl-t"]` | expand or collapse tool output and compaction summaries |
 | `toggle_reasoning` | `["ctrl-r"]` | expand or collapse thinking blocks |
 | `cycle_model` | `["shift-tab"]` | switch to the next favorite model |
-| `history_prev` | `["up", "ctrl-p"]` | earlier prompt; inside a multi-line draft moves the cursor first; with an empty input pulls back the last queued message; in the strip moves up a row and out of the top |
+| `history_prev` | `["up", "ctrl-p"]` | earlier prompt; inside a multi-line draft moves the cursor first; with an empty input pulls back the last message the turn has not read yet; in the strip moves up a row and out of the top |
 | `history_next` | `["down", "ctrl-n"]` | later prompt; with an empty input moves the keys into the strip under the status bar, and along it |
 | `delete_word` | `["ctrl-w", "ctrl-backspace", "ctrl-h", "alt-backspace"]` | delete the word before the cursor, or a whole chip |
 | `delete_line` | `["ctrl-u"]` | clear the input |

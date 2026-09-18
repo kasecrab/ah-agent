@@ -167,7 +167,7 @@ theme Claude Code uses, so both look the same in the same terminal.
 | `mouse` | `true` | capture the mouse: wheel scrolls, drag selects and copies via OSC 52; `false` leaves it to the terminal |
 | `kitty_keyboard` | `true` | push kitty keyboard flags (needed for Shift-Enter) without querying the terminal |
 | `paste_collapse_lines` | `3` | pastes longer than this become a `[Pasted #1: N lines]` chip |
-| `queue_max` | `5` | messages that can wait while a turn runs; 0 disables queueing |
+| `queue_max` | `5` | messages that can be waiting to be read by a running turn at once; 0 refuses them |
 | `show_modalities` | `true` | `TI→T` modality tags in `/model`, `/favorite`, `/usage` and the status bar |
 | `image_paste_cmd` | `""` | shell command printing the clipboard image as PNG; empty tries `wl-paste`, `xclip`, `pngpaste` |
 | `markdown` | `true` | render assistant text as markdown |
