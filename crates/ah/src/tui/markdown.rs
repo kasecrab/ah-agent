@@ -195,15 +195,10 @@ impl R<'_> {
             Tag::Heading { level, .. } => {
                 self.blank();
                 self.heading = Some(level);
+                // A heading is louder by weight, not by hue: the `#` marks and
+                // the bold already set it apart from the paragraph under it.
                 let base = self.pal.heading;
-                let accent = self.pal.accent;
-                self.push_style(move |s| {
-                    let s = s.add_modifier(Modifier::BOLD);
-                    match level {
-                        HeadingLevel::H1 | HeadingLevel::H2 => s.fg(accent),
-                        _ => s.fg(base),
-                    }
-                });
+                self.push_style(move |s| s.fg(base).add_modifier(Modifier::BOLD));
                 let marks = match level {
                     HeadingLevel::H1 => "# ",
                     HeadingLevel::H2 => "## ",
@@ -264,8 +259,9 @@ impl R<'_> {
             Tag::Strikethrough => self.push_style(|s| s.add_modifier(Modifier::CROSSED_OUT)),
             Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. } => {
                 self.link = Some(dest_url.to_string());
-                let l = self.pal.link;
-                self.push_style(move |s| s.fg(l).add_modifier(Modifier::UNDERLINED));
+                // The underline is the link; a second colour on top of it only
+                // adds to the count.
+                self.push_style(move |s| s.add_modifier(Modifier::UNDERLINED));
             }
             Tag::Table(aligns) => {
                 self.flush_inline();

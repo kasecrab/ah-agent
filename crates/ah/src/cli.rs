@@ -45,13 +45,18 @@ impl AgentIo for PrintIo {
                     .chars()
                     .take(120)
                     .collect::<String>();
-                let color = if result.is_error { "31" } else { "90" };
+                // The mark says how it went; the words stay the one colour
+                // the rest of the run is printed in.
+                let mark = if result.is_error { "31" } else { "33" };
                 let took = if duration_ms == 0 {
                     "<1 ms".to_string()
                 } else {
                     format!("{duration_ms} ms")
                 };
-                let _ = writeln!(err, "\x1b[{color}m  ↳ {first} ({took})\x1b[0m");
+                let _ = writeln!(
+                    err,
+                    "  \x1b[{mark}m↳\x1b[0m \x1b[90m{first} ({took})\x1b[0m"
+                );
                 if let Some(d) = &result.diff {
                     for l in d.lines().take(40) {
                         let c = match l.as_bytes().first() {
@@ -71,7 +76,7 @@ impl AgentIo for PrintIo {
             AgentEvent::ToolDenied { call, reason } => {
                 let _ = writeln!(
                     err,
-                    "\x1b[31m✗ {} denied: {}\x1b[0m",
+                    "\x1b[31m✗\x1b[0m \x1b[90m{} denied: {}\x1b[0m",
                     printable(&call.function.name),
                     printable(&reason)
                 );
@@ -83,12 +88,16 @@ impl AgentIo for PrintIo {
             } => {
                 let _ = writeln!(
                     err,
-                    "\x1b[33mretry {attempt} in {wait_ms} ms: {}\x1b[0m",
+                    "\x1b[90mretry {attempt} in {wait_ms} ms: {}\x1b[0m",
                     printable(&error)
                 );
             }
             AgentEvent::Error(e) => {
-                let _ = writeln!(err, "\x1b[31merror: {}\x1b[0m", printable(&e));
+                let _ = writeln!(
+                    err,
+                    "\x1b[31m✗\x1b[0m \x1b[90merror: {}\x1b[0m",
+                    printable(&e)
+                );
             }
             AgentEvent::Compacting { auto } => {
                 let why = if auto { " (context full)" } else { "" };

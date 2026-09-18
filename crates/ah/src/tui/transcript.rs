@@ -1,7 +1,7 @@
 //! Transcript blocks with a per-block wrapped-line cache.
 
 use ah_core::abi::{ToolCall, ToolResult};
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthChar;
 
@@ -246,8 +246,8 @@ fn task_style(line: &str, pal: &Palette) -> Option<Style> {
         return None;
     }
     Some(match rest.as_bytes().first()? {
-        b' ' => Style::default().fg(pal.tool_output),
-        b'>' => Style::default().fg(pal.accent),
+        b' ' => Style::default().fg(pal.fg),
+        b'>' => Style::default().fg(pal.fg).add_modifier(Modifier::BOLD),
         _ => pal.dim(),
     })
 }
@@ -349,6 +349,91 @@ fn with_prefix(
         .collect()
 }
 
+/// Columns a prefix takes on screen.
+fn prefix_width(prefix: &str) -> usize {
+    prefix.chars().map(|c| c.width().unwrap_or(0)).sum()
+}
+
+/// Put `prefix` in front of already-built lines and pad the rest to match, so
+/// a block that was laid out on its own still reads as one thing under its
+/// mark.
+fn lead(mut lines: Vec<Line<'static>>, prefix: &str, style: Style) -> Vec<Line<'static>> {
+    let pad = " ".repeat(prefix_width(prefix));
+    for (i, l) in lines.iter_mut().enumerate() {
+        if i == 0 {
+            l.spans.insert(0, Span::styled(prefix.to_string(), style));
+        } else {
+            l.spans.insert(0, Span::raw(pad.clone()));
+        }
+    }
+    lines
+}
+
+/// A user's turn: the same words as everything else, on a band the width of
+/// the transcript. The turn is found by its shape, not by its colour.
+fn band(text: &str, width: usize, pal: &Palette) -> Vec<Line<'static>> {
+    let fill = Style::default().fg(pal.fg).bg(pal.user_bg);
+    let mark = Style::default()
+        .fg(pal.user)
+        .bg(pal.user_bg)
+        .add_modifier(Modifier::BOLD);
+    let pw = prefix_width(&pal.user_prefix);
+    let inner = width.saturating_sub(pw + 1).max(1);
+    let pad = " ".repeat(pw);
+    wrap(text, inner)
+        .into_iter()
+        .enumerate()
+        .map(|(i, l)| {
+            let used = pw + 1 + l.chars().map(|c| c.width().unwrap_or(0)).sum::<usize>();
+            Line::from(vec![
+                Span::styled(" ", fill),
+                Span::styled(
+                    if i == 0 {
+                        pal.user_prefix.clone()
+                    } else {
+                        pad.clone()
+                    },
+                    mark,
+                ),
+                Span::styled(l, fill),
+                Span::styled(" ".repeat(width.saturating_sub(used)), fill),
+            ])
+        })
+        .collect()
+}
+
+/// The header of a tool call: the mark, what was asked in the reading colour,
+/// and how it went trailing off in the quiet one.
+fn call_header(
+    head: &str,
+    status: &str,
+    width: usize,
+    mark: Style,
+    pal: &Palette,
+) -> Vec<Line<'static>> {
+    let pw = prefix_width(&pal.tool_prefix);
+    let mut lines = with_prefix(
+        head,
+        width,
+        &pal.tool_prefix,
+        mark,
+        Style::default().fg(pal.fg),
+    );
+    let sw = status
+        .chars()
+        .map(|c| c.width().unwrap_or(0))
+        .sum::<usize>();
+    let tail = Span::styled(status.to_string(), pal.dim());
+    match lines.last_mut() {
+        Some(l) if l.width() + sw <= width => l.spans.push(tail),
+        _ => lines.push(Line::from(vec![
+            Span::raw(" ".repeat(pw)),
+            Span::styled(status.trim_start().to_string(), pal.dim()),
+        ])),
+    }
+    lines
+}
+
 /// Diff of an `edit_file` call's own arguments, for the moment before the
 /// result arrives (and for edits replayed from a session file).
 fn edit_preview(call: &ToolCall) -> Option<String> {
@@ -373,18 +458,31 @@ fn diff_lines(diff: &str, width: usize, max: usize, pal: &Palette) -> Vec<Line<'
     let total = diff.lines().count();
     let mut out = Vec::with_capacity(total.min(max) + 1);
     for l in diff.lines().take(max) {
-        let (prefix, style) = match l.as_bytes().first() {
-            Some(b'+') => ("+", Style::default().fg(pal.diff_add)),
-            Some(b'-') => ("-", Style::default().fg(pal.diff_del)),
-            Some(b'@') => ("", pal.dim()),
-            _ => (" ", Style::default().fg(pal.tool_output)),
+        // The sign says what happened to the line; the line itself stays in
+        // the one colour the transcript is read in.
+        let (prefix, sign, body_style) = match l.as_bytes().first() {
+            Some(b'+') => (
+                "+",
+                Style::default().fg(pal.diff_add),
+                Style::default().fg(pal.fg),
+            ),
+            Some(b'-') => (
+                "-",
+                Style::default().fg(pal.diff_del),
+                Style::default().fg(pal.fg),
+            ),
+            Some(b'@') => ("", pal.dim(), pal.dim()),
+            _ => (" ", pal.dim(), Style::default().fg(pal.fg)),
         };
         let body = if prefix.is_empty() { l } else { &l[1..] };
         let mut text: String = body.chars().take(width.saturating_sub(4)).collect();
         if text.chars().count() < body.chars().count() {
             text.push('…');
         }
-        out.push(Line::from(Span::styled(format!("  {prefix}{text}"), style)));
+        out.push(Line::from(vec![
+            Span::styled(format!("  {prefix}"), sign),
+            Span::styled(text, body_style),
+        ]));
     }
     if total > max {
         out.push(Line::from(Span::styled(
@@ -400,13 +498,7 @@ fn render(block: &Block, width: usize, view: &View, pal: &Palette) -> Vec<Line<'
     let mut out: Vec<Line<'static>> = Vec::new();
     match block {
         Block::User(s) => {
-            out.extend(with_prefix(
-                s,
-                width,
-                &pal.user_prefix,
-                pal.bold(pal.user),
-                Style::default().fg(pal.user),
-            ));
+            out.extend(band(s, width, pal));
             out.push(Line::default());
         }
         Block::Assistant {
@@ -446,23 +538,37 @@ fn render(block: &Block, width: usize, view: &View, pal: &Palette) -> Vec<Line<'
                     }
                 }
             }
+            // The model's turn opens with a dot of its own, so a glance down
+            // the margin says who is speaking without reading a word.
+            let mark = Style::default().fg(pal.fg);
+            let inner = width
+                .saturating_sub(prefix_width(&pal.assistant_prefix))
+                .max(4);
             if text.is_empty() && *streaming && reasoning.is_empty() {
-                out.push(Line::from(Span::styled("…", pal.dim())));
+                out.extend(lead(
+                    vec![Line::from(Span::styled("…", pal.dim()))],
+                    &pal.assistant_prefix,
+                    mark,
+                ));
             } else if !text.is_empty() && view.markdown {
-                out.extend(super::markdown::render(
-                    text,
-                    pal,
-                    super::markdown::Opts {
-                        width,
-                        highlight: view.code_highlight,
-                    },
+                out.extend(lead(
+                    super::markdown::render(
+                        text,
+                        pal,
+                        super::markdown::Opts {
+                            width: inner,
+                            highlight: view.code_highlight,
+                        },
+                    ),
+                    &pal.assistant_prefix,
+                    mark,
                 ));
             } else if !text.is_empty() {
                 out.extend(with_prefix(
                     text,
                     width,
                     &pal.assistant_prefix,
-                    pal.bold(pal.accent),
+                    mark,
                     Style::default().fg(pal.assistant),
                 ));
             }
@@ -521,12 +627,16 @@ fn render(block: &Block, width: usize, view: &View, pal: &Palette) -> Vec<Line<'
                 Some(r) if r.is_error => format!(" ✗{took}"),
                 Some(_) => format!(" ✓{took}"),
             };
-            let header = format!("{}{head}{status}", pal.tool_prefix);
-            let hstyle = match result {
+            // How the call went is carried by the dot in front of it, not by
+            // the colour of the words: a transcript where every sentence is a
+            // different colour is harder to read than one where only the marks
+            // in the margin change.
+            let mark = match result {
                 Some(r) if r.is_error => Style::default().fg(pal.error),
-                _ => Style::default().fg(pal.tool),
+                Some(_) => Style::default().fg(pal.success),
+                None => pal.dim(),
             };
-            out.extend(styled(wrap(&header, width), hstyle));
+            out.extend(call_header(&head, &status, width, mark, pal));
             if let Some(d) = diff {
                 out.extend(diff_lines(
                     &d,
@@ -614,13 +724,9 @@ fn render(block: &Block, width: usize, view: &View, pal: &Palette) -> Vec<Line<'
             out.extend(styled(wrap(s, width), pal.dim()));
             out.push(Line::default());
         }
-        Block::Error(s) => out.extend(with_prefix(
-            s,
-            width,
-            "✗ ",
-            pal.bold(pal.error),
-            Style::default().fg(pal.error),
-        )),
+        // A failure reads like the notice it is; the red is spent on the mark
+        // so the words sit at the same weight as everything else said here.
+        Block::Error(s) => out.extend(with_prefix(s, width, "✗ ", pal.bold(pal.error), pal.dim())),
         Block::Image(d) => {
             // The picture itself is drawn by escape codes after the frame.
             // These rows only reserve the room and blank what was there, so
@@ -647,7 +753,8 @@ fn render(block: &Block, width: usize, view: &View, pal: &Palette) -> Vec<Line<'
 mod tests {
     use super::*;
 
-    fn tool_header(duration_ms: Option<u64>) -> String {
+    /// The header row of a tool block: the mark, then the words.
+    fn tool_line(result: ToolResult, duration_ms: Option<u64>) -> Line<'static> {
         use ah_core::abi::ToolFunction;
         let block = Block::Tool {
             call: ToolCall {
@@ -658,7 +765,7 @@ mod tests {
                     arguments: r#"{"path": "a.rs"}"#.into(),
                 },
             },
-            result: Some(ToolResult::ok("one line")),
+            result: Some(result),
             duration_ms,
             expanded: Some(false),
         };
@@ -672,7 +779,11 @@ mod tests {
             code_highlight: false,
             image: ImageView::default(),
         };
-        render(&block, 80, &view, &pal)[0].to_string()
+        render(&block, 80, &view, &pal)[0].clone()
+    }
+
+    fn tool_header(duration_ms: Option<u64>) -> String {
+        tool_line(ToolResult::ok("one line"), duration_ms).to_string()
     }
 
     #[test]
@@ -686,6 +797,47 @@ mod tests {
         // Session files keep no durations, so replayed calls show none.
         let replayed = tool_header(None);
         assert!(replayed.contains("Read(a.rs) ✓"), "{replayed}");
+    }
+
+    #[test]
+    fn only_the_dot_changes_colour_when_a_call_fails() {
+        let pal = Palette::from_theme(&ah_core::abi::Theme::default());
+        let ok = tool_line(ToolResult::ok("one line"), Some(12));
+        let bad = tool_line(ToolResult::err("no such file"), Some(12));
+        // The dot in front says how it went: green, then red.
+        assert_eq!(ok.spans[0].style.fg, Some(pal.success));
+        assert_eq!(bad.spans[0].style.fg, Some(pal.error));
+        // What was asked reads the same either way, in the transcript's colour.
+        assert_eq!(ok.spans[1].style, bad.spans[1].style);
+        assert_eq!(ok.spans[1].style.fg, Some(pal.fg));
+        // And how it went trails off in the quiet one.
+        assert_eq!(ok.spans[2].style, bad.spans[2].style);
+        assert!(ok.spans[2].content.contains('✓'), "{ok}");
+        assert!(bad.spans[2].content.contains('✗'), "{bad}");
+    }
+
+    #[test]
+    fn a_user_turn_is_a_band_the_width_of_the_transcript() {
+        let pal = Palette::from_theme(&ah_core::abi::Theme::default());
+        let view = View {
+            show_tool_output: false,
+            tool_output_lines: 5,
+            show_reasoning: false,
+            wrap: true,
+            markdown: false,
+            code_highlight: false,
+            image: ImageView::default(),
+        };
+        let out = render(&Block::User("hello there".into()), 40, &view, &pal);
+        assert_eq!(out[0].width(), 40, "{}", out[0]);
+        // White words on the band, never a colour of their own.
+        let words = out[0]
+            .spans
+            .iter()
+            .find(|s| s.content.contains("hello"))
+            .expect("the words");
+        assert_eq!(words.style.fg, Some(pal.fg));
+        assert_eq!(words.style.bg, Some(pal.user_bg));
     }
 
     /// The rendered summary block, one string per line.

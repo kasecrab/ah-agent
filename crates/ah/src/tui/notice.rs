@@ -6,7 +6,6 @@
 use std::time::{Duration, Instant};
 
 use ratatui::layout::{Alignment, Rect};
-use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
@@ -130,10 +129,14 @@ impl Deck {
         let room = width.saturating_sub(2).clamp(8, MAX_WIDTH) as usize;
         let mut out: Vec<Line<'static>> = Vec::new();
         for t in &self.items {
-            let (mark, mark_style, text_style) = match t.level {
-                Level::Note => ("· ", pal.dim(), pal.dim()),
-                Level::Warn => ("✗ ", pal.bold(pal.error), Style::default().fg(pal.error)),
+            // Only the mark changes colour between a note and a warning; the
+            // text of both sits at the same weight, so the deck reads as one
+            // thing rather than as two competing ones.
+            let (mark, mark_style) = match t.level {
+                Level::Note => ("· ", pal.dim()),
+                Level::Warn => ("✗ ", pal.bold(pal.error)),
             };
+            let text_style = pal.dim();
             let body = match t.count {
                 0 | 1 => t.text.clone(),
                 n => format!("{} ×{n}", t.text),

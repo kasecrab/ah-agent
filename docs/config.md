@@ -106,17 +106,29 @@ own colour. The `syn_*` keys may add `dim`, `bold`, `italic` or `underline`
 after the colour (`"cyan dim"`). The highlighting defaults follow the ANSI
 theme Claude Code uses, so both look the same in the same terminal.
 
+The transcript is read in two colours: `fg` for what you are meant to read and
+`dim` for what only labels it — timings, counts, thinking, notices. Everything
+else is said by the mark in the margin. Each turn opens with a dot: `fg` for
+the model, `success` for a call that did what it was asked, `error` for one
+that did not, `dim` for one still running. A user's turn is a band of `user_bg`
+instead, with the `user_prefix` glyph on it in `user`. `diff_add` and
+`diff_del` colour the `+` and `-` of a diff and not the code beside them. So
+the colours in the list below land on marks, bands and code, never on
+sentences.
+
 | Key | Default | Used for |
 |---|---|---|
 | `fg` | `"reset"` | transcript text |
 | `bg` | `"reset"` | background |
 | `accent` | `"cyan"` | selections, titles, the model line |
-| `user` | `"green"` | user messages |
+| `user` | `"green"` | the glyph in front of a user message |
+| `user_bg` | `"235"` | band behind a user message; `"reset"` for none |
 | `assistant` | `"reset"` | assistant messages |
 | `reasoning` | `"dark_gray"` | thinking block |
-| `tool` | `"yellow"` | tool call headers |
+| `tool` | `"yellow"` | plugin status text and the effort chip |
 | `tool_output` | `"dark_gray"` | tool output |
-| `error` | `"red"` | errors |
+| `success` | `"green"` | the dot before a call that did what it was asked |
+| `error` | `"red"` | the dot before a failed call, and the `✗` on a failure |
 | `dim` | `"dark_gray"` | notices, hints |
 | `border` | `"gray"` | input box border |
 | `border_focus` | `"gray"` | border while focused |
@@ -141,12 +153,12 @@ theme Claude Code uses, so both look the same in the same terminal.
 | `syn_attr` | `"cyan"` | keys in JSON, TOML and YAML |
 | `job` | `"green"` | background of the running-jobs chip on the row above the input |
 | `agent` | `"magenta"` | background of the running-agents chip beside it |
-| `diff_add` | `"green"` | added lines in file diffs |
-| `diff_del` | `"red"` | removed lines |
+| `diff_add` | `"green"` | the `+` on an added line in a file diff |
+| `diff_del` | `"red"` | the `-` on a removed line |
 | `border_style` | `"lines"` | `none`, `lines` (rules above and below the input), `plain`, `rounded`, `double`, `thick` |
 | `user_prefix` | `"> "` | glyph before user messages |
-| `assistant_prefix` | `""` | glyph before assistant messages |
-| `tool_prefix` | `"⚙ "` | glyph before tool calls |
+| `assistant_prefix` | `"● "` | dot before assistant messages |
+| `tool_prefix` | `"● "` | dot before tool calls; it takes `success`, `error` or `dim` |
 | `input_prefix` | `"› "` | prompt glyph in the input line |
 
 ## [layout]

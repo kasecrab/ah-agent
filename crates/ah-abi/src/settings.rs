@@ -150,10 +150,14 @@ pub struct Theme {
     pub bg: String,
     pub accent: String,
     pub user: String,
+    /// Band behind a user message. `reset` leaves the terminal's own.
+    pub user_bg: String,
     pub assistant: String,
     pub reasoning: String,
     pub tool: String,
     pub tool_output: String,
+    /// The dot on a call that did what it was asked.
+    pub success: String,
     pub error: String,
     pub dim: String,
     pub border: String,
@@ -203,10 +207,12 @@ impl Default for Theme {
             bg: "reset".into(),
             accent: "cyan".into(),
             user: "green".into(),
+            user_bg: "235".into(),
             assistant: "reset".into(),
             reasoning: "dark_gray".into(),
             tool: "yellow".into(),
             tool_output: "dark_gray".into(),
+            success: "green".into(),
             error: "red".into(),
             dim: "dark_gray".into(),
             border: "gray".into(),
@@ -236,8 +242,8 @@ impl Default for Theme {
             diff_del: "red".into(),
             border_style: BorderStyle::Lines,
             user_prefix: "> ".into(),
-            assistant_prefix: "".into(),
-            tool_prefix: "⚙ ".into(),
+            assistant_prefix: "● ".into(),
+            tool_prefix: "● ".into(),
             input_prefix: "› ".into(),
         }
     }
