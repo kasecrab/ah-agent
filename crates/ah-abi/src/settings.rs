@@ -299,6 +299,12 @@ pub struct Layout {
     pub code_highlight: bool,
     /// Show the plan summary above the input while tasks are open.
     pub show_plan: bool,
+    /// How long a passing notice — copied text, a model switch, a plugin
+    /// grumbling — sits above the input box, in milliseconds. `0` puts them
+    /// back in the conversation instead, where they stay.
+    pub notice_ms: u64,
+    /// The same for errors, which are worth a longer look.
+    pub notice_error_ms: u64,
     /// Terminal window title, so several ah windows can be told apart.
     /// `{task}` is the session name, or the first message of the session, or
     /// the working directory. `{cwd}`, `{model}` and `{session}` also work.
@@ -329,6 +335,8 @@ impl Default for Layout {
             markdown: true,
             code_highlight: true,
             show_plan: true,
+            notice_ms: 4000,
+            notice_error_ms: 10_000,
             window_title: String::from("{task} · ah"),
         }
     }

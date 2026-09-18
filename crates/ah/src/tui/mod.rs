@@ -7,6 +7,7 @@ mod input;
 mod jobs;
 mod keys;
 mod markdown;
+mod notice;
 mod picker;
 mod plan;
 mod switch;
@@ -303,6 +304,9 @@ struct App {
     binds: Binds,
     view: View,
     entries: Vec<Entry>,
+    /// Passing notices above the input box: what just happened, rather than
+    /// what was said.
+    notices: notice::Deck,
     editor: Editor,
     /// Messages typed while a turn ran; sent one per turn once it ends.
     queue: std::collections::VecDeque<(String, Vec<String>)>,
@@ -598,6 +602,7 @@ fn run_inner(
         },
         stack,
         entries: Vec::new(),
+        notices: notice::Deck::default(),
         editor: Editor::default(),
         queue: std::collections::VecDeque::new(),
         modalities: models::Modalities::default(),
@@ -986,6 +991,53 @@ impl App {
         self.dirty = true;
     }
 
+    /// Something that just happened — a copy, a model switch, a plugin
+    /// grumbling. It sits over the input box for a few seconds and goes,
+    /// rather than settling into a conversation it has nothing to do with.
+    fn note(&mut self, text: impl Into<String>) {
+        self.say(notice::Level::Note, None, text.into());
+    }
+
+    /// The same, grouped under `key` so a run of them — one model switch
+    /// after another — replaces itself instead of stacking up.
+    fn note_as(&mut self, key: &str, text: impl Into<String>) {
+        self.say(notice::Level::Note, Some(key), text.into());
+    }
+
+    /// Something that went wrong. Louder, and it stays longer.
+    fn warn(&mut self, text: impl Into<String>) {
+        self.say(notice::Level::Warn, None, text.into());
+    }
+
+    fn say(&mut self, level: notice::Level, key: Option<&str>, text: String) {
+        let ms = match level {
+            notice::Level::Note => self.settings().layout.notice_ms,
+            notice::Level::Warn => self.settings().layout.notice_error_ms,
+        };
+        // A notice that fades is a notice that can be missed, so it goes to
+        // the log as well, where it keeps. Errors at the level that is on
+        // whenever the log is.
+        ah_core::log::write(
+            match level {
+                notice::Level::Warn => 0,
+                notice::Level::Note => 2,
+            },
+            format_args!("{text}"),
+        );
+        // Nothing fades: the old behaviour, for anyone who would rather read
+        // it in the transcript at their own pace.
+        if ms == 0 {
+            self.push(match level {
+                notice::Level::Note => Block::Notice(text),
+                notice::Level::Warn => Block::Error(text),
+            });
+            return;
+        }
+        self.notices
+            .push(level, key, text, Duration::from_millis(ms));
+        self.dirty = true;
+    }
+
     fn load_history(&mut self, msgs: &[Message]) {
         for m in msgs {
             match m.role {
@@ -1355,14 +1407,14 @@ impl App {
             .skip(self.refusals_said)
         {
             self.refusals_said += 1;
-            self.push(Block::Error(line));
+            self.warn(line);
         }
     }
 
     fn apply_patch(&mut self, origin: Origin, patch: serde_json::Value) {
         match self.stack.push(origin, patch) {
             Ok(()) => self.refresh_from_settings(&[]),
-            Err(e) => self.push(Block::Error(format!("settings patch rejected: {e}"))),
+            Err(e) => self.warn(format!("settings patch rejected: {e}")),
         }
     }
 
@@ -1518,11 +1570,11 @@ impl App {
         if self.busy {
             let max = self.settings().layout.queue_max;
             if max == 0 {
-                self.push(Block::Notice("busy; wait or press Esc to cancel".into()));
+                self.note("busy; wait or press Esc to cancel");
             } else if self.queue.len() >= max {
-                self.push(Block::Notice(format!(
+                self.note(format!(
                     "queue full ({max}); Up edits the last queued message"
-                )));
+                ));
             } else {
                 self.queue.push_back((text, images));
             }
@@ -1544,9 +1596,9 @@ impl App {
     fn paste_image(&mut self) {
         let model = self.settings().model.id.clone();
         if !self.modalities.is_empty() && !self.modalities.has("image") {
-            self.push(Block::Notice(format!(
+            self.note(format!(
                 "{model} doesn't accept images as input (see /model)"
-            )));
+            ));
             return;
         }
         let cmd = self.settings().layout.image_paste_cmd.clone();
@@ -1555,7 +1607,7 @@ impl App {
                 let url = ah_core::clipboard::data_url(&bytes);
                 self.editor.insert_image(url, bytes.len());
             }
-            Err(e) => self.push(Block::Notice(e.to_string())),
+            Err(e) => self.note(e.to_string()),
         }
     }
 
@@ -1570,7 +1622,7 @@ impl App {
             })
             .collect();
         match ids.len() {
-            0 => self.push(Block::Notice("no pictures in this conversation".into())),
+            0 => self.note("no pictures in this conversation"),
             1 => self.open_image_by_id(ids[0]),
             _ => self.open_images_picker(),
         }
@@ -1581,7 +1633,7 @@ impl App {
             return;
         };
         if !path.is_file() {
-            self.push(Block::Error(format!("{} is gone", path.display())));
+            self.warn(format!("{} is gone", path.display()));
             return;
         }
         let custom = self.settings().images.open_cmd.clone();
@@ -1596,13 +1648,13 @@ impl App {
                     .stderr(std::process::Stdio::null())
                     .spawn();
                 match r {
-                    Ok(_) => self.push(Block::Notice(format!("opened {shown}"))),
-                    Err(e) => self.push(Block::Error(format!("open failed: {e} · {shown}"))),
+                    Ok(_) => self.note(format!("opened {shown}")),
+                    Err(e) => self.warn(format!("open failed: {e} · {shown}")),
                 }
             }
-            None => self.push(Block::Notice(format!(
+            None => self.note(format!(
                 "{shown} · set images.open_cmd to open it from here"
-            ))),
+            )),
         }
     }
 
@@ -1632,7 +1684,7 @@ impl App {
             })
             .collect();
         if rows.is_empty() {
-            self.push(Block::Notice("no pictures in this conversation".into()));
+            self.note("no pictures in this conversation");
             return;
         }
         let mut p = Picker::new(Kind::Images, "pictures", "", rows);
@@ -1677,6 +1729,12 @@ impl App {
             // the frame is not throttled to the stream rate and the loop goes
             // back to waiting on the channel instead of animating.
             let running = self.busy && self.ask.is_none();
+            // A notice whose time is up leaves a frame behind it.
+            let now = Instant::now();
+            if self.notices.expire(now) {
+                self.dirty = true;
+            }
+            let notice_wake = self.notices.wake_in(now);
             let voice_wake = self.voice.as_ref().and_then(|v| v.wake_in());
             // iTerm2 waits for the scroll to settle before the payload goes
             // again; this is the frame that puts the picture back.
@@ -1707,6 +1765,7 @@ impl App {
                 || self.dirty
                 || self.job_view.is_some()
                 || voice_wake.is_some()
+                || notice_wake.is_some()
                 || img_wake.is_some()
             {
                 let mut wait = if self.dirty {
@@ -1720,6 +1779,9 @@ impl App {
                 };
                 if let Some(v) = voice_wake {
                     wait = wait.min(v);
+                }
+                if let Some(v) = notice_wake {
+                    wait = wait.min(v.max(Duration::from_millis(10)));
                 }
                 if let Some(v) = img_wake {
                     wait = wait.min(v.max(Duration::from_millis(10)));
@@ -1817,6 +1879,10 @@ impl App {
                         "remote: handed the pairing to another window".to_string()
                     }
                 };
+                // This one stays in the conversation. A phone driving the
+                // session is meant to show its working to whoever is at the
+                // desk, and a line that fades after four seconds is not a
+                // record of anything.
                 self.push(Block::Notice(line));
                 self.dirty = true;
             }
@@ -2542,9 +2608,7 @@ impl App {
     fn run_skill(&mut self, name: &str, args: &str, ask: bool) {
         let skills = ah_core::skills::load(std::path::Path::new(&self.cwd));
         let Some(s) = ah_core::skills::find(&skills, name) else {
-            self.push(Block::Notice(format!(
-                "no skill named {name:?} (try /skills)"
-            )));
+            self.note(format!("no skill named {name:?} (try /skills)"));
             return;
         };
         if ask && s.takes_args() && args.trim().is_empty() {
@@ -2678,19 +2742,17 @@ impl App {
                         // straight to the file and is never echoed back.
                         let key = query;
                         if key.is_empty() {
-                            self.push(Block::Notice("no key given; dictation not armed".into()));
+                            self.note("no key given; dictation not armed");
                         } else {
                             match ah_core::auth::save_deepgram_key(&key) {
                                 Ok(()) => {
-                                    self.push(Block::Notice(format!(
+                                    self.note(format!(
                                         "Deepgram key saved to {}",
                                         ah_core::paths::credentials_file().display()
-                                    )));
+                                    ));
                                     self.arm_voice(None);
                                 }
-                                Err(e) => {
-                                    self.push(Block::Error(format!("could not save the key: {e}")))
-                                }
+                                Err(e) => self.warn(format!("could not save the key: {e}")),
                             }
                         }
                     }
@@ -2772,7 +2834,7 @@ impl App {
         let keep = |o: &Origin| !matches!(o, Origin::PluginPreview(_));
         match self.stack.retain(keep) {
             Ok(()) => self.refresh_from_settings(&[]),
-            Err(e) => self.push(Block::Error(format!("settings: {e}"))),
+            Err(e) => self.warn(format!("settings: {e}")),
         }
     }
 
@@ -2821,7 +2883,7 @@ impl App {
             })
             .collect();
         if rows.is_empty() {
-            self.push(Block::Notice(format!("/{command}: nothing to pick")));
+            self.note(format!("/{command}: nothing to pick"));
             return;
         }
         let title = if spec.title.is_empty() {
@@ -2866,7 +2928,7 @@ impl App {
                 if let Some(p) = out.settings_patch
                     && let Err(e) = self.stack.push(Origin::Plugin(name.to_string()), p)
                 {
-                    self.push(Block::Error(format!("settings patch rejected: {e}")));
+                    self.warn(format!("settings patch rejected: {e}"));
                 }
                 // The final patch is in place: the previews can go without a flicker.
                 self.drop_previews();
@@ -3023,33 +3085,29 @@ impl App {
             Some(e) => format!(" ({e})"),
             None => String::new(),
         };
-        // repeated switches (Shift-Tab) update one line instead of stacking
-        if matches!(self.entries.last().map(|e| &e.block), Some(Block::Notice(t)) if t.starts_with("model → "))
-        {
-            self.entries.pop();
-        }
-        self.push(Block::Notice(format!("model → {id}{effort}{favorite}")));
+        // Repeated switches (Shift-Tab) update one notice instead of stacking.
+        self.note_as("model", format!("model → {id}{effort}{favorite}"));
         self.request_status();
     }
 
     fn set_effort(&mut self, level: &str) {
         if !picker::EFFORTS.iter().any(|(n, _)| *n == level) {
-            self.push(Block::Error(format!(
+            self.warn(format!(
                 "unknown effort `{level}` (off, minimal, low, medium, high, xhigh)"
-            )));
+            ));
             return;
         }
         let id = self.settings().model.id.clone();
         if level != "off" && !self.model_reasons(&id) {
-            self.push(Block::Notice(format!(
+            self.note(format!(
                 "{id} is not listed as a reasoning model; sending effort anyway"
-            )));
+            ));
         }
         self.apply_patch(
             Origin::Runtime(Runtime::Slash),
             serde_json::json!({"model": {"reasoning": Self::effort_patch(level)}}),
         );
-        self.push(Block::Notice(format!("reasoning effort → {level}")));
+        self.note_as("effort", format!("reasoning effort → {level}"));
         self.request_status();
     }
 
@@ -3070,7 +3128,7 @@ impl App {
     fn cycle_model(&mut self) {
         let favorites = &self.settings().model.favorites;
         if favorites.is_empty() {
-            self.push(Block::Notice("no favorites yet: /favorite adds one".into()));
+            self.note("no favorites yet: /favorite adds one");
             return;
         }
         let next = self
@@ -3100,7 +3158,7 @@ impl App {
         let mut file = self.load_favorites_file();
         file.insert(name.to_string(), fav.clone());
         if let Err(e) = ah_core::settings::save_favorites(&file) {
-            self.push(Block::Error(format!("could not save favorites: {e}")));
+            self.warn(format!("could not save favorites: {e}"));
         }
         self.apply_patch(
             Origin::Runtime(Runtime::Slash),
@@ -3120,37 +3178,37 @@ impl App {
         file.remove(old);
         file.insert(new.to_string(), fav.clone());
         if let Err(e) = ah_core::settings::save_favorites(&file) {
-            self.push(Block::Error(format!("could not save favorites: {e}")));
+            self.warn(format!("could not save favorites: {e}"));
         }
         self.apply_patch(
             Origin::Runtime(Runtime::Slash),
             serde_json::json!({"model": {"favorites": {old: null, new: fav}}}),
         );
-        self.push(Block::Notice(format!("★ {old} → ★ {new}")));
+        self.note(format!("★ {old} → ★ {new}"));
         self.request_status();
     }
 
     fn unfavorite(&mut self, name: &str) {
         let name = name.trim();
         if name.is_empty() || !self.settings().model.favorites.contains_key(name) {
-            self.push(Block::Notice(format!("no favorite named `{name}`")));
+            self.note(format!("no favorite named `{name}`"));
             return;
         }
         let mut file = self.load_favorites_file();
         if file.remove(name).is_some() {
             if let Err(e) = ah_core::settings::save_favorites(&file) {
-                self.push(Block::Error(format!("could not save favorites: {e}")));
+                self.warn(format!("could not save favorites: {e}"));
             }
         } else {
-            self.push(Block::Notice(format!(
+            self.note(format!(
                 "{name} comes from a config file; removed for this session only"
-            )));
+            ));
         }
         self.apply_patch(
             Origin::Runtime(Runtime::Slash),
             serde_json::json!({"model": {"favorites": {name: null}}}),
         );
-        self.push(Block::Notice(format!("removed ★ {name}")));
+        self.note(format!("removed ★ {name}"));
         self.request_status();
     }
 
@@ -3210,7 +3268,7 @@ impl App {
 
     fn resume(&mut self, id: &str) {
         if self.busy {
-            self.push(Block::Notice("busy; wait or press Esc to cancel".into()));
+            self.note("busy; wait or press Esc to cancel");
             return;
         }
         let _ = self.tx.send(EngineCmd::Resume(id.to_string()));
@@ -3242,12 +3300,12 @@ impl App {
                 self.plugin_commands = commands;
                 for r in &reports {
                     if !r.ok && r.message != "disabled" {
-                        self.push(Block::Error(format!("plugin {}: {}", r.name, r.message)));
+                        self.warn(format!("plugin {}: {}", r.name, r.message));
                     }
                 }
                 // Out with whatever the cache guessed; these are the real ones.
                 if let Err(e) = self.stack.retain(|o| !matches!(o, Origin::Plugin(_))) {
-                    self.push(Block::Error(format!("settings: {e}")));
+                    self.warn(format!("settings: {e}"));
                 }
                 let mut failed = None;
                 for (name, p) in patches {
@@ -3256,7 +3314,7 @@ impl App {
                     }
                 }
                 if let Some(f) = failed {
-                    self.push(Block::Error(f));
+                    self.warn(f);
                 }
                 // Said after the plugins are on the stack rather than at
                 // startup, because a plugin is one of the things that can be
@@ -3274,27 +3332,26 @@ impl App {
                     self.dirty = true;
                 }
                 if !first {
-                    self.push(Block::Notice(format!(
+                    self.note(format!(
                         "reloaded: {} plugin{} active",
                         self.plugin_count,
                         if self.plugin_count == 1 { "" } else { "s" }
-                    )));
+                    ));
                 }
                 self.request_status();
             }
             UiEvent::KeyState(ok) => {
                 if !ok && !self.key_warned {
                     self.key_warned = true;
-                    self.push(Block::Error(
-                        "no API key. Run `ah login` (or set OPENROUTER_API_KEY), then /reload."
-                            .into(),
-                    ));
+                    self.warn(
+                        "no API key. Run `ah login` (or set OPENROUTER_API_KEY), then /reload.",
+                    );
                 }
             }
             UiEvent::PluginLogs(logs) => {
                 for (p, lvl, m) in logs {
                     if lvl <= LogLevel::Warn {
-                        self.push(Block::Notice(format!("[{p}] {m}")));
+                        self.note(format!("[{p}] {m}"));
                     }
                 }
             }
@@ -3352,11 +3409,12 @@ impl App {
                     Some(n) => format!("session named \u{201c}{n}\u{201d}"),
                     None => "session name removed".into(),
                 };
-                self.push(Block::Notice(s));
+                self.note(s);
             }
             UiEvent::Resumed { id, name, messages } => {
                 self.images_forget();
                 self.entries.clear();
+                self.notices.clear();
                 self.usage = Usage::default();
                 self.stats = Stats::default();
                 self.context_tokens = 0;
@@ -3497,12 +3555,9 @@ impl App {
                 self.dirty = true;
             }
             AgentEvent::ToolDenied { call, reason } => {
-                self.push(Block::Error(format!(
-                    "{} denied: {reason}",
-                    call.function.name
-                )));
+                self.warn(format!("{} denied: {reason}", call.function.name));
             }
-            AgentEvent::Notice(n) => self.push(Block::Notice(n)),
+            AgentEvent::Notice(n) => self.note(n),
             AgentEvent::SettingsPatch { plugin, patch } => {
                 self.apply_patch(Origin::Plugin(plugin), patch);
                 self.report_refusals();
@@ -3511,16 +3566,14 @@ impl App {
                 attempt,
                 wait_ms,
                 error,
-            } => self.push(Block::Notice(format!(
-                "retry {attempt} in {wait_ms} ms: {error}"
-            ))),
+            } => self.note(format!("retry {attempt} in {wait_ms} ms: {error}")),
             AgentEvent::Error(e) => {
                 self.stats.request_end();
-                self.push(Block::Error(e));
+                self.warn(e);
             }
             AgentEvent::Compacting { auto } => {
                 if auto {
-                    self.push(Block::Notice("context full; compacting".into()));
+                    self.note("context full; compacting");
                 }
                 self.follow = true;
                 self.set_state(State::Compacting);
@@ -3551,7 +3604,7 @@ impl App {
             AgentEvent::TurnEnd(s) => {
                 self.stats.request_end();
                 if s.cancelled {
-                    self.push(Block::Notice("cancelled".into()));
+                    self.note("cancelled");
                 }
                 self.set_state(State::Idle);
             }
@@ -3669,7 +3722,7 @@ impl App {
         let table = ah_core::jobs::table();
         table.caught_up();
         for n in table.notices(ah_core::jobs::Audience::Ui(0)) {
-            self.push(Block::Notice(n));
+            self.note(n);
         }
         // A job that ended while nothing was running gets the model's
         // attention now, instead of waiting for the user's next message.
@@ -3739,10 +3792,9 @@ impl App {
     fn open_jobs_picker(&mut self) {
         let all = ah_core::jobs::table().all();
         if all.is_empty() {
-            self.push(Block::Notice(
-                "no background jobs · a long command becomes one when it outruns its timeout"
-                    .into(),
-            ));
+            self.note(
+                "no background jobs · a long command becomes one when it outruns its timeout",
+            );
             return;
         }
         let rows = jobs::rows(&all, &self.pal);
@@ -3866,7 +3918,7 @@ impl App {
     /// acknowledgement goes into its view, not into the conversation.
     fn say_to_agent(&mut self, id: u32, text: String) {
         let Some(child) = ah_core::agents::table().get(id).filter(|c| c.running()) else {
-            self.push(Block::Notice(format!("agent {id} has finished")));
+            self.note(format!("agent {id} has finished"));
             self.watching = None;
             return;
         };
@@ -3904,15 +3956,13 @@ impl App {
         let grace = self.settings().tools.job_kill_grace_ms;
         if let Some(job) = ah_core::jobs::table().get(id) {
             job.kill(Duration::from_millis(grace));
-            self.push(Block::Notice(format!("stopping job {id}")));
+            self.note(format!("stopping job {id}"));
         }
     }
 
     fn open_plan_view(&mut self) {
         if ah_core::plan::store().is_empty() {
-            self.push(Block::Notice(
-                "no plan yet; the model writes one with the plan tool".into(),
-            ));
+            self.note("no plan yet; the model writes one with the plan tool");
             return;
         }
         self.plan_view = Some(plan::View::default());
@@ -4028,10 +4078,10 @@ impl App {
         }
         self.voice_act(act);
         if let Some(e) = self.voice.as_ref().and_then(|v| v.mic_trouble()) {
-            self.push(Block::Error(format!("microphone: {e}")));
+            self.warn(format!("microphone: {e}"));
         }
         if let Some(n) = self.voice.as_mut().and_then(|v| v.note.take()) {
-            self.push(Block::Notice(n));
+            self.note(n);
         }
         let text = self.editor.text.clone();
         if let Some(v) = self.voice.as_mut() {
@@ -4085,7 +4135,7 @@ impl App {
             voice::Event::Live(e) => v.live_event(e),
         }
         if let Some(n) = self.voice.as_mut().and_then(|v| v.note.take()) {
-            self.push(Block::Notice(n));
+            self.note(n);
         }
         self.voice_settle();
         self.dirty = true;
@@ -4160,7 +4210,7 @@ impl App {
                 found(&self.catalogue)
             }
             Err(e) => {
-                self.push(Block::Error(format!("model list: {e}")));
+                self.warn(format!("model list: {e}"));
                 None
             }
         }
@@ -4179,7 +4229,7 @@ impl App {
     /// rather than for everything `/set` can reach.
     fn remember(&mut self, patch: serde_json::Value) {
         if let Err(e) = ah_core::settings::save_state(&patch) {
-            self.push(Block::Error(format!("could not save that choice: {e}")));
+            self.warn(format!("could not save that choice: {e}"));
         }
         self.apply_patch(Origin::Runtime(Runtime::Slash), patch);
     }
@@ -4236,9 +4286,7 @@ impl App {
     fn arm_voice_inner(&mut self, model: Option<String>, may_block: bool) {
         let cfg = self.settings().voice.clone();
         if !cfg.enabled {
-            self.push(Block::Notice(
-                "dictation is off; set voice.enabled = true to use it".into(),
-            ));
+            self.note("dictation is off; set voice.enabled = true to use it");
             return;
         }
         // Who listens is the first thing to settle, and it is asked once.
@@ -4263,9 +4311,7 @@ impl App {
             return;
         }
         let Some(key) = ah_core::auth::api_key(self.settings().model.api_key.as_deref()) else {
-            self.push(Block::Error(
-                "no API key: run `ah login` before dictating".into(),
-            ));
+            self.warn("no API key: run `ah login` before dictating");
             return;
         };
         let provider = std::sync::Arc::new(ah_core::provider::openrouter::OpenRouter::new(
@@ -4278,24 +4324,24 @@ impl App {
         // is worth one lookup before the microphone opens.
         let Some(info) = self.model_info(&model, may_block) else {
             if may_block {
-                self.push(Block::Error(format!(
+                self.warn(format!(
                     "{model} is not in the model catalogue; Ctrl-R in /voice model refreshes it"
-                )));
+                ));
             }
             return;
         };
         let stt = info.transcribes();
         if !stt && !info.accepts("audio") {
-            self.push(Block::Error(format!(
+            self.warn(format!(
                 "{model} does not take audio; /voice model lists the ones that do"
-            )));
+            ));
             return;
         }
         if stt && !cfg.prompt_append.trim().is_empty() {
-            self.push(Block::Notice(format!(
+            self.note(format!(
                 "{model} transcribes on its own endpoint, which takes no prompt: \
                  voice.prompt_append is ignored while it is the voice model"
-            )));
+            ));
         }
         self.start_voice(&cfg, model, stt, Some(provider), may_block);
     }
@@ -4358,7 +4404,7 @@ impl App {
                 // not something to discover by surprise.
                 // The microphone is not opened until the key goes down, so
                 // there is nothing to name as the recorder yet.
-                self.push(Block::Notice(if asked_for {
+                self.note(if asked_for {
                     format!(
                         "dictation on: hold {} and speak. {who}. \
                          Nothing is sent until you press Enter.",
@@ -4369,9 +4415,9 @@ impl App {
                         "dictation is on, as you left it: hold {} to speak, /voice turns it off.",
                         self.talk_key_name()
                     )
-                }));
+                });
             }
-            Err(e) => self.push(Block::Error(format!("dictation: {e}"))),
+            Err(e) => self.warn(format!("dictation: {e}")),
         }
         self.dirty = true;
     }
@@ -4382,7 +4428,7 @@ impl App {
             return;
         };
         v.discard();
-        self.push(Block::Notice(if v.requests == 0 {
+        self.note(if v.requests == 0 {
             "dictation off".into()
         } else {
             format!(
@@ -4391,7 +4437,7 @@ impl App {
                 if v.requests == 1 { "" } else { "s" },
                 v.cost
             )
-        }));
+        });
         self.dirty = true;
     }
 
@@ -4547,7 +4593,7 @@ impl App {
                 if let Some(v) = self.voice.as_mut() {
                     v.discard();
                 }
-                self.push(Block::Notice("dictation dropped".into()));
+                self.note("dictation dropped");
             } else if !self.editor.is_empty() {
                 self.editor.clear();
             } else if self.switch.is_some() {
@@ -4775,9 +4821,7 @@ impl App {
                     .map(|(w, i)| (w, i.trim()))
                     .unwrap_or((rest, ""));
                 if word != "model" {
-                    self.push(Block::Notice(
-                        "usage: /voice [on|off|model [id]|devices]".into(),
-                    ));
+                    self.note("usage: /voice [on|off|model [id]|devices]");
                     return;
                 }
                 if id.is_empty() {
@@ -4820,7 +4864,7 @@ impl App {
             "scroll_bottom" => self.follow = true,
             "page_up" => self.handle_key(synth(KeyCode::PageUp, KeyModifiers::NONE)),
             "page_down" => self.handle_key(synth(KeyCode::PageDown, KeyModifiers::NONE)),
-            other => self.push(Block::Notice(format!("unknown action `{other}`"))),
+            other => self.note(format!("unknown action `{other}`")),
         }
     }
 
@@ -4923,7 +4967,7 @@ impl App {
             }
             "compact" => {
                 if self.busy {
-                    self.push(Block::Notice("busy; wait or press Esc to cancel".into()));
+                    self.note("busy; wait or press Esc to cancel");
                 } else {
                     // Echo it like any other message, so the transcript says
                     // what was asked for and the working line has a reason.
@@ -4942,13 +4986,14 @@ impl App {
             "clear" => {
                 self.images_forget();
                 self.entries.clear();
+                self.notices.clear();
                 self.task.clear();
                 self.set_title();
                 self.usage = Usage::default();
                 self.stats = Stats::default();
                 self.context_tokens = 0;
                 let _ = self.tx.send(EngineCmd::Clear);
-                self.push(Block::Notice("conversation cleared".into()));
+                self.note("conversation cleared");
             }
             "reload" => match app::load_settings(&self.overrides) {
                 Ok(stack) => {
@@ -4956,7 +5001,7 @@ impl App {
                     self.refresh_from_settings(&[]);
                     let _ = self.tx.send(EngineCmd::Reload);
                 }
-                Err(e) => self.push(Block::Error(format!("reload failed: {e}"))),
+                Err(e) => self.warn(format!("reload failed: {e}")),
             },
             "plugins" => {
                 let n = self.plugin_count;
@@ -5013,9 +5058,9 @@ impl App {
                 match app::set_to_patch(&spec) {
                     Ok(p) => {
                         self.apply_patch(Origin::Runtime(Runtime::Slash), p);
-                        self.push(Block::Notice(format!("set {spec}")));
+                        self.note(format!("set {spec}"));
                     }
-                    Err(e) => self.push(Block::Error(e.to_string())),
+                    Err(e) => self.warn(e.to_string()),
                 }
             }
             "yolo" => {
@@ -5023,14 +5068,14 @@ impl App {
                     Origin::Runtime(Runtime::Slash),
                     serde_json::json!({"permissions": {"mode": "auto"}}),
                 );
-                self.push(Block::Notice("permissions: auto".into()));
+                self.note("permissions: auto");
             }
             "ask" => {
                 self.apply_patch(
                     Origin::Runtime(Runtime::Slash),
                     serde_json::json!({"permissions": {"mode": "ask"}}),
                 );
-                self.push(Block::Notice("permissions: ask".into()));
+                self.note("permissions: ask");
             }
             "reasoning" => {
                 let v = !self.view.show_reasoning;
@@ -5062,9 +5107,7 @@ impl App {
                         stage: SlashStage::Run,
                     });
                 } else {
-                    self.push(Block::Notice(format!(
-                        "unknown command /{other} (try /help)"
-                    )));
+                    self.note(format!("unknown command /{other} (try /help)"));
                 }
             }
         }
@@ -5139,6 +5182,10 @@ impl App {
             )
         });
         let dock_rows: u16 = dock_line.is_some() as u16;
+        // Passing notices sit right on top of the input box, flush right,
+        // where the eye already is when something has just been typed.
+        let notice_lines = self.notices.lines(area.width, &pal);
+        let notice_rows = notice_lines.len() as u16;
         // What else is running, under the status bar. Nothing running, no strip.
         let switch_rows_v = switch::rows();
         // One blank row above it, so the strip is not read as part of the
@@ -5154,6 +5201,7 @@ impl App {
             queue_area,
             _gap_area,
             dock_area,
+            notice_area,
             input_area,
             status_area,
             switch_area,
@@ -5163,6 +5211,7 @@ impl App {
             Constraint::Length(queue_rows),
             Constraint::Length(1),
             Constraint::Length(dock_rows),
+            Constraint::Length(notice_rows),
             Constraint::Length(input_rows + border),
             Constraint::Length(status_rows),
             Constraint::Length(switch_rows),
@@ -5171,6 +5220,7 @@ impl App {
         if let Some(line) = dock_line {
             f.render_widget(Paragraph::new(line), dock_area);
         }
+        notice::draw(f, notice_area, notice_lines);
         if switch_rows > 0 {
             let active = match self.watching {
                 Some(id) => switch::Target::Agent(id),
@@ -5349,7 +5399,7 @@ impl App {
                 } else {
                     copy_to_clipboard(&text);
                     let n = text.chars().count();
-                    self.push(Block::Notice(format!("copied {n} chars")));
+                    self.note(format!("copied {n} chars"));
                 }
             }
         }

@@ -164,6 +164,8 @@ theme Claude Code uses, so both look the same in the same terminal.
 | `markdown` | `true` | render assistant text as markdown |
 | `code_highlight` | `true` | highlight fenced code |
 | `show_plan` | `true` | plan summary on the row above the input while tasks are open |
+| `notice_ms` | `4000` | how long a passing notice — copied text, a model switch, a plugin grumbling — sits above the input box; `0` puts them back in the conversation |
+| `notice_error_ms` | `10000` | the same for errors, which stay longer |
 | `window_title` | `"{task} · ah"` | terminal window title; `{task}`, `{cwd}`, `{model}`, `{session}`; empty leaves the title alone |
 
 ## [keys]
